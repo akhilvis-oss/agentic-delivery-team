@@ -1,0 +1,56 @@
+{
+  "_comment": "Example review-gate config. Copy to .github/review-gate.json in your project and edit. A changed file takes the highest category whose patterns match (fnmatch; * also matches /); unmatched files take the default, which must not be light. Keep the gate, this file, CI, dependency locks, credential code and agent rules control-critical so a PR cannot loosen its own review.",
+  "repo_url": "https://github.com/OWNER/REPO",
+  "allowed_bases": ["main", "develop"],
+  "requirement_ids": {
+    "pattern": "REQ-\\d{3}",
+    "allowed": null
+  },
+  "scope_acknowledgements": 3,
+  "domain_evidence": {
+    "section": "Numeric verification",
+    "labels": ["Hand-worked", "Point-in-time", "Missing data"]
+  },
+  "tiers": {
+    "order": ["light", "standard", "domain-critical", "control-critical"],
+    "default": "standard",
+    "rules": [
+      {
+        "tier": "control-critical",
+        "reason": "External effects, credentials, dependencies, agent rules and the review gate itself",
+        "patterns": [
+          ".github/*",
+          "scripts/review_gate.py",
+          "tests/test_review_gate.py",
+          "tests/conftest.py",
+          "AGENTS.md",
+          "*.lock",
+          "*requirements*.txt",
+          "package.json",
+          "*.env*",
+          "*secret*",
+          "*credential*",
+          "*auth*",
+          "*deploy*"
+        ]
+      },
+      {
+        "tier": "domain-critical",
+        "reason": "Logic whose correctness users rely on (replace with your project's core calculations)",
+        "patterns": [
+          "src/pricing/*",
+          "tests/test_pricing*"
+        ]
+      },
+      {
+        "tier": "light",
+        "reason": "Documentation and tests not covering domain or control code",
+        "patterns": [
+          "docs/*",
+          "*.md",
+          "tests/*"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "_comment": "This repository's own review-gate config, and a worked example for adopters. A changed file takes the highest category whose patterns match (fnmatch; * also matches /). Unmatched files take the default. Editing this file is control-critical.",
+  "repo_url": "https://github.com/akhilvis-oss/agentic-delivery-team",
+  "allowed_bases": [
+    "main"
+  ],
+  "requirement_ids": null,
+  "scope_acknowledgements": 3,
+  "domain_evidence": {
+    "section": "Failure-mode verification",
+    "labels": [
+      "Failure cases",
+      "Recovery",
+      "Concurrency"
+    ]
+  },
+  "tiers": {
+    "order": [
+      "light",
+      "standard",
+      "domain-critical",
+      "control-critical"
+    ],
+    "default": "standard",
+    "rules": [
+      {
+        "tier": "control-critical",
+        "reason": "The gate, its rules, CI, templates adopters copy, licence and agent rules",
+        "patterns": [
+          ".github/*",
+          "gate/*",
+          "scripts/check_private_content.py",
+          "tests/test_review_gate.py",
+          "tests/test_private_content.py",
+          "tests/conftest.py",
+          "templates/*",
+          "requirements-dev.txt",
+          "LICENSE",
+          "AGENTS.md",
+          "*.env*",
+          "*secret*",
+          "*credential*"
+        ]
+      },
+      {
+        "tier": "domain-critical",
+        "reason": "Dispatch, recovery and digest logic whose correctness others will rely on",
+        "patterns": [
+          "runner/*",
+          "digest/*",
+          "tests/test_runner*",
+          "tests/test_digest*"
+        ]
+      },
+      {
+        "tier": "light",
+        "reason": "Documentation and tests not covering control or domain code",
+        "patterns": [
+          "docs/*",
+          "*.md",
+          "tests/*"
+        ]
+      }
+    ]
+  }
+}

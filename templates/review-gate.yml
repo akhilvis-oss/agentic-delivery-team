@@ -1,0 +1,68 @@
+# Review gate workflow for adopting projects.
+# Copy to .github/workflows/review-gate.yml, copy gate/review_gate.py to
+# scripts/review_gate.py and templates/review-gate.example.json to
+# .github/review-gate.json, then edit the config for your project.
+# After the first merge, make the "review-gate" check required on protected branches.
+name: Review gate
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read # list changed files; no write access
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the base branch's gate and config (trusted copy)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .gate-base
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/review_gate.py
+            .github/review-gate.json
+          sparse-checkout-cone-mode: false
+      - name: Check out this PR's gate (bootstrap only)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: .gate-pr
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/review_gate.py
+            .github/review-gate.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: List changed files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: >
+          gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files"
+          --jq '.[] | .filename, (.previous_filename // empty)'
+          > "$RUNNER_TEMP/changed_files.txt"
+      - name: Review gate
+        # The base branch's gate judges the PR so a PR cannot loosen its own rules.
+        run: |
+          if [ -f .gate-base/scripts/review_gate.py ] && [ -f .gate-base/.github/review-gate.json ]; then
+            root=.gate-base
+          else
+            echo "::warning::Base branch has no review gate yet; using this PR's gate (bootstrap)."
+            root=.gate-pr
+          fi
+          python "$root/scripts/review_gate.py" "$GITHUB_EVENT_PATH" \
+            --config "$root/.github/review-gate.json" \
+            --changed-files "$RUNNER_TEMP/changed_files.txt"
