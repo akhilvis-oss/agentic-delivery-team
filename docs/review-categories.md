@@ -47,6 +47,7 @@ python gate/review_gate.py event.json --config .github/review-gate.json --change
 
 - **The gate checks structure only.** It does not verify that evidence is true, that tests are sufficient, that criteria match the original issue, or that a review is authentic.
 - **Merge authority stays with the owner,** ideally enforced by branch protection that requires the gate's check and a review.
+- **Blocking merges needs rulesets or branch protection.** The gate always runs and reports pass or fail, but GitHub only *blocks* a failing PR when the `review-gate` check is required by a ruleset or branch protection rule. Rulesets are available for public repositories on GitHub Free, and for public and private repositories on GitHub Pro, Team and Enterprise Cloud ([GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)). On a **private repository on GitHub Free**, the gate is advisory: it works only if whoever merges never merges a PR whose `review-gate` check failed.
 - **Snapshots are point-in-time evidence.** A subsequent push or description edit needs a new run; there is no atomic lock across GitHub API calls and merge. Branch protection and owner review remain necessary.
 - **Path rules are heuristic.** Add new sensitive files to the config when they're created; a Checker or the owner can always raise a PR's category.
 
