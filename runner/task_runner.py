@@ -322,19 +322,31 @@ def dirty_paths(config):
 
 def fingerprint(config):
     h = hashlib.sha256()
+
+    def frame(value):
+        data = value.encode() if isinstance(value, str) else value
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
+
     for args in [("rev-parse", "HEAD"), ("branch", "--show-current"),
                  ("diff", "HEAD", "--binary"), ("diff", "--cached", "--binary")]:
-        h.update(git(config, *args).encode())
+        frame(json.dumps(args))
+        frame(git(config, *args))
+    # Frame name, type and content independently: concatenation is ambiguous.
     # Include ignored files too: the reviewer must not mutate an ignored artifact.
     for name in sorted(filter(None, git(config, "ls-files", "--others", "-z").split("\0"))):
-        h.update(name.encode())
+        frame(name)
         path = Path(config["worktree"]) / name
         if path.is_symlink():
-            h.update(os.readlink(path).encode())
+            frame("symlink")
+            frame(os.readlink(path))
         else:
+            frame("file")
+            content = hashlib.sha256()
             with path.open("rb") as handle:
                 for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    h.update(block)
+                    content.update(block)
+            frame(content.digest())
     return h.hexdigest()
 
 
@@ -480,7 +492,8 @@ def execute(config, state, job_path, job, role):
     finally:
         if proc is not None:
             stop_group(proc)
-        if owned_stop:
+        if owned_stop and role == "worker":
+            # Killing a reviewer proves nothing about an independently busy worker.
             job["owned_stop_at"] = now()
         job.pop("child_pid", None)
 
@@ -579,6 +592,12 @@ def ensure_reviewable(config, job):
         raise RuntimeError("Uncommitted files outside allowed coordination files")
 
 
+def check_dispatch_head(config, expected):
+    if (git(config, "branch", "--show-current") != config["branch"]
+            or git(config, "rev-parse", "HEAD") != expected):
+        raise Blocked("Branch or HEAD changed before phase dispatch")
+
+
 def run_once(config, state=None, client=None):
     state = private_dir(state or config["state_dir"])
     private_dir(state / "tasks")
@@ -637,10 +656,11 @@ def run_once(config, state=None, client=None):
             for attempt in range(1, config.get("max_rounds", 2) + 1):
                 job["round"] = attempt
                 if assignment["kind"] == "work":
+                    before_head = job["base_commit"] if attempt == 1 else job["head_commit"]
                     check_cli(config)
                     if active_threads(config):
                         raise Blocked("Worktree became busy before worker phase")
-                    before_head = git(config, "rev-parse", "HEAD")
+                    check_dispatch_head(config, before_head)
                     job["worker"] = execute(config, state, path, job, "worker")
                     validate_result(job["worker"], "worker")
                     if job["worker"]["status"] == "blocked":
@@ -653,7 +673,10 @@ def run_once(config, state=None, client=None):
                 check_cli(config)
                 if active_threads(config):
                     raise Blocked("Worktree became busy before reviewer phase")
+                check_dispatch_head(config, job["head_commit"])
+                ensure_reviewable(config, job)
                 before = fingerprint(config)
+                check_dispatch_head(config, job["head_commit"])
                 try:
                     job["review"] = execute(config, state, path, job, "reviewer")
                 finally:

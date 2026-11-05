@@ -758,3 +758,66 @@ print(json.dumps(dict(type='turn.completed')))
     next_path = runner.enqueue(cfg, "next", "next bounded task")
     runner.run_once(cfg)
     assert runner.read(next_path)["status"] == "ready_for_integration"
+
+
+def test_fingerprint_frames_names_and_file_types(setup):
+    cfg, _, _, _ = setup
+    root = Path(cfg["worktree"])
+    (root / "a").write_text("bc")
+    before = runner.fingerprint(cfg)
+    (root / "a").unlink()
+    (root / "ab").write_text("c")
+    assert runner.fingerprint(cfg) != before
+    (root / "ab").unlink()
+    (root / "a").write_text("target")
+    before = runner.fingerprint(cfg)
+    (root / "a").unlink()
+    (root / "a").symlink_to("target")
+    assert runner.fingerprint(cfg) != before
+
+
+@pytest.mark.parametrize("probe", [2, 3, 4])
+@pytest.mark.parametrize("change", ["head", "branch"])
+def test_phase_probes_cannot_change_bound_head_or_branch(setup, monkeypatch, probe, change):
+    cfg, _, path, _ = setup
+    probes, calls = [], []
+
+    def check(config):
+        probes.append(True)
+        if len(probes) == probe:
+            if change == "head":
+                commit(config)
+            else:
+                runner.git(config, "checkout", "-qb", "unexpected")
+        return runner.CLI_MIN
+
+    def execute(config, state, path, job, role):
+        calls.append(role)
+        if role == "worker":
+            commit(config)
+            return result("ready_for_review")
+        return result("needs_changes", role)
+
+    monkeypatch.setattr(runner, "check_cli", check)
+    monkeypatch.setattr(runner, "execute", execute)
+    runner.run_once(cfg)
+    final = runner.read(path)
+    assert final["status"] == "blocked"
+    assert calls == ([] if probe == 2 else ["worker"] if probe == 3 else ["worker", "reviewer"])
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_reviewer_stop_never_clears_worker_busy_evidence(setup, cancel):
+    cfg, state, path, job = setup
+    rollout(cfg, timestamp=runner.now())
+    job.update(round=1, worker_thread_id="fixture-thread", head_commit=job["base_commit"])
+    cfg["codex_bin"] = fake_agent(state, "import sys,time\nsys.stdin.read()\ntime.sleep(60)\n")
+    cfg["phase_timeout_seconds"] = 0.05
+    if cancel:
+        (state / "CANCEL").touch()
+    with pytest.raises((runner.Cancelled, TimeoutError)):
+        runner.execute(cfg, state, path, job, "reviewer")
+    job.update(status="failed", updated_at=runner.now())
+    runner.save_job(cfg, path, job)
+    assert "owned_stop_at" not in job
+    assert runner.active_threads(cfg) == ["fixture-thread"]
