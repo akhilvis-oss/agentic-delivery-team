@@ -36,6 +36,7 @@ You are the customer and product owner. You agree the vision, roadmap and storie
 4. Copy [`templates/review-gate.yml`](templates/review-gate.yml) to `.github/workflows/review-gate.yml`.
 5. Have the owner install the workflow, gate and config together on the default branch in a reviewed merge. There is no fallback to PR code. Target branches must contain the gate and config too.
 6. Open a fresh test PR after that merge: the trusted workflow only starts enforcing once installed on the default branch. Have the owner make its **`review-gate`** job a required status check. In this repository, add it to the **Protect Main** ruleset alongside **`checks`**.
+   - **Private repository on GitHub Free?** Required checks aren't available there, so the gate runs but can't block a merge: never merge a PR whose `review-gate` check failed. Making it blocking needs a public repository or GitHub Pro, Team or Enterprise Cloud. See [Limits](docs/review-categories.md#limits).
 
 The trusted workflow uses `pull_request_target`, checks out only the base SHA's gate and config, and runs no PR code. It uses the automatic read-only GitHub token for metadata; it needs no configured secrets. Complete API file lists are bound to the PR's head SHA, base SHA, description and changed-file count. Missing, malformed, partial or stale API evidence fails closed.
 
