@@ -17,7 +17,7 @@ You are the customer and product owner. You agree the vision, roadmap and storie
 
 | Piece | Status | Where |
 | --- | --- | --- |
-| Review gate: four review categories enforced in CI | **v0.1, this release** | [`gate/`](gate/), [`templates/`](templates/), [docs](docs/review-categories.md) |
+| Review gate: four review categories enforced in CI | **v0.2, unreleased** | [`gate/`](gate/), [`templates/`](templates/), [docs](docs/review-categories.md) |
 | Private-content check for public repos | **v0.1, this release** | [`scripts/check_private_content.py`](scripts/check_private_content.py) |
 | Local task runner: primary agent delegates to a second agent, with independent read-only review and safe recovery | Planned | `runner/` |
 | Stand-up digest: one plain-language summary of decisions, demos and risks waiting for the owner | Planned | `digest/` |
@@ -31,9 +31,15 @@ You are the customer and product owner. You agree the vision, roadmap and storie
    - `requirement_ids` (your ID scheme, or `null`)
    - `domain_evidence`: what "domain-critical" evidence means for your project
    - the path patterns for each category
+   - `gate_paths`: the code, config, workflows and tests that must stay control-critical
 3. Copy [`templates/pull_request_template.md`](templates/pull_request_template.md) to `.github/pull_request_template.md`.
 4. Copy [`templates/review-gate.yml`](templates/review-gate.yml) to `.github/workflows/review-gate.yml`.
-5. After the first merge, make the `review-gate` check required on your protected branches.
+5. Have the owner install the workflow, gate and config together on the default branch in a reviewed merge. There is no fallback to PR code. Target branches must contain the gate and config too.
+6. Open a fresh test PR after that merge: the trusted workflow only starts enforcing once installed on the default branch. Have the owner make its **`review-gate`** job a required status check. In this repository, add it to the **Protect Main** ruleset alongside **`checks`**.
+
+The trusted workflow uses `pull_request_target`, checks out only the base SHA's gate and config, and runs no PR code. It uses the automatic read-only GitHub token for metadata; it needs no configured secrets. Complete API file lists are bound to the PR's head SHA, base SHA, description and changed-file count. Missing, malformed, partial or stale API evidence fails closed.
+
+Upgrading from v0.1: replace the adopter workflow and gate together, add `gate_paths` from the example with your installed paths, and keep every listed path control-critical. Rules must have nonempty reasons and patterns. Bare N/A evidence now needs a reason, domain labels must occur once, and result cells need an exact result word. `ci.yml` remains PR-controlled build/test feedback; it is not the trusted enforcement path.
 
 The gate checks a PR description's structure. It does not prove evidence is true or that a review is authentic, and it never grants merge authority. See [docs/review-categories.md](docs/review-categories.md) for the rules and their limits.
 

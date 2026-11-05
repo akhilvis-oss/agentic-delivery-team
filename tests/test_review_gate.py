@@ -25,9 +25,9 @@ BASE_CONFIG = {
         "order": ["light", "standard", "domain-critical", "control-critical"],
         "default": "standard",
         "rules": [
-            {"tier": "control-critical", "patterns": [".github/*", "gate/*", "src/auth/*", "*.lock"]},
-            {"tier": "domain-critical", "patterns": ["src/pricing/*", "tests/test_pricing*"]},
-            {"tier": "light", "patterns": ["docs/*", "*.md", "tests/*"]},
+            {"tier": "control-critical", "reason": "Controls", "patterns": [".github/*", "gate/*", "src/auth/*", "*.lock", "tests/test_review_gate.py"]},
+            {"tier": "domain-critical", "reason": "Core logic", "patterns": ["src/pricing/*", "tests/test_pricing*"]},
+            {"tier": "light", "reason": "Docs", "patterns": ["docs/*", "*.md", "tests/*"]},
         ],
     },
 }
@@ -147,8 +147,8 @@ def test_missing_changed_file_list_applies_strictest(cfg):
     assert gate.required_tiers(None, cfg)[0] == "control-critical"
 
 
-def test_empty_changed_file_list_uses_default(cfg):
-    assert gate.required_tiers([], cfg)[0] == "standard"
+def test_empty_changed_file_list_uses_strictest(cfg):
+    assert gate.required_tiers([], cfg)[0] == "control-critical"
 
 
 # ---------- light and standard ----------
@@ -358,3 +358,35 @@ def test_templates_contain_every_section(template, config_path, extra):
 
 def test_example_config_is_valid():
     gate.load_config(ROOT / "templates/review-gate.example.json")
+
+
+@pytest.mark.parametrize("result", ["PASSING", "FAILURE", "XFAILED", "SKIPPED", "NOT RUNNING"])
+def test_result_prefix_must_be_an_exact_word(cfg, result):
+    text = body("standard", STANDARD).replace("PASS: 4 passed", result)
+    assert any("Acceptance result" in e for e in gate.validate(pr(text), ["src/ui/p.py"], cfg))
+
+
+@pytest.mark.parametrize("value", ["N/A", "n/a: --", "N/A."])
+def test_bare_na_domain_and_security_evidence_fails(cfg, value):
+    text = body("domain-critical", STANDARD, DOMAIN).replace(
+        "Hand-worked: tests/test_pricing.py::test_hand_worked", "Hand-worked: " + value)
+    assert any("Hand-worked" in e for e in gate.validate(pr(text), ["src/pricing/m.py"], cfg))
+    text = body("control-critical", control(False)).replace("Secrets: none accessed.", "Secrets: " + value)
+    assert any("Security review needs Secrets" in e for e in gate.validate(pr(text), ["gate/x.py"], cfg))
+
+
+def test_duplicate_domain_labels_fail(cfg):
+    text = body("domain-critical", STANDARD, DOMAIN) + "Hand-worked: duplicate\n"
+    assert any("exactly once" in e for e in gate.validate(pr(text), ["src/pricing/m.py"], cfg))
+
+
+def test_justified_na_evidence_passes(cfg):
+    text = body("domain-critical", STANDARD, DOMAIN).replace(
+        "Hand-worked: tests/test_pricing.py::test_hand_worked", "Hand-worked: N/A: no calculation changed")
+    assert gate.validate(pr(text), ["src/pricing/m.py"], cfg) == []
+
+
+def test_control_rule_overlap_does_not_hide_domain_evidence(cfg):
+    cfg["tiers"]["rules"][0]["patterns"].append("src/pricing/*")
+    text = body("control-critical", control(False))
+    assert any("Hand-worked" in e for e in gate.validate(pr(text), ["src/pricing/m.py"], cfg))

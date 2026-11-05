@@ -1,7 +1,10 @@
 {
   "_comment": "Example review-gate config. Copy to .github/review-gate.json in your project and edit. A changed file takes the highest category whose patterns match (fnmatch; * also matches /); unmatched files take the default, which must not be light. Keep the gate, this file, CI, dependency locks, credential code and agent rules control-critical so a PR cannot loosen its own review.",
   "repo_url": "https://github.com/OWNER/REPO",
-  "allowed_bases": ["main", "develop"],
+  "allowed_bases": [
+    "main",
+    "develop"
+  ],
   "requirement_ids": {
     "pattern": "REQ-\\d{3}",
     "allowed": null
@@ -9,10 +12,19 @@
   "scope_acknowledgements": 3,
   "domain_evidence": {
     "section": "Numeric verification",
-    "labels": ["Hand-worked", "Point-in-time", "Missing data"]
+    "labels": [
+      "Hand-worked",
+      "Point-in-time",
+      "Missing data"
+    ]
   },
   "tiers": {
-    "order": ["light", "standard", "domain-critical", "control-critical"],
+    "order": [
+      "light",
+      "standard",
+      "domain-critical",
+      "control-critical"
+    ],
     "default": "standard",
     "rules": [
       {
@@ -31,7 +43,8 @@
           "*secret*",
           "*credential*",
           "*auth*",
-          "*deploy*"
+          "*deploy*",
+          "tests/test_trusted_gate.py"
         ]
       },
       {
@@ -51,6 +64,21 @@
           "tests/*"
         ]
       }
+    ]
+  },
+  "gate_paths": {
+    "code": [
+      "scripts/review_gate.py"
+    ],
+    "config": [
+      ".github/review-gate.json"
+    ],
+    "workflows": [
+      ".github/workflows/review-gate.yml"
+    ],
+    "tests": [
+      "tests/test_review_gate.py",
+      "tests/test_trusted_gate.py"
     ]
   }
 }
