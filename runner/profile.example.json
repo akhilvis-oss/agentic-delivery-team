@@ -1,0 +1,9 @@
+{
+  "worker_prompt": "<PROJECT_IMPLEMENTATION_AND_TEST_INSTRUCTIONS>",
+  "reviewer_prompt": "<PROJECT_REVIEW_AND_FAILURE_MODE_CHECKLIST>",
+  "scope": "<DEFAULT_PROJECT_SCOPE_AND_RESTRICTIONS>",
+  "extra_scopes": {
+    "optional-check": "<EXPLICIT_WORKER_ONLY_OPTIONAL_SCOPE_INSTRUCTIONS>"
+  },
+  "coordination_files": []
+}
