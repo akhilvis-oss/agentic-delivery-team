@@ -1,21 +1,19 @@
-# Review gate workflow for adopting projects.
-# Copy to .github/workflows/review-gate.yml, copy gate/review_gate.py to
-# scripts/review_gate.py and templates/review-gate.example.json to
-# .github/review-gate.json, then edit the config for your project.
-# After the first merge, make the "review-gate" check required on protected branches.
-name: Review gate
+# Adopters: copy to .github/workflows/review-gate.yml; adjust target branches.
+# Install this workflow and gate/config on the default branch before enforcement.
+# Only base code runs: no PR checkout, dependencies, caches, artifacts or secrets.
+name: Trusted review gate
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main, develop]
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
 
 permissions:
   contents: read
-  pull-requests: read # list changed files; no write access
+  pull-requests: read
 
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number }}
+  group: trusted-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.base.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,46 +21,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Check out the base branch's gate and config (trusted copy)
+      - name: Check out only the trusted base gate and config
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          repository: ${{ github.repository }}
           ref: ${{ github.event.pull_request.base.sha }}
           path: .gate-base
           persist-credentials: false
-          sparse-checkout: |
-            scripts/review_gate.py
-            .github/review-gate.json
+          submodules: false
+          lfs: false
           sparse-checkout-cone-mode: false
-      - name: Check out this PR's gate (bootstrap only)
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          path: .gate-pr
-          persist-credentials: false
           sparse-checkout: |
-            scripts/review_gate.py
-            .github/review-gate.json
-          sparse-checkout-cone-mode: false
+            /scripts/review_gate.py
+            /.github/review-gate.json
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - name: List changed files
+      - name: Validate revision-bound evidence using the base gate
+        working-directory: .gate-base
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
         run: >
-          gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files"
-          --jq '.[] | .filename, (.previous_filename // empty)'
-          > "$RUNNER_TEMP/changed_files.txt"
-      - name: Review gate
-        # The base branch's gate judges the PR so a PR cannot loosen its own rules.
-        run: |
-          if [ -f .gate-base/scripts/review_gate.py ] && [ -f .gate-base/.github/review-gate.json ]; then
-            root=.gate-base
-          else
-            echo "::warning::Base branch has no review gate yet; using this PR's gate (bootstrap)."
-            root=.gate-pr
-          fi
-          python "$root/scripts/review_gate.py" "$GITHUB_EVENT_PATH" \
-            --config "$root/.github/review-gate.json" \
-            --changed-files "$RUNNER_TEMP/changed_files.txt"
+          python -I scripts/review_gate.py "$GITHUB_EVENT_PATH"
+          --config .github/review-gate.json --github-api

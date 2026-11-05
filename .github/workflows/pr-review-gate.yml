@@ -1,0 +1,45 @@
+# Install this workflow and gate/config on the default branch before enforcement.
+# Only base code runs: no PR checkout, dependencies, caches, artifacts or secrets.
+name: Trusted review gate
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: trusted-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.base.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out only the trusted base gate and config
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .gate-base
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /gate/review_gate.py
+            /.github/review-gate.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Validate revision-bound evidence using the base gate
+        working-directory: .gate-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          python -I gate/review_gate.py "$GITHUB_EVENT_PATH"
+          --config .github/review-gate.json --github-api

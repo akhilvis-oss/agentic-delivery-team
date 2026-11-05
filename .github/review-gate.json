@@ -39,7 +39,8 @@
           "AGENTS.md",
           "*.env*",
           "*secret*",
-          "*credential*"
+          "*credential*",
+          "tests/test_trusted_gate.py"
         ]
       },
       {
@@ -61,6 +62,22 @@
           "tests/*"
         ]
       }
+    ]
+  },
+  "gate_paths": {
+    "code": [
+      "gate/review_gate.py"
+    ],
+    "config": [
+      ".github/review-gate.json"
+    ],
+    "workflows": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/pr-review-gate.yml"
+    ],
+    "tests": [
+      "tests/test_review_gate.py",
+      "tests/test_trusted_gate.py"
     ]
   }
 }

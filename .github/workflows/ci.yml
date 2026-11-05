@@ -1,3 +1,5 @@
+# PR-controlled build checks; not the trusted enforcement path.
+# The required review-gate job lives in pr-review-gate.yml (pull_request_target).
 name: CI
 
 on:
@@ -10,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read # list changed files for the review category; no write access
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -35,51 +36,3 @@ jobs:
         run: python -m ruff check --no-cache .
       - name: Tests
         run: python -m pytest -q -p no:cacheprovider
-
-  review-gate:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            gate
-            .github
-      - name: Check out the base branch's gate and config (trusted copy)
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: .gate-base
-          persist-credentials: false
-          sparse-checkout: |
-            gate
-            .github
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-      - name: List changed files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        # File names are written as data; PR text is never interpolated into a shell command.
-        run: >
-          gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files"
-          --jq '.[] | .filename, (.previous_filename // empty)'
-          > "$RUNNER_TEMP/changed_files.txt"
-      - name: Review gate
-        # The base branch's gate and config judge the PR, so a PR cannot loosen
-        # the rules applied to itself. Bootstrap only: if the base branch has no
-        # gate yet, the PR's own gate runs and a warning is printed.
-        run: |
-          if [ -f .gate-base/gate/review_gate.py ] && [ -f .gate-base/.github/review-gate.json ]; then
-            root=.gate-base
-          else
-            echo "::warning::Base branch has no review gate yet; using this PR's gate (bootstrap)."
-            root=.
-          fi
-          python "$root/gate/review_gate.py" "$GITHUB_EVENT_PATH" \
-            --config "$root/.github/review-gate.json" \
-            --changed-files "$RUNNER_TEMP/changed_files.txt"
