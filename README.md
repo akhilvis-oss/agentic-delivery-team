@@ -59,3 +59,5 @@ python -m pytest -q
 ## Licence
 
 [MIT](LICENSE).
+
+<!-- Throwaway trusted-gate verification: documentation-only diff. -->
