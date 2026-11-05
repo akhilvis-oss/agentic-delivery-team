@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,7 +40,7 @@ def setup(tmp_path, monkeypatch):
     cfg = dict(worktree=str(repo), branch="feature", state_dir=str(tmp_path / "state"),
                codex_home=str(tmp_path / "agent-home"), codex_bin="must-not-launch",
                worker_model="fixture-worker", reviewer_model="fixture-reviewer", max_rounds=2,
-               phase_timeout_seconds=1,
+               phase_timeout_seconds=5,
                project_profile={"worker_prompt": "Implement assigned changes.",
                                 "reviewer_prompt": "Check correctness and failure modes.",
                                 "scope": "Only the assigned synthetic feature.",
@@ -529,7 +530,7 @@ def test_private_atomic_files_and_runner_lock_modes(setup):
     assert not list(path.parent.glob(".write-*"))
 
 
-def test_timeout_stops_owned_descendant_group(setup):
+def test_timeout_stops_owned_descendant_group(setup, monkeypatch):
     cfg, state, path, job = setup
     heartbeat = state / "heartbeat"
     child = ("import pathlib,time\n" + f"p=pathlib.Path({str(heartbeat)!r})\n"
@@ -539,6 +540,25 @@ def test_timeout_stops_owned_descendant_group(setup):
               + "time.sleep(60)\n")
     cfg["codex_bin"] = fake_agent(state, source)
     cfg["phase_timeout_seconds"] = 0.5
+    # Start the simulated deadline only after the descendant is demonstrably
+    # running. Do not assume nested process startup fits a wall-clock fraction.
+    real_monotonic = time.monotonic
+    watchdog_start = real_monotonic()
+    first_clock_read = True
+
+    def readiness_clock():
+        nonlocal first_clock_read
+        if first_clock_read:
+            first_clock_read = False
+            return 0
+        if heartbeat.exists():
+            return 1
+        if real_monotonic() - watchdog_start > 10:
+            raise RuntimeError("Synthetic descendant failed to become ready")
+        return 0
+
+    monkeypatch.setattr(runner, "time", SimpleNamespace(
+        monotonic=readiness_clock, sleep=time.sleep, time=time.time))
     job["round"] = 1
     with pytest.raises(TimeoutError):
         runner.execute(cfg, state, path, job, "worker")
