@@ -19,7 +19,7 @@ You are the customer and product owner. You agree the vision, roadmap and storie
 | --- | --- | --- |
 | Review gate: four review categories enforced in CI | **v0.2, unreleased** | [`gate/`](gate/), [`templates/`](templates/), [docs](docs/review-categories.md) |
 | Private-content check for public repos | **v0.1, this release** | [`scripts/check_private_content.py`](scripts/check_private_content.py) |
-| Local task runner: primary agent delegates to a second agent, with independent read-only review and safe recovery | Planned | `runner/` |
+| Local task runner: bounded delegation, review-only jobs and safe recovery | **v0.3, unreleased** | [`runner/`](runner/), [setup and safety](docs/task-runner.md) |
 | Stand-up digest: one plain-language summary of decisions, demos and risks waiting for the owner | Planned | `digest/` |
 | Base agent rules and project profile (assumptions, escalation, permissions) | Planned | `templates/` |
 
@@ -43,6 +43,12 @@ The trusted workflow uses `pull_request_target`, checks out only the base SHA's 
 Upgrading from v0.1: replace the adopter workflow and gate together, add `gate_paths` from the example with your installed paths, and keep every listed path control-critical. Rules must have nonempty reasons and patterns. Bare N/A evidence now needs a reason, domain labels must occur once, and result cells need an exact result word. `ci.yml` remains PR-controlled build/test feedback; it is not the trusted enforcement path.
 
 The gate checks a PR description's structure. It does not prove evidence is true or that a review is authentic, and it never grants merge authority. See [docs/review-categories.md](docs/review-categories.md) for the rules and their limits.
+
+## Quick start: the local task runner
+
+Copy the placeholder config/profile in [`runner/`](runner/) into private local files, choose a dedicated feature worktree and agent home, and enqueue an explicitly approved assignment. Review-only jobs let the primary request an independent read-only check of committed work. Local receipts always persist; GitHub receipt comments are opt-in and contain only fixed summaries and commit metadata.
+
+Read [setup, commands, compatibility limits and recovery](docs/task-runner.md) before running it. The CLI adapter deliberately accepts a narrow recorded version range. Nothing installs or starts a service automatically; the launchd file is a placeholder template.
 
 ## Using this repository
 

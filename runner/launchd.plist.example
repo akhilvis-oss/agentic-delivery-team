@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__SERVICE_LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ABSOLUTE_PYTHON_EXECUTABLE__</string>
+    <string>__ABSOLUTE_TRUSTED_RUNNER_SCRIPT__</string>
+    <string>--config</string><string>__ABSOLUTE_PRIVATE_CONFIG__</string>
+    <string>run-once</string>
+  </array>
+  <key>StartInterval</key><integer>30</integer>
+  <key>RunAtLoad</key><false/>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>__ABSOLUTE_PRIVATE_STDOUT_LOG__</string>
+  <key>StandardErrorPath</key><string>__ABSOLUTE_PRIVATE_STDERR_LOG__</string>
+</dict>
+</plist>

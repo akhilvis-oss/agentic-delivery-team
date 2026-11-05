@@ -1,0 +1,17 @@
+{
+  "worktree": "<ABSOLUTE_FEATURE_WORKTREE>",
+  "branch": "<FEATURE_BRANCH>",
+  "state_dir": "<ABSOLUTE_PRIVATE_RUNNER_STATE_OUTSIDE_WORKTREE>",
+  "codex_home": "<ABSOLUTE_DEDICATED_AGENT_HOME_OUTSIDE_WORKTREE>",
+  "codex_bin": "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+  "profile": "<ABSOLUTE_PROJECT_PROFILE_JSON>",
+  "worker_model": "<WORKER_MODEL>",
+  "reviewer_model": "<REVIEWER_MODEL>",
+  "worker_start": "new",
+  "max_rounds": 2,
+  "phase_timeout_seconds": 1800,
+  "github_receipts": {
+    "enabled": false,
+    "repository": "<OWNER>/<REPOSITORY>"
+  }
+}
