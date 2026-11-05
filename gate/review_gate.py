@@ -152,6 +152,23 @@ def required_tiers(changed_files, config):
     return minimum, present, sorted(p for p, tiers in per_file.items() if minimum in tiers)
 
 
+def category_source(changed_files, minimum, config):
+    """Explain the minimum using trusted config only, never changed filenames."""
+    if not changed_files:
+        return "empty or unavailable changed-file list"
+    _, _, forcing = required_tiers(changed_files, config)
+    patterns = sorted({pattern for rule in config["tiers"]["rules"]
+                       if rule["tier"] == minimum for pattern in rule["patterns"]
+                       if any(fnmatch.fnmatchcase(path, pattern) for path in forcing)})
+    sources = []
+    if patterns:
+        sources.append("configured patterns: " + json.dumps(patterns[:5], ensure_ascii=True)
+                       + (f" (+{len(patterns) - 5} more)" if len(patterns) > 5 else ""))
+    if any(not matching_tiers(path, config) for path in forcing):
+        sources.append("configured default (unmatched paths)")
+    return "; ".join(sources)
+
+
 # ---------- parsing helpers ----------
 
 def split_sections(pr):
@@ -316,7 +333,8 @@ def validate(pr, changed_files, config):
         errors.append("Review tier must declare Tier: " + " | ".join(order))
         declared = minimum
     elif order.index(declared) < order.index(minimum):
-        errors.append(f"Declared tier {declared} is below required {minimum}")
+        errors.append(f"Declared tier {declared} is below required {minimum} "
+                      f"(from {category_source(changed_files, minimum, config)})")
         declared = minimum
     domain = "domain-critical" in present or declared == "domain-critical"
 

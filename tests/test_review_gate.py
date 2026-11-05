@@ -390,3 +390,48 @@ def test_control_rule_overlap_does_not_hide_domain_evidence(cfg):
     cfg["tiers"]["rules"][0]["patterns"].append("src/pricing/*")
     text = body("control-critical", control(False))
     assert any("Hand-worked" in e for e in gate.validate(pr(text), ["src/pricing/m.py"], cfg))
+
+
+def test_underdeclared_category_names_configured_patterns_without_changed_paths(cfg):
+    path = "src/auth/PRIVATE-FILENAME.py"
+    errors = gate.validate(pr(body("light")), [path], cfg)
+    error = next(e for e in errors if "below required" in e)
+    assert 'configured patterns: ["src/auth/*"]' in error
+    assert "PRIVATE-FILENAME" not in "\n".join(errors)
+
+
+def test_category_source_explains_default_and_missing_paths(cfg):
+    assert gate.category_source(["unknown/file.py"], "standard", cfg) == (
+        "configured default (unmatched paths)")
+    for paths in (None, []):
+        errors = gate.validate(pr(body("light")), paths, cfg)
+        assert any("below required control-critical (from empty or unavailable changed-file list)"
+                   in e for e in errors)
+
+
+def test_category_source_lists_only_highest_matching_patterns(cfg):
+    paths = ["docs/a.md", "src/auth/hidden.py", "gate/hidden.py"]
+    assert gate.category_source(paths, "control-critical", cfg) == (
+        'configured patterns: ["gate/*", "src/auth/*"]')
+
+
+def test_category_source_is_deduplicated_bounded_and_json_escaped(cfg):
+    cfg["tiers"]["rules"][0]["patterns"] = ["*", "*", "g*", "ga*", "gat*", "gate*", "gate/*"]
+    source = gate.category_source(["gate/hidden.py"], "control-critical", cfg)
+    assert source == 'configured patterns: ["*", "g*", "ga*", "gat*", "gate*"] (+1 more)'
+    cfg["tiers"]["rules"][0]["patterns"] = ['gate/"*']
+    assert gate.category_source(['gate/"hidden.py'], "control-critical", cfg) == (
+        'configured patterns: ["gate/\\\"*"]')
+
+
+def test_cli_category_error_never_echoes_sensitive_filename(tmp_path, capsys):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(BASE_CONFIG))
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": pr(body("light"))}))
+    changed = tmp_path / "paths.txt"
+    changed.write_text("src/auth/SENSITIVE-FILENAME.py\n")
+    assert gate.main([str(event), "--config", str(cfg_path), "--changed-files", str(changed)]) == 1
+    output = capsys.readouterr().out
+    assert "src/auth/*" in output
+    assert "SENSITIVE-FILENAME" not in output

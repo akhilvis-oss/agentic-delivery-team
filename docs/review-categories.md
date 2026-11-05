@@ -18,7 +18,7 @@ Splitting correctness risk from consequence risk is deliberate. Without it, most
 1. Each changed file takes the **highest** category whose patterns match it, using `fnmatch` patterns where `*` also matches `/`.
 2. A file that matches nothing takes the default, which must be standard or higher, never light.
 3. The PR takes the **highest** category among its files. Unrelated sensitive changes are best split into their own PR.
-4. The PR declares a category in its `## Review tier` section. It may declare a higher one than required, which is then enforced, but never a lower one.
+4. The PR declares a category in its `## Review tier` section. It may declare a higher one than required, which is then enforced, but never a lower one. When a declaration is too low, the error names up to five matching patterns from the trusted config, or indicates the configured default or unavailable paths. It never prints changed filenames.
 5. With an empty or unavailable changed-file list, for example in a local run without `--changed-files`, the strictest category applies.
 6. A control-critical PR that also touches domain files must supply the domain evidence too.
 
