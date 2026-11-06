@@ -235,22 +235,41 @@ def trusted_git(config, *args, data=None, extra_env=None, allowed=(0,)):
     env = environment(config)
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     env.update(extra_env or {})
+    # Resolve only the effective ignore-file path as data. Do not inherit global
+    # executable configuration into operational Git commands.
+    read_env = environment(config)
+    if "XDG_CONFIG_HOME" in os.environ:
+        read_env.setdefault("XDG_CONFIG_HOME", os.environ["XDG_CONFIG_HOME"])
+    ignored_config = subprocess.run(
+        ["git", "-C", config["worktree"], "config", "--includes", "--path", "--get", "core.excludesFile"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=read_env)
+    if ignored_config.returncode not in (0, 1):
+        raise CommitRefused("git_configuration_unavailable")
+    default_ignore = Path(read_env.get("XDG_CONFIG_HOME", str(Path(read_env.get("HOME", str(Path.home()))) / ".config"))) / "git/ignore"
+    ignore_path = (ignored_config.stdout.decode().rstrip("\n") if ignored_config.returncode == 0
+                   else str(default_ignore))
     configured = subprocess.run(
-        ["git", "-C", config["worktree"], "config", "--local", "--null", "--get-regexp",
+        ["git", "-C", config["worktree"], "config", "--local", "--includes", "--null", "--name-only", "--get-regexp",
          r"^filter\..*\.(clean|smudge|process|required)$"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     if configured.returncode not in (0, 1):
         raise CommitRefused("git_configuration_unavailable")
-    filters = {entry.split(b"\n", 1)[0].decode().rsplit(".", 1)[0]
-               for entry in configured.stdout.split(b"\0") if entry}
+    keys = [entry.decode() for entry in configured.stdout.split(b"\0") if entry]
+    if any(any(ord(c) < 32 or ord(c) == 127 for c in key) for key in keys):
+        raise CommitRefused("git_configuration_unavailable")
+    filters = {key.rsplit(".", 1)[0] for key in keys}
     overrides = []
     for section in sorted(filters):
         for variable in ("clean", "smudge", "process", "required"):
             overrides += ["-c", section + "." + variable + "=" + ("false" if variable == "required" else "")]
     literal = [] if args[0] == "check-ignore" else ["--literal-pathspecs"]
+    safe_args = list(args)
+    if args[0] in {"diff", "diff-tree", "show", "log"}:
+        safe_args[1:1] = ["--no-ext-diff", "--no-textconv"]
     result = subprocess.run(["git", *literal, "-C", config["worktree"],
                              "-c", "core.hooksPath=" + os.devnull,
-                             "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", *overrides, *args],
+                             "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
+                             "-c", "core.excludesFile=" + ignore_path, *overrides, *safe_args],
                             input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     if result.returncode not in allowed:
         raise CommitRefused("git_operation_failed")

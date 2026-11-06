@@ -297,3 +297,81 @@ def test_uncommitted_operator_work_is_never_silently_committed(setup, monkeypatc
     job = runner.read(path)
     assert job["status"] == "blocked"
     assert job["commit_refusals"][0]["reason"] == "preexisting_worktree_changes"
+
+
+def test_included_filter_is_disabled_for_status_diff_and_commits(setup, monkeypatch, tmp_path):
+    import sys
+    cfg, _, original, job = setup
+    root = Path(cfg["worktree"])
+    (root / ".gitattributes").write_text("*.txt filter=included\n")
+    runner.git(cfg, "add", ".gitattributes")
+    commit(cfg)
+    path = fresh_job(cfg, original, job)
+    marker = tmp_path / "filter-executed"
+    script = tmp_path / "filter.py"
+    script.write_text(f"import pathlib,sys\npathlib.Path({str(marker)!r}).touch()\nsys.stdout.write(sys.stdin.read())\n")
+    include = tmp_path / "included.config"
+    include.write_text('[filter "included"]\nclean = ' + sys.executable + ' ' + str(script) + '\nrequired = true\n')
+    runner.git(cfg, "config", "include.path", str(include))
+    monkeypatch.setattr(runner, "execute", execute_delivery)
+    runner.run_once(cfg)
+    assert runner.read(path)["status"] == "ready_for_integration"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("driver", ["command", "textconv"])
+def test_external_diff_and_textconv_cannot_execute_or_hide_mutations(setup, tmp_path, driver):
+    import sys
+    cfg, _, _, _ = setup
+    root = Path(cfg["worktree"])
+    (root / ".gitattributes").write_text("*.txt diff=tripwire\n")
+    (root / "tracked.txt").write_text("baseline")
+    runner.git(cfg, "add", ".gitattributes", "tracked.txt")
+    commit(cfg)
+    marker = tmp_path / "driver-executed"
+    script = tmp_path / "driver.py"
+    script.write_text(f"import pathlib\npathlib.Path({str(marker)!r}).touch()\n")
+    runner.git(cfg, "config", "diff.tripwire." + driver, sys.executable + " " + str(script))
+    (root / "tracked.txt").write_text("first different content")
+    before = runner.fingerprint(cfg)
+    (root / "tracked.txt").write_text("second different content")
+    assert runner.fingerprint(cfg) != before
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("location", ["global", "local", "default"])
+def test_effective_ignore_file_is_preserved_without_global_executable_config(setup, monkeypatch, tmp_path, location):
+    cfg, _, original, job = setup
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    marker = tmp_path / "must-not-execute"
+    ignore = tmp_path / "custom-ignore"
+    ignore.write_text("ignored-output.txt\n")
+    # Global executable settings must stay disabled, even while their data-only
+    # ignore-file setting is respected. The local setting overrides global.
+    (home / ".gitconfig").write_text('[core]\nexcludesFile = ' + str(ignore) + '\n[alias]\nprobe = !touch ' + str(marker) + '\n')
+    real_environment = runner.environment
+    monkeypatch.setattr(runner, "environment", lambda config: {**real_environment(config), "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+    if location == "local":
+        override = tmp_path / "local-ignore"
+        override.write_text("ignored-output.txt\n")
+        ignore.write_text("different-output.txt\n")
+        runner.git(cfg, "config", "core.excludesFile", str(override))
+    elif location == "default":
+        (home / ".gitconfig").write_text("")
+        default = home / ".config/git/ignore"
+        default.parent.mkdir(parents=True)
+        default.write_text("ignored-output.txt\n")
+    path = fresh_job(cfg, original, job)
+
+    def execute(config, state, path, current, role):
+        if role == "worker":
+            deliver(config)
+            (Path(config["worktree"]) / "ignored-output.txt").write_text("excluded")
+        return result("ready_for_review" if role == "worker" else "ready_for_integration", role)
+
+    monkeypatch.setattr(runner, "execute", execute)
+    runner.run_once(cfg)
+    assert runner.read(path)["status"] == "ready_for_integration"
+    assert runner.git(cfg, "ls-tree", "--name-only", "HEAD") == "delivery.txt"
+    assert not marker.exists()
