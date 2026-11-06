@@ -41,6 +41,7 @@ def setup(tmp_path, monkeypatch):
                codex_home=str(tmp_path / "agent-home"), codex_bin="must-not-launch",
                worker_model="fixture-worker", reviewer_model="fixture-reviewer", max_rounds=2,
                phase_timeout_seconds=5,
+               commit_identity={"name": "Runner Fixture", "email": "runner@example.invalid"},
                project_profile={"worker_prompt": "Implement assigned changes.",
                                 "reviewer_prompt": "Check correctness and failure modes.",
                                 "scope": "Only the assigned synthetic feature.",
@@ -53,9 +54,14 @@ def setup(tmp_path, monkeypatch):
     return cfg, state, path, runner.read(path)
 
 
+def deliver(config):
+    path = Path(config["worktree"]) / "delivery.txt"
+    path.write_text((path.read_text() if path.exists() else "") + "delivery\n")
+
+
 def execute_delivery(config, state, path, job, role):
     if role == "worker":
-        commit(config)
+        deliver(config)
     return result("ready_for_review" if role == "worker" else "ready_for_integration", role)
 
 
@@ -76,7 +82,7 @@ def test_bounded_repair_then_independent_review_and_no_duplicate(setup, monkeypa
     def execute(config, state, path, job, role):
         calls.append(role)
         if role == "worker":
-            commit(config)
+            deliver(config)
             return result("ready_for_review")
         return result("needs_changes" if job["round"] == 1 else "ready_for_integration", role)
 
@@ -108,7 +114,7 @@ def test_retry_limit(setup, monkeypatch):
 
     def execute(config, state, path, job, role):
         if role == "worker":
-            commit(config)
+            deliver(config)
             return result("ready_for_review")
         return result("needs_changes", role)
 
@@ -162,7 +168,7 @@ def test_single_runner_and_pause(setup, monkeypatch):
     assert runner.read(path)["status"] == "queued"
 
 
-def test_uncommitted_code_blocks_review(setup, monkeypatch):
+def test_unexpected_worker_commit_blocks_review(setup, monkeypatch):
     cfg, state, path, _ = setup
 
     def execute(config, state, path, job, role):
@@ -173,7 +179,8 @@ def test_uncommitted_code_blocks_review(setup, monkeypatch):
 
     monkeypatch.setattr(runner, "execute", execute)
     runner.run_once(cfg)
-    assert runner.read(path)["status"] == "failed"
+    assert runner.read(path)["status"] == "blocked"
+    assert runner.read(path)["commit_refusals"][0]["reason"] == "history_changed"
 
 
 def test_review_mutation_detected(setup, monkeypatch):
@@ -181,7 +188,7 @@ def test_review_mutation_detected(setup, monkeypatch):
 
     def execute(config, state, path, job, role):
         if role == "worker":
-            commit(config)
+            deliver(config)
             return result("ready_for_review")
         (Path(config["worktree"]) / "unexpected.py").write_text("pass\n")
         return result("ready_for_integration", role)
@@ -268,7 +275,7 @@ def test_invalid_review_cannot_approve(setup, monkeypatch):
 
     def execute(config, state, path, job, role):
         if role == "worker":
-            commit(config)
+            deliver(config)
             return result("ready_for_review")
         return bad
 
@@ -478,9 +485,9 @@ def test_receipts_always_local_opt_in_public_allowlist_and_fake_client(setup, mo
     runner.publish_receipt(cfg, path, job, Fake())
     assert len(calls) == 1 and calls[0][:2] == ("example/project", 7)
     receipt = calls[0][2]
-    assert set(receipt) == {"status", "base_commit", "head_commit", "summary", "timestamp"}
+    assert set(receipt) == {"status", "base_commit", "head_commit", "summary", "timestamp", "runner_commits"}
     assert "SENSITIVE" not in json.dumps(receipt)
-    assert runner.read(state / "receipts/task.json") == receipt
+    assert runner.public_receipt(runner.read(state / "receipts/task.json")) == receipt
 
 
 def test_public_receipt_failure_preserves_local_success_without_retry(setup, monkeypatch):
@@ -500,11 +507,11 @@ def test_public_receipt_failure_preserves_local_success_without_retry(setup, mon
     assert "PRIVATE" not in (state / "receipts/task.json").read_text()
 
 
-def test_worker_without_new_commit_cannot_pass(setup, monkeypatch):
+def test_worker_without_changes_cannot_pass(setup, monkeypatch):
     cfg, _, path, _ = setup
     monkeypatch.setattr(runner, "execute", lambda *args: result("ready_for_review"))
     runner.run_once(cfg)
-    assert runner.read(path)["status"] == "failed"
+    assert runner.read(path)["status"] == "blocked"
 
 
 def test_allowed_coordination_files_do_not_allow_dirty_code(setup, monkeypatch):
@@ -512,7 +519,7 @@ def test_allowed_coordination_files_do_not_allow_dirty_code(setup, monkeypatch):
 
     def execute(config, state, path, current, role):
         if role == "worker":
-            commit(config)
+            deliver(config)
             (Path(config["worktree"]) / "coordination.md").write_text("status only")
         return result("ready_for_review" if role == "worker" else "ready_for_integration", role)
 
@@ -732,7 +739,7 @@ def test_unknown_lifecycle_created_by_worker_blocks_reviewer_call(setup, monkeyp
 
     def execute(config, state, path, job, role):
         calls.append(role)
-        commit(config)
+        deliver(config)
         rollout(config, event="task_unknown")
         return result("ready_for_review")
 
@@ -752,7 +759,7 @@ if review:
  assert 'read-only' in sys.argv and 'never' in sys.argv
  status='ready_for_integration'
 else:
- subprocess.run(['git','-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','delivery','--allow-empty'],check=True,stdout=sys.stderr)
+ path=pathlib.Path('delivery.txt'); path.write_text((path.read_text() if path.exists() else '')+'delivery\\n')
  status='ready_for_review'
 value=dict(status=status,summary='synthetic',tests=[],limitations=[])
 if review: value['findings']=[]
@@ -814,7 +821,7 @@ def test_phase_probes_cannot_change_bound_head_or_branch(setup, monkeypatch, pro
     def execute(config, state, path, job, role):
         calls.append(role)
         if role == "worker":
-            commit(config)
+            deliver(config)
             return result("ready_for_review")
         return result("needs_changes", role)
 

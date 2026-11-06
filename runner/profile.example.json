@@ -5,5 +5,13 @@
   "extra_scopes": {
     "optional-check": "<EXPLICIT_WORKER_ONLY_OPTIONAL_SCOPE_INSTRUCTIONS>"
   },
-  "coordination_files": []
+  "coordination_files": [],
+  "commit_policy": {
+    "deny_patterns": [
+      "<ADDITIONAL_PROJECT_DENY_PATTERN>"
+    ],
+    "max_files": 100,
+    "max_file_bytes": 1048576,
+    "max_total_bytes": 10485760
+  }
 }

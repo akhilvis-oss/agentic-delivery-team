@@ -13,5 +13,9 @@
   "github_receipts": {
     "enabled": false,
     "repository": "<OWNER>/<REPOSITORY>"
+  },
+  "commit_identity": {
+    "name": "<RUNNER_AUTHOR_NAME>",
+    "email": "<RUNNER_EMAIL>"
   }
 }

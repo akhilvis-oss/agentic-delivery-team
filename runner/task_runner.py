@@ -6,12 +6,14 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -37,7 +39,7 @@ SUMMARIES = {
 
 
 class Blocked(ValueError):
-    """A known prerequisite failure before a model call."""
+    """A prerequisite or safety failure requiring operator attention."""
 
 
 class Cancelled(RuntimeError):
@@ -90,9 +92,7 @@ def path_name(value):
 
 
 def git(config, *args):
-    # Never consult inherited Git configuration overrides or another repository.
-    return subprocess.check_output(["git", "-C", config["worktree"], *args],
-                                   env=environment(config), text=True, stderr=subprocess.DEVNULL).rstrip("\n")
+    return trusted_git(config, *args).decode().rstrip("\n")
 
 
 def environment(config):
@@ -128,7 +128,8 @@ def lock(path):
 def load_profile(path):
     profile = read(path)
     required = {"worker_prompt", "reviewer_prompt", "scope", "extra_scopes", "coordination_files"}
-    if not isinstance(profile, dict) or set(profile) != required:
+    if (not isinstance(profile, dict) or not required <= set(profile)
+            or set(profile) - required - {"commit_policy"}):
         raise ValueError("Profile requires prompts, scope, extra_scopes and coordination_files")
     for key in ("worker_prompt", "reviewer_prompt", "scope"):
         if not isinstance(profile[key], str) or not profile[key].strip():
@@ -142,6 +143,7 @@ def load_profile(path):
         raise ValueError("coordination_files must be an explicit list")
     for name in profile["coordination_files"]:
         path_name(name)
+    commit_policy(profile)
     return profile
 
 
@@ -175,12 +177,328 @@ def load_config(path):
     if receipts["enabled"] and (not re.fullmatch(r"[\w.-]+/[\w.-]+", repository)
                                 or any(part in {".", ".."} for part in repository.split("/"))):
         raise ValueError("GitHub receipts require an explicit repository")
+    if "commit_identity" in config:
+        commit_identity(config)
     config["project_profile"] = load_profile(config["profile"])
     if config.get("worker_start", "new") not in {"new", "fork", "resume"}:
         raise ValueError("worker_start must be new, fork or resume")
     if config.get("worker_start", "new") != "new" and not config.get("worker_thread_id"):
         raise ValueError("Fork/resume needs an explicit seed thread")
     return config
+
+
+# ---------- trusted runner-owned commits ----------
+
+DEFAULT_COMMIT_POLICY = {
+    "deny_patterns": [".env*", "*secret*", "*credential*", "id_rsa*", "id_dsa*", "id_ecdsa*",
+                      "id_ed25519*", "*.pem", "*.key", "*.p12", "*.pfx"],
+    "max_files": 100, "max_file_bytes": 1024 * 1024, "max_total_bytes": 10 * 1024 * 1024,
+}
+
+
+class CommitRefused(Blocked):
+    def __init__(self, reason, paths=()):
+        super().__init__("Runner commit refused: " + reason)
+        self.reason = reason
+        self.paths = sorted(set(paths))
+
+
+def commit_policy(profile):
+    supplied = profile.get("commit_policy", {})
+    if not isinstance(supplied, dict) or set(supplied) - set(DEFAULT_COMMIT_POLICY):
+        raise ValueError("Invalid commit_policy fields")
+    policy = {**DEFAULT_COMMIT_POLICY, **supplied}
+    patterns = policy["deny_patterns"]
+    if (not isinstance(patterns, list)
+            or any(not isinstance(p, str) or not p.strip() for p in patterns)):
+        raise ValueError("Commit deny patterns must be nonempty strings")
+    policy["deny_patterns"] = sorted(set(DEFAULT_COMMIT_POLICY["deny_patterns"] + patterns))
+    for key in ("max_files", "max_file_bytes", "max_total_bytes"):
+        if type(policy[key]) is not int or policy[key] < 1:
+            raise ValueError("Commit limits must be positive integers")
+    return policy
+
+
+def commit_identity(config):
+    identity = config.get("commit_identity")
+    if (not isinstance(identity, dict) or set(identity) != {"name", "email"}
+            or any(not isinstance(v, str) or not v.strip() or "<" in v or ">" in v
+                   or any(ord(c) < 32 or ord(c) == 127 for c in v) for v in identity.values())
+            or not re.fullmatch(r"[^\s@]+@[^\s@]+", identity["email"])):
+        raise CommitRefused("configure_runner_identity")
+    return identity
+
+
+def trusted_git(config, *args, data=None, extra_env=None, allowed=(0,)):
+    # No hooks, signing, fsmonitor, global configuration or attribute filters are
+    # run by this path. Bytes are hashed directly, not passed to `git add`.
+    env = environment(config)
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    env.update(extra_env or {})
+    # Resolve only the effective ignore-file path as data. Do not inherit global
+    # executable configuration into operational Git commands.
+    read_env = environment(config)
+    if "XDG_CONFIG_HOME" in os.environ:
+        read_env.setdefault("XDG_CONFIG_HOME", os.environ["XDG_CONFIG_HOME"])
+    ignored_config = subprocess.run(
+        ["git", "-C", config["worktree"], "config", "--includes", "--path", "--get", "core.excludesFile"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=read_env)
+    if ignored_config.returncode not in (0, 1):
+        raise CommitRefused("git_configuration_unavailable")
+    default_ignore = Path(read_env.get("XDG_CONFIG_HOME", str(Path(read_env.get("HOME", str(Path.home()))) / ".config"))) / "git/ignore"
+    ignore_path = (ignored_config.stdout.decode().rstrip("\n") if ignored_config.returncode == 0
+                   else str(default_ignore))
+    configured = subprocess.run(
+        ["git", "-C", config["worktree"], "config", "--local", "--includes", "--null", "--name-only", "--get-regexp",
+         r"^filter\..*\.(clean|smudge|process|required)$"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    if configured.returncode not in (0, 1):
+        raise CommitRefused("git_configuration_unavailable")
+    keys = [entry.decode() for entry in configured.stdout.split(b"\0") if entry]
+    if any(any(ord(c) < 32 or ord(c) == 127 for c in key) for key in keys):
+        raise CommitRefused("git_configuration_unavailable")
+    filters = {key.rsplit(".", 1)[0] for key in keys}
+    overrides = []
+    for section in sorted(filters):
+        for variable in ("clean", "smudge", "process", "required"):
+            overrides += ["-c", section + "." + variable + "=" + ("false" if variable == "required" else "")]
+    literal = [] if args[0] == "check-ignore" else ["--literal-pathspecs"]
+    safe_args = list(args)
+    if args[0] in {"diff", "diff-tree", "show", "log"}:
+        safe_args[1:1] = ["--no-ext-diff", "--no-textconv"]
+    result = subprocess.run(["git", *literal, "-C", config["worktree"],
+                             "-c", "core.hooksPath=" + os.devnull,
+                             "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
+                             "-c", "core.excludesFile=" + ignore_path, *overrides, *safe_args],
+                            input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    if result.returncode not in allowed:
+        raise CommitRefused("git_operation_failed")
+    return result.stdout
+
+
+def checked_commit_path(name, root):
+    try:
+        path_name(name)
+    except ValueError as exc:
+        raise CommitRefused("outside_or_invalid_path", [name]) from exc
+    if any(part.casefold().rstrip(" .") == ".git" for part in name.split("/")):
+        raise CommitRefused("git_metadata", [name])
+    path = root / name
+    # Reject parent symlinks, even internal ones, to keep all file opens no-follow.
+    for parent in path.parents:
+        if parent == root:
+            break
+        if parent.is_symlink():
+            raise CommitRefused("symlink_parent", [name])
+    return path
+
+
+def denied(name, policy):
+    return any(fnmatch.fnmatchcase(value.casefold(), pattern.casefold())
+               for value in [name, *name.split("/")] for pattern in policy["deny_patterns"])
+
+
+def stable_stat(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def snapshot_entry(config, root, name, previous, policy):
+    path = checked_commit_path(name, root)
+    if denied(name, policy):
+        raise CommitRefused("denied_path", [name])
+    if previous and previous[0] == "160000":
+        raise CommitRefused("submodule_not_supported", [name])
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if previous is None:
+            raise CommitRefused("concurrent_change", [name])
+        return ("0", None)
+    if stat.S_ISDIR(info.st_mode):
+        raise CommitRefused("submodule_or_directory_not_supported", [name])
+    if stat.S_ISLNK(info.st_mode):
+        target = os.readlink(path)
+        try:
+            resolved = path.resolve().relative_to(root).as_posix()
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise CommitRefused("external_or_invalid_symlink", [name]) from exc
+        checked_commit_path(resolved, root)
+        if denied(resolved, policy):
+            raise CommitRefused("denied_symlink_target", [name])
+        if stable_stat(path.lstat()) != stable_stat(info):
+            raise CommitRefused("concurrent_change", [name])
+        content = os.fsencode(target)
+        mode = "120000"
+    elif stat.S_ISREG(info.st_mode):
+        # Walk parent directories using dir_fd + O_NOFOLLOW too: a concurrent
+        # replacement of a directory cannot redirect the read outside the root.
+        descriptors = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+        try:
+            for component in name.split("/")[:-1]:
+                descriptors.append(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                           dir_fd=descriptors[-1]))
+            fd = os.open(name.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
+            with os.fdopen(fd, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino)
+                        != (info.st_dev, info.st_ino)):
+                    raise CommitRefused("concurrent_change", [name])
+                content = handle.read(policy["max_file_bytes"] + 1)
+                if stable_stat(os.fstat(handle.fileno())) != stable_stat(before):
+                    raise CommitRefused("concurrent_change", [name])
+        except OSError as exc:
+            raise CommitRefused("unreadable_or_changed_path", [name]) from exc
+        finally:
+            for directory in reversed(descriptors):
+                os.close(directory)
+        mode = "100755" if info.st_mode & 0o111 else "100644"
+    else:
+        raise CommitRefused("special_file_not_supported", [name])
+    if len(content) > policy["max_file_bytes"]:
+        raise CommitRefused("file_size_limit", [name])
+    return mode, content
+
+
+@contextlib.contextmanager
+def commit_locks(config):
+    git_dir = Path(trusted_git(config, "rev-parse", "--absolute-git-dir").decode().strip())
+    owned = []
+    try:
+        for name in ("index.lock",):
+            path = git_dir / name
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except OSError as exc:
+                raise CommitRefused("git_lock_busy") from exc
+            owned.append((path, fd, os.fstat(fd).st_ino))
+        yield git_dir, owned[-1][0], owned[-1][1]
+    finally:
+        for path, fd, inode in reversed(owned):
+            os.close(fd)
+            if path.exists() and path.lstat().st_ino == inode:
+                path.unlink()
+
+
+def commit_preflight(config, job):
+    commit_identity(config)
+    staged = list(filter(None, trusted_git(config, "diff", "--cached", "--name-only", "-z").decode().split("\0")))
+    if staged:
+        raise CommitRefused("preexisting_staged_changes", staged)
+    allowed = set(job["assignment"]["profile"]["coordination_files"])
+    dirty = [name for name in dirty_paths(config) if name not in allowed]
+    if dirty:
+        raise CommitRefused("preexisting_worktree_changes", dirty)
+
+
+def runner_commit(config, job_path, job, expected_head):
+    identity = commit_identity(config)
+    profile = job["assignment"]["profile"]
+    policy = commit_policy(profile)
+    root = Path(config["worktree"]).resolve()
+    if Path(trusted_git(config, "rev-parse", "--show-toplevel").decode().strip()).resolve() != root:
+        raise CommitRefused("worktree_must_be_repository_root")
+    with commit_locks(config) as (git_dir, index_lock, index_fd):
+        if (git(config, "branch", "--show-current") != config["branch"]
+                or git(config, "rev-parse", "HEAD") != expected_head):
+            raise CommitRefused("history_changed")
+        staged = trusted_git(config, "diff", "--cached", "--name-only", "-z", expected_head).decode().split("\0")
+        if any(staged):
+            raise CommitRefused("preexisting_staged_changes", filter(None, staged))
+        old = {}
+        for row in trusted_git(config, "ls-tree", "-r", "-z", expected_head).decode().split("\0"):
+            if row:
+                meta, name = row.split("\t", 1)
+                mode, _, oid = meta.split()
+                old[name] = (mode, oid)
+        paths = set(filter(None, trusted_git(config, "diff", "--no-renames", "--name-only", "-z", expected_head).decode().split("\0")))
+        paths.update(filter(None, trusted_git(config, "ls-files", "--others", "--exclude-standard", "-z").decode().split("\0")))
+        for name in paths:
+            checked_commit_path(name, root)
+        ignored = set()
+        if paths:
+            ignored = {name.removeprefix("./") for name in trusted_git(
+                config, "check-ignore", "--no-index", "-z", "--stdin",
+                data=b"".join(os.fsencode("./" + p) + b"\0" for p in sorted(paths)),
+                allowed=(0, 1)).decode().split("\0") if name}
+        selected = sorted(paths - ignored - set(profile["coordination_files"]))
+        if not selected:
+            raise CommitRefused("no_committable_changes")
+        if len(selected) > policy["max_files"]:
+            raise CommitRefused("file_count_limit", selected)
+        snapshots = {name: snapshot_entry(config, root, name, old.get(name), policy) for name in selected}
+        if sum(len(data) for _, data in snapshots.values() if data is not None) > policy["max_total_bytes"]:
+            raise CommitRefused("total_size_limit", selected)
+        fd, index_path = tempfile.mkstemp(prefix="commit-index-", dir=Path(config["state_dir"]))
+        os.close(fd)
+        os.unlink(index_path)
+        index_env = {"GIT_INDEX_FILE": index_path}
+        try:
+            trusted_git(config, "read-tree", expected_head, extra_env=index_env)
+            for name, (mode, data) in snapshots.items():
+                oid = (trusted_git(config, "hash-object", "-w", "--no-filters", "--stdin", data=data).decode().strip()
+                       if data is not None else "0" * 40)
+                trusted_git(config, "update-index", "-z", "--index-info", extra_env=index_env,
+                            data=f"{mode} {oid}\t{name}\0".encode())
+            tree = trusted_git(config, "write-tree", extra_env=index_env).decode().strip()
+            if tree == trusted_git(config, "rev-parse", expected_head + "^{tree}").decode().strip():
+                raise CommitRefused("no_committable_changes", selected)
+            message = f"runner: job {job['id']} kind {job['assignment']['kind']} round {job['round']}\n"
+            author_env = {"GIT_AUTHOR_NAME": identity["name"], "GIT_AUTHOR_EMAIL": identity["email"],
+                          "GIT_COMMITTER_NAME": identity["name"], "GIT_COMMITTER_EMAIL": identity["email"]}
+            sha = trusted_git(config, "commit-tree", tree, "-p", expected_head,
+                              data=message.encode(), extra_env=author_env).decode().strip()
+            if snapshots != {name: snapshot_entry(config, root, name, old.get(name), policy) for name in selected}:
+                raise CommitRefused("concurrent_change", selected)
+            if (git(config, "branch", "--show-current") != config["branch"]
+                    or git(config, "rev-parse", "HEAD") != expected_head):
+                raise CommitRefused("history_changed", selected)
+            # Persist an intent before publication. A crash leaves an explicit
+            # prepared/uncertain record for reconciliation, never a silent replay.
+            record = {"commit_sha": sha, "job_id": job["id"], "job_kind": job["assignment"]["kind"],
+                      "round": job["round"], "file_count": len(selected), "committed_by": "runner",
+                      "timestamp": now(), "state": "prepared"}
+            job.setdefault("runner_commits", []).append(record)
+            save_job(config, job_path, job)
+            with open(index_path, "rb") as handle, os.fdopen(os.dup(index_fd), "wb") as target:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    target.write(block)
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                # Address the configured branch explicitly; never dereference a
+                # potentially moved HEAD. The old SHA is a compare-and-swap lease.
+                trusted_git(config, "update-ref", "--no-deref",
+                            "refs/heads/" + config["branch"], sha, expected_head)
+            except CommitRefused as exc:
+                record["state"] = "not_published"
+                raise CommitRefused("history_changed", selected) from exc
+            job["head_commit"] = sha
+            record["state"] = "committed"
+            save_job(config, job_path, job)
+            os.replace(index_lock, git_dir / "index")
+            return sha
+        finally:
+            for name in (index_path, index_path + ".lock"):
+                if os.path.exists(name):
+                    os.unlink(name)
+
+
+def record_refusal(config, job_path, job, refusal):
+    job.setdefault("commit_refusals", []).append({
+        "job_id": job["id"], "job_kind": job["assignment"]["kind"], "round": job["round"],
+        "reason": refusal.reason, "paths": refusal.paths, "timestamp": now(),
+    })
+    job.update(status="blocked", error=str(refusal), updated_at=now())
+    save_job(config, job_path, job)
+
+
+def public_receipt(receipt):
+    public = {key: receipt[key] for key in ("status", "base_commit", "head_commit", "summary", "timestamp")}
+    commits = [{"commit_sha": c["commit_sha"], "committed_by": "runner"}
+               for c in receipt.get("runner_commits", []) if c["state"] == "committed"]
+    if commits:
+        public["runner_commits"] = commits
+    return public
 
 
 def version_key(value):
@@ -378,7 +696,10 @@ def prompt_for(config, job, role):
     if role == "worker":
         for scope in job["assignment"]["scopes"]:
             text += "\nExplicit worker-only scope: " + profile["extra_scopes"][scope]
-        text += "\nCommit only task changes. Report ready_for_review only after local commits and tests."
+        text += ("\nLeave task changes UNCOMMITTED. Do not run git add, commit, checkout, reset, "
+                 "or write any Git administrative files. Never request .git write access. "
+                 "The trusted runner validates paths and commits your changes. "
+                 "Report ready_for_review after implementation and focused tests.")
         if job.get("review"):
             text += "\nAddress independent findings:\n" + json.dumps(job["review"])
     else:
@@ -503,16 +824,21 @@ class GitHubClient:
         # Only fixed runner summaries are eligible, never agent-produced summaries.
         body = (f"Task receipt: {receipt['status']}\nCommits: {receipt['base_commit']}.."
                 f"{receipt['head_commit']}\nSummary: {receipt['summary']}\nRun: {receipt['timestamp']}")
+        for commit in receipt.get("runner_commits", []):
+            body += f"\nRunner commit: {commit['commit_sha']} (committed_by: runner)"
         subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/issues/{number}/comments",
                         "--input", "-"], input=json.dumps({"body": body}), text=True,
                        capture_output=True, check=True, timeout=30)
 
 
 def save_job(config, path, job):
+    job["schema_version"] = 2
     save(path, job)
     receipt = {"status": job["status"], "base_commit": job["base_commit"],
                "head_commit": job.get("head_commit"), "summary": SUMMARIES[job["status"]],
-               "timestamp": job["updated_at"]}
+               "timestamp": job["updated_at"], "schema_version": 2,
+               "runner_commits": job.get("runner_commits", []),
+               "commit_refusals": job.get("commit_refusals", [])}
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
 
 
@@ -526,7 +852,7 @@ def publish_receipt(config, path, job, client=None):
     save_job(config, path, job)
     try:
         (client or GitHubClient()).post(options["repository"], job["github_number"],
-                                       read(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json"))
+                                       public_receipt(read(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json")))
         job["receipt_delivery"] = "posted"
     except Exception:
         job["receipt_delivery"] = "unconfirmed; inspect GitHub before any manual retry"
@@ -661,14 +987,16 @@ def run_once(config, state=None, client=None):
                     if active_threads(config):
                         raise Blocked("Worktree became busy before worker phase")
                     check_dispatch_head(config, before_head)
+                    commit_preflight(config, job)
                     job["worker"] = execute(config, state, path, job, "worker")
                     validate_result(job["worker"], "worker")
+                    if (git(config, "branch", "--show-current") != config["branch"]
+                            or git(config, "rev-parse", "HEAD") != before_head):
+                        raise CommitRefused("history_changed")
                     if job["worker"]["status"] == "blocked":
                         job["status"] = "blocked"
                         break
-                    job["head_commit"] = git(config, "rev-parse", "HEAD")
-                    if job["head_commit"] == before_head:
-                        raise RuntimeError("Worker reported delivery without a new commit")
+                    runner_commit(config, path, job, before_head)
                 ensure_reviewable(config, job)
                 check_cli(config)
                 if active_threads(config):
@@ -691,6 +1019,8 @@ def run_once(config, state=None, client=None):
                 if attempt == config.get("max_rounds", 2):
                     job["status"] = "needs_primary_review"
             job["updated_at"] = now()
+        except CommitRefused as exc:
+            record_refusal(config, path, job, exc)
         except Blocked as exc:
             job.update(status="blocked", error=str(exc), updated_at=now())
         except Exception:
