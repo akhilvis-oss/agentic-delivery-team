@@ -48,7 +48,7 @@ The gate checks a PR description's structure. It does not prove evidence is true
 
 Copy the placeholder config/profile in [`runner/`](runner/) into private local files, choose a dedicated feature worktree and agent home, and enqueue an explicitly approved assignment. Review-only jobs let the primary request an independent read-only check of committed work. Workers leave files uncommitted; the trusted runner validates paths and makes commits under a locally configured runner identity. Local receipts always persist, including commit/refusal metadata for the future digest; GitHub receipt comments are opt-in and contain only fixed summaries and commit metadata.
 
-Read [setup, commands, compatibility limits and recovery](docs/task-runner.md) before running it. The CLI adapter deliberately accepts a narrow recorded version range. Nothing installs or starts a service automatically; the launchd file is a placeholder template.
+Read [setup, commands, compatibility limits and recovery](docs/task-runner.md) before running it. Agents are defined by local command/version/permission configuration; all phases start fresh and the runner never reads agent session files. The shipped Codex example accepts one recorded CLI version. Nothing installs or starts a service automatically; the launchd file is a placeholder template.
 
 ## Using this repository
 

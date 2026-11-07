@@ -16,6 +16,18 @@ spec = importlib.util.spec_from_file_location("task_runner", ROOT / "runner/task
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 REAL_CHECK_CLI = runner.check_cli
+CLI_VERSION = "0.164.0-alpha.11.1"
+
+
+def agent_config(executable):
+    agent = runner.read(ROOT / "runner/config.example.json")["agent"]
+    agent["command"][0] = executable
+    agent["version_command"][0] = executable
+    return agent
+
+
+def use_fake(cfg, state, source):
+    cfg["agent"] = agent_config(fake_agent(state, source))
 
 
 def result(status, role="worker"):
@@ -38,7 +50,7 @@ def setup(tmp_path, monkeypatch):
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "feature", str(repo)], check=True)
     cfg = dict(worktree=str(repo), branch="feature", state_dir=str(tmp_path / "state"),
-               codex_home=str(tmp_path / "agent-home"), codex_bin="must-not-launch",
+               agent_home=str(tmp_path / "agent-home"), agent=agent_config("/must-not-launch"),
                worker_model="fixture-worker", reviewer_model="fixture-reviewer", max_rounds=2,
                phase_timeout_seconds=5,
                commit_identity={"name": "Runner Fixture", "email": "runner@example.invalid"},
@@ -50,7 +62,7 @@ def setup(tmp_path, monkeypatch):
     commit(cfg)
     state = runner.private_dir(cfg["state_dir"])
     path = runner.enqueue(cfg, "task", "bounded task")
-    monkeypatch.setattr(runner, "check_cli", lambda _: runner.CLI_MIN)
+    monkeypatch.setattr(runner, "check_cli", lambda _: CLI_VERSION)
     return cfg, state, path, runner.read(path)
 
 
@@ -64,15 +76,6 @@ def execute_delivery(config, state, path, job, role):
         deliver(config)
     return result("ready_for_review" if role == "worker" else "ready_for_integration", role)
 
-
-def rollout(config, *, event="task_started", identity="fixture-thread", timestamp="2026-01-01T10:00:00Z"):
-    sessions = runner.private_dir(Path(config["codex_home"]) / "sessions")
-    path = sessions / "fixture.jsonl"
-    rows = [dict(type="session_meta", timestamp=timestamp,
-                 payload=dict(id=identity, cwd=config["worktree"], cli_version=runner.CLI_MIN)),
-            dict(type="event_msg", timestamp=timestamp, payload=dict(type=event))]
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    return path
 
 
 def test_bounded_repair_then_independent_review_and_no_duplicate(setup, monkeypatch):
@@ -102,7 +105,7 @@ def test_delayed_job_waits_without_spending_model_calls(setup, monkeypatch):
     monkeypatch.setattr(runner, "check_cli", lambda _: pytest.fail("not due; no CLI probes"))
     runner.run_once(cfg)
     assert runner.read(path)["status"] == "queued"
-    monkeypatch.setattr(runner, "check_cli", lambda _: runner.CLI_MIN)
+    monkeypatch.setattr(runner, "check_cli", lambda _: CLI_VERSION)
     monkeypatch.setattr(runner.time, "time", lambda: 2000)
     monkeypatch.setattr(runner, "execute", execute_delivery)
     runner.run_once(cfg)
@@ -123,14 +126,6 @@ def test_retry_limit(setup, monkeypatch):
     assert runner.read(path)["status"] == "needs_primary_review"
     assert runner.read(path)["round"] == 2
 
-
-def test_busy_thread_defers_task(setup, monkeypatch):
-    cfg, state, path, _ = setup
-    rollout(cfg)
-    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("busy"))
-    runner.run_once(cfg)
-    assert runner.read(path)["status"] == "queued"
-    assert runner.read(path)["waiting_for_threads"] == ["fixture-thread"]
 
 
 def test_head_change_blocks_not_silent_rebase(setup):
@@ -204,15 +199,13 @@ def test_auth_isolation_and_permissions(setup, monkeypatch):
         monkeypatch.setenv(key, "do-not-inherit")
     monkeypatch.setenv("CODEX_HOME", "primary")
     env = runner.environment(cfg)
-    assert env["CODEX_HOME"] == cfg["codex_home"]
+    assert env["CODEX_HOME"] == cfg["agent_home"]
     assert not any(key in env for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "GH_TOKEN", "OTHER_PROVIDER_KEY", "PYTHONPATH"])
-    cfg.update(worker_start="resume", worker_thread_id="fixture-seed")
-    worker = runner.command(cfg, "worker", Path("out"), Path("schema"))
-    reviewer = runner.command(cfg, "reviewer", Path("out"), Path("schema"))
+    worker = runner.command(cfg, "worker", Path("out"), Path("schema"), Path("prompt"))
+    reviewer = runner.command(cfg, "reviewer", Path("out"), Path("schema"), Path("prompt"))
     assert "--approve-for-me" in worker and "--sandbox" not in worker
     assert "read-only" in reviewer and "never" in reviewer
-    assert "resume" in worker and "fixture-seed" in worker
-    assert "resume" not in reviewer and "fork" not in reviewer
+    assert not any(flag in worker + reviewer for flag in ("resume", "fork"))
     assert not any("bypass" in flag for flag in worker + reviewer)
 
 
@@ -236,11 +229,11 @@ output.write_text(json.dumps(dict(status='ready_for_review',summary='done',tests
 
 def test_real_subprocess_structured_protocol(setup):
     cfg, state, path, job = setup
-    cfg["codex_bin"] = fake_agent(state, "import json,pathlib,sys\nsys.stdin.read()\n" + OUTPUT + EVENTS)
+    use_fake(cfg, state, "import json,pathlib,sys\nsys.stdin.read()\n" + OUTPUT + EVENTS)
     job["round"] = 1
     assert runner.execute(cfg, state, path, job, "worker")["status"] == "ready_for_review"
     assert "child_pid" not in job
-    assert runner.read(state / "worker_thread.json")["thread_id"] == "fixture-managed"
+    assert not (state / "worker_thread.json").exists()
     for name in (state / "runs/task/round_1_worker").iterdir():
         assert name.stat().st_mode & 0o777 == 0o600
 
@@ -248,21 +241,21 @@ def test_real_subprocess_structured_protocol(setup):
 @pytest.mark.parametrize("cancel", [False, True])
 def test_timeout_and_cancel_stop_owned_process(setup, cancel):
     cfg, state, path, job = setup
-    cfg["codex_bin"] = fake_agent(state, "import sys,time\nsys.stdin.read()\ntime.sleep(60)\n")
+    use_fake(cfg, state, "import sys,time\nsys.stdin.read()\ntime.sleep(60)\n")
     cfg["phase_timeout_seconds"] = 0.05
     job["round"] = 1
     if cancel:
         (state / "CANCEL").touch()
     with pytest.raises((runner.Cancelled, TimeoutError), match="Cancelled|time limit"):
         runner.execute(cfg, state, path, job, "worker")
-    assert "child_pid" not in job and job["owned_stop_at"]
+    assert "child_pid" not in job
 
 
-def test_missing_completion_event_is_failure(setup):
+def test_missing_final_answer_is_failure(setup):
     cfg, state, path, job = setup
-    cfg["codex_bin"] = fake_agent(state, 'import sys\nsys.stdin.read()\nprint(\'{"type":"turn.started"}\')\n')
+    use_fake(cfg, state, 'import sys\nsys.stdin.read()\nprint(\'{"type":"turn.started"}\')\n')
     job["round"] = 1
-    with pytest.raises(RuntimeError, match="completed turn"):
+    with pytest.raises(FileNotFoundError):
         runner.execute(cfg, state, path, job, "worker")
 
 
@@ -341,39 +334,6 @@ def test_dependency_rejects_unrelated_worktree_changes(setup, dirty):
     assert runner.read(second)["status"] == "blocked"
 
 
-@pytest.mark.parametrize("owned_stop", [True, False])
-def test_fork_metadata_and_reaped_timeout_do_not_block_next_task(setup, owned_stop):
-    cfg, state, _, _ = setup
-    log = rollout(cfg)
-    content = log.read_text()
-    parent = dict(type="session_meta", timestamp="2026-01-01T10:00:00Z",
-                  payload=dict(id="fixture-parent", cwd=cfg["worktree"], cli_version=runner.CLI_MIN))
-    log.write_text(content + json.dumps(parent) + "\n")
-    assert runner.active_threads(cfg) == ["fixture-thread"]
-    previous = dict(status="failed", worker_thread_id="fixture-thread", updated_at="2026-01-01T10:30:00+00:00")
-    if owned_stop:
-        previous["owned_stop_at"] = previous["updated_at"]
-    runner.save(state / "tasks/previous.json", previous)
-    assert runner.active_threads(cfg) == ([] if owned_stop else ["fixture-thread"])
-    log.write_text(content + json.dumps(dict(type="event_msg", timestamp="2026-01-01T10:31:00Z",
-                                           payload=dict(type="token_count"))) + "\n")
-    assert runner.active_threads(cfg) == ["fixture-thread"]
-    log.write_text(content)
-    previous["child_pid"] = 123
-    runner.save(state / "tasks/previous.json", previous)
-    assert runner.active_threads(cfg) == ["fixture-thread"]
-
-
-def test_unknown_lifecycle_timestamps_never_clear_busy_guard(setup, monkeypatch):
-    cfg, state, path, _ = setup
-    log = rollout(cfg)
-    log.write_text(log.read_text().replace('"timestamp": "2026-01-01T10:00:00Z", ', ""))
-    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("unknown lifecycle"))
-    runner.run_once(cfg)
-    assert runner.read(path)["status"] == "blocked"
-    assert "session/lifecycle" in runner.read(path)["error"]
-
-
 # New v0.3 guarantees and additional adversarial cases.
 
 def test_immutable_assignment_profile_and_unique_ids(setup):
@@ -396,29 +356,10 @@ def test_base_binding_tampering_blocks(setup):
     assert runner.read(path)["status"] == "blocked"
 
 
-@pytest.mark.parametrize("mutation", ["unknown_event", "partial_json", "unknown_session_version", "missing_meta"])
-def test_unknown_session_format_blocks_before_any_model_call(setup, monkeypatch, mutation):
-    cfg, _, path, _ = setup
-    log = rollout(cfg, event="task_complete")
-    text = log.read_text()
-    if mutation == "unknown_event":
-        text = text.replace("task_complete", "task_new_format")
-    elif mutation == "partial_json":
-        text += '{"type":'
-    elif mutation == "unknown_session_version":
-        text = text.replace(runner.CLI_MIN, "99.0.0")
-    else:
-        text = text.splitlines()[1] + "\n"
-    log.write_text(text)
-    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("must not call model"))
-    runner.run_once(cfg)
-    assert runner.read(path)["status"] == "blocked"
-
-
 @pytest.mark.parametrize("version", ["codex-cli 99.0.0", "unknown", "codex-cli 0.164.0", "codex-cli 0.164.0-alpha.11.2"])
 def test_unsupported_cli_blocks_before_any_model_call(setup, monkeypatch, version):
     cfg, state, path, _ = setup
-    cfg["codex_bin"] = fake_agent(state, f"print({version!r})\n")
+    use_fake(cfg, state, f"print({version!r})\n")
     monkeypatch.setattr(runner, "check_cli", REAL_CHECK_CLI)
     monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("unsupported version"))
     runner.run_once(cfg)
@@ -545,7 +486,7 @@ def test_timeout_stops_owned_descendant_group(setup, monkeypatch):
     source = ("import subprocess,sys,time\nsys.stdin.read()\n"
               + f"subprocess.Popen([sys.executable,'-c',{child!r}])\n"
               + "time.sleep(60)\n")
-    cfg["codex_bin"] = fake_agent(state, source)
+    use_fake(cfg, state, source)
     cfg["phase_timeout_seconds"] = 0.5
     # Start the simulated deadline only after the descendant is demonstrably
     # running. Do not assume nested process startup fits a wall-clock fraction.
@@ -581,7 +522,7 @@ def populated_config(setup, tmp_path):
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps(cfg["project_profile"]))
     settings = {key: value for key, value in cfg.items() if key != "project_profile"}
-    settings.update(profile=str(profile), codex_bin=str(tmp_path / "fake-agent"), phase_timeout_seconds=60)
+    settings.update(profile=str(profile), phase_timeout_seconds=60)
     path = tmp_path / "config.json"
     path.write_text(json.dumps(settings))
     return path, settings
@@ -618,7 +559,7 @@ def test_bad_config_is_rejected(setup, tmp_path, override):
 def test_state_and_agent_home_must_be_outside_worktree(setup, tmp_path):
     cfg, _, _, _ = setup
     path, settings = populated_config(setup, tmp_path)
-    for key in ("state_dir", "codex_home"):
+    for key in ("state_dir", "agent_home"):
         altered = {**settings, key: str(Path(cfg["worktree"]) / "private")}
         path.write_text(json.dumps(altered))
         with pytest.raises(ValueError):
@@ -639,7 +580,7 @@ def test_profile_inputs_and_coordination_paths_are_validated(tmp_path):
 def test_setup_assets_are_placeholders_and_plist_parses():
     import plistlib
     config = runner.read(ROOT / "runner/config.example.json")
-    for key in ("worktree", "state_dir", "codex_home", "codex_bin", "profile", "branch", "worker_model", "reviewer_model"):
+    for key in ("worktree", "state_dir", "agent_home", "profile", "branch", "worker_model", "reviewer_model"):
         assert config[key].startswith("<") and config[key].endswith(">")
     assert config["github_receipts"]["enabled"] is False
     profile = runner.read(ROOT / "runner/profile.example.json")
@@ -663,35 +604,6 @@ def test_review_only_rejects_invalid_result_schema(setup, monkeypatch, bad):
     monkeypatch.setattr(runner, "execute", lambda *args: bad)
     runner.run_once(cfg)
     assert runner.read(path)["status"] == "failed"
-
-
-def test_seed_session_must_exist_and_be_for_this_worktree(setup, monkeypatch):
-    cfg, _, path, _ = setup
-    cfg.update(worker_start="fork", worker_thread_id="fixture-seed")
-    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("missing seed"))
-    runner.run_once(cfg)
-    assert runner.read(path)["status"] == "blocked"
-    log = rollout(cfg, event="task_complete", identity="fixture-seed")
-    log.write_text(log.read_text().replace(cfg["worktree"], "/different/worktree"))
-    with pytest.raises(runner.Blocked):
-        runner.active_threads(cfg, "fixture-seed")
-
-
-@pytest.mark.parametrize("variant", ["extra", "failed", "unknown", "bad_thread"])
-def test_exec_protocol_cannot_approve_unknown_or_failed_turn(tmp_path, variant):
-    rows = [dict(type="thread.started", thread_id="fixture"), dict(type="turn.started"), dict(type="turn.completed")]
-    if variant == "extra":
-        rows.append(dict(type="turn.completed"))
-    elif variant == "failed":
-        rows.insert(2, dict(type="turn.failed"))
-    elif variant == "unknown":
-        rows.insert(2, dict(type="new.lifecycle"))
-    else:
-        rows[0]["thread_id"] = None
-    path = tmp_path / "events.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    with pytest.raises((runner.Blocked, RuntimeError)):
-        runner.parse_events(path)
 
 
 def test_git_receipt_client_posts_only_allowlisted_payload(monkeypatch):
@@ -733,21 +645,6 @@ def test_fingerprint_includes_ignored_and_index_changes(setup):
     assert runner.fingerprint(cfg) != before
 
 
-def test_unknown_lifecycle_created_by_worker_blocks_reviewer_call(setup, monkeypatch):
-    cfg, _, path, _ = setup
-    calls = []
-
-    def execute(config, state, path, job, role):
-        calls.append(role)
-        deliver(config)
-        rollout(config, event="task_unknown")
-        return result("ready_for_review")
-
-    monkeypatch.setattr(runner, "execute", execute)
-    runner.run_once(cfg)
-    assert calls == ["worker"] and runner.read(path)["status"] == "blocked"
-
-
 def test_end_to_end_fake_worker_and_fresh_reviewer(setup, monkeypatch):
     cfg, state, path, _ = setup
     source = '''import json,os,pathlib,subprocess,sys
@@ -772,16 +669,16 @@ rows=[dict(type='session_meta',payload=dict(id=identity,cwd=os.getcwd(),cli_vers
 print(json.dumps(dict(type='thread.started',thread_id=identity)))
 print(json.dumps(dict(type='turn.started')))
 print(json.dumps(dict(type='turn.completed')))
-'''.replace('VERSION', runner.CLI_MIN)
-    cfg["codex_bin"] = fake_agent(state, source)
+'''.replace('VERSION', CLI_VERSION)
+    use_fake(cfg, state, source)
     monkeypatch.setattr(runner, "check_cli", REAL_CHECK_CLI)
     runner.run_once(cfg)
     final = runner.read(path)
     assert final["status"] == "ready_for_integration"
     assert final["reviewed_head"] == runner.git(cfg, "rev-parse", "HEAD")
-    assert final["cli_version"] == runner.CLI_MIN
+    assert final["cli_version"] == 'codex-cli ' + CLI_VERSION
     assert runner.read(state / "receipts/task.json")["status"] == "ready_for_integration"
-    # A fresh assignment uses the managed thread, with recognized lifecycle metadata.
+    # Another assignment also starts fresh, without consulting stored sessions.
     next_path = runner.enqueue(cfg, "next", "next bounded task")
     runner.run_once(cfg)
     assert runner.read(next_path)["status"] == "ready_for_integration"
@@ -816,7 +713,7 @@ def test_phase_probes_cannot_change_bound_head_or_branch(setup, monkeypatch, pro
                 commit(config)
             else:
                 runner.git(config, "checkout", "-qb", "unexpected")
-        return runner.CLI_MIN
+        return CLI_VERSION
 
     def execute(config, state, path, job, role):
         calls.append(role)
@@ -833,18 +730,159 @@ def test_phase_probes_cannot_change_bound_head_or_branch(setup, monkeypatch, pro
     assert calls == ([] if probe == 2 else ["worker"] if probe == 3 else ["worker", "reviewer"])
 
 
-@pytest.mark.parametrize("cancel", [False, True])
-def test_reviewer_stop_never_clears_worker_busy_evidence(setup, cancel):
+
+@pytest.mark.parametrize('output', ['', 'unstructured progress\n', '{"type":"future.event"}\n',
+                                  '{"type":"turn.failed"}\n{partial', '\\xff'])
+def test_extra_stdout_is_opaque_and_never_required(setup, output):
     cfg, state, path, job = setup
-    rollout(cfg, timestamp=runner.now())
-    job.update(round=1, worker_thread_id="fixture-thread", head_commit=job["base_commit"])
-    cfg["codex_bin"] = fake_agent(state, "import sys,time\nsys.stdin.read()\ntime.sleep(60)\n")
-    cfg["phase_timeout_seconds"] = 0.05
-    if cancel:
-        (state / "CANCEL").touch()
-    with pytest.raises((runner.Cancelled, TimeoutError)):
-        runner.execute(cfg, state, path, job, "reviewer")
-    job.update(status="failed", updated_at=runner.now())
-    runner.save_job(cfg, path, job)
-    assert "owned_stop_at" not in job
-    assert runner.active_threads(cfg) == ["fixture-thread"]
+    use_fake(cfg, state, 'import json,pathlib,sys\nsys.stdin.read()\n' + OUTPUT
+             + f'print({output!r})\n')
+    job['round'] = 1
+    assert runner.execute(cfg, state, path, job, 'worker')['status'] == 'ready_for_review'
+
+
+@pytest.mark.parametrize('failure', ['nonzero', 'missing', 'malformed', 'incomplete', 'contradictory', 'duplicate', 'nonjson'])
+def test_required_contract_signals_cannot_approve(setup, failure):
+    cfg, state, path, _ = setup
+    source = 'import json,pathlib,sys\nsys.stdin.read()\n' + OUTPUT
+    source += "pathlib.Path('delivery.txt').write_text('delivery')\n"
+    if failure == 'nonzero':
+        source += 'sys.exit(2)\n'
+    elif failure == 'missing':
+        source += 'output.unlink()\n'
+    elif failure == 'malformed':
+        source += "output.write_text('{partial')\n"
+    elif failure == 'incomplete':
+        source += "output.write_text('{}')\n"
+    elif failure == 'duplicate':
+        duplicate = '{"status":"blocked",' + json.dumps(result('ready_for_review'))[1:]
+        source += f'output.write_text({duplicate!r})\n'
+    elif failure == 'nonjson':
+        source += "output.write_text(output.read_text().replace('[]', '[NaN]', 1))\n"
+    else:
+        source += "output.write_text(json.dumps(dict(status='ready_for_integration',summary='x',tests=[],limitations=[])))\n"
+    use_fake(cfg, state, source)
+    runner.run_once(cfg)
+    final = runner.read(path)
+    assert final['status'] == 'failed'
+    assert not final.get('runner_commits') and 'review' not in final
+    if failure == 'duplicate':
+        answer = state / 'runs/task/round_1_worker/result.json'
+        assert json.loads(answer.read_text())['status'] == 'ready_for_review'
+        with pytest.raises(ValueError, match='Duplicate'):
+            runner.read_answer(answer)
+
+
+@pytest.mark.parametrize('mode', ['resume', 'fork'])
+def test_nonfresh_configs_block_before_probe_or_model(setup, monkeypatch, tmp_path, mode):
+    cfg, _, path, _ = setup
+    config_path, settings = populated_config(setup, tmp_path)
+    settings['worker_start'] = mode
+    config_path.write_text(json.dumps(settings))
+    with pytest.raises(runner.Blocked, match='Fresh sessions only'):
+        runner.load_config(config_path)
+    cfg['worker_start'] = mode
+    monkeypatch.setattr(runner, 'check_cli', lambda _: pytest.fail('must not probe'))
+    monkeypatch.setattr(runner, 'execute', lambda *a: pytest.fail('must not dispatch'))
+    runner.run_once(cfg)
+    assert runner.read(path)['status'] == 'blocked'
+
+
+@pytest.mark.parametrize('override', [
+    {'command': 'shell command'}, {'command': []}, {'version_command': []},
+    {'command': ['/agent', '{unknown}']}, {'command': ['/agent', '{model!r}']},
+    {'command': ['/agent', '{model.__class__}']}, {'command': ['relative']},
+    {'command': ['/agent', '--flags={role_flags}']},
+    {'version_command': ['/agent', '{output_file}']}, {'version_pattern': ''},
+    {'version_pattern': '['}, {'environment': {'PYTHONPATH': '/untrusted'}},
+    {'environment': {'AGENT_HOME': '{output_file}'}}, {'worker_flags': ['<UNFILLED>']},
+])
+def test_invalid_agent_definitions_fail_before_dispatch(setup, tmp_path, override):
+    config_path, settings = populated_config(setup, tmp_path)
+    settings['agent'].update(override)
+    config_path.write_text(json.dumps(settings))
+    with pytest.raises((ValueError, runner.re.PatternError)):
+        runner.load_config(config_path)
+
+
+def test_templates_preserve_argument_boundaries_and_prompt_file(setup):
+    cfg, _, _, _ = setup
+    cfg['agent']['command'] += ['{prompt_file}']
+    cfg['worker_model'] = 'model with spaces; $(untrusted)'
+    command = runner.command(cfg, 'worker', Path('/output with spaces'), Path('/schema'), Path('/prompt file'))
+    assert cfg['worker_model'] in command
+    assert '/output with spaces' in command and command[-1] == '/prompt file'
+    assert '--ask-for-approval' not in command
+
+
+def test_generic_agent_fresh_corrections_and_no_session_reads(setup, monkeypatch):
+    cfg, state, path, _ = setup
+    # No Codex flags, event stream or protocol. Prompt-file input, arbitrary
+    # version string, JSON-file output, role flags and optional environment only.
+    source = '''import json,pathlib,sys
+if '--build' in sys.argv:
+ print('Example Agent build 7'); sys.exit(0)
+assert len(sys.argv)==5
+prompt=pathlib.Path(sys.argv[1]).read_text()
+review=sys.argv[4]=='inspect'
+assert ('INDEPENDENT READ-ONLY REVIEW' in prompt)==review
+assert 'resume' not in sys.argv and 'fork' not in sys.argv
+marker=pathlib.Path(sys.argv[3])
+count=int(marker.read_text()) if marker.exists() else 0
+marker.write_text(str(count+1))
+if review:
+ status='needs_changes' if count==1 else 'ready_for_integration'
+else:
+ delivery=pathlib.Path('delivery.txt')
+ delivery.write_text((delivery.read_text() if delivery.exists() else '')+'change\\n')
+ status='ready_for_review'
+value=dict(status=status,summary='synthetic',tests=[],limitations=[])
+if review: value['findings']=[]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(value))
+print('anything, including unknown records and malformed JSON: {')
+'''
+    binary = fake_agent(state, source)
+    cfg['agent'] = dict(command=[binary, '{prompt_file}', '{output_file}', str(state / 'starts'), '{role_flags}'],
+                        version_command=[binary, '--build'], version_pattern='Example Agent build 7',
+                        worker_flags=['implement'], reviewer_flags=['inspect'])
+    # Even stale/malformed legacy identities and arbitrary agent storage are
+    # irrelevant. Fail if the coordinator attempts to open or enumerate them.
+    home = runner.private_dir(cfg['agent_home'])
+    (home / 'sessions').mkdir()
+    (home / 'sessions/broken.jsonl').write_text('{unknown')
+    (state / 'worker_thread.json').write_text('{stale')
+    real_open, real_iterdir, real_glob, real_rglob = Path.open, Path.iterdir, Path.glob, Path.rglob
+
+    def forbidden(p):
+        return home == p or home in p.parents or p == state / 'worker_thread.json'
+
+    def guarded_open(p, *a, **kw):
+        assert not forbidden(p), 'runner must never read agent storage'
+        return real_open(p, *a, **kw)
+
+    def guarded_iterdir(p):
+        assert not forbidden(p), 'runner must never enumerate agent storage'
+        return real_iterdir(p)
+
+    def guarded_glob(p, pattern, **kw):
+        assert not forbidden(p), 'runner must never glob agent storage'
+        return real_glob(p, pattern, **kw)
+
+    def guarded_rglob(p, pattern, **kw):
+        assert not forbidden(p), 'runner must never recurse into agent storage'
+        return real_rglob(p, pattern, **kw)
+
+    monkeypatch.setattr(Path, 'rglob', guarded_rglob)
+    monkeypatch.setattr(Path, 'open', guarded_open)
+    monkeypatch.setattr(Path, 'iterdir', guarded_iterdir)
+    monkeypatch.setattr(Path, 'glob', guarded_glob)
+    monkeypatch.setattr(runner, 'check_cli', REAL_CHECK_CLI)
+    runner.run_once(cfg)
+    final = runner.read(path)
+    assert final['status'] == 'ready_for_integration'
+    assert final['cli_version'] == 'Example Agent build 7'
+    assert final['protocol'] == 'agent-file-v1'
+    assert (state / 'starts').read_text() == '4'
+    assert len(final['runner_commits']) == 2
+    assert 'worker_thread_id' not in final
+    assert not any(key.startswith('CODEX') for key in runner.environment(cfg))
