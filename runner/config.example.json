@@ -2,12 +2,9 @@
   "worktree": "<ABSOLUTE_FEATURE_WORKTREE>",
   "branch": "<FEATURE_BRANCH>",
   "state_dir": "<ABSOLUTE_PRIVATE_RUNNER_STATE_OUTSIDE_WORKTREE>",
-  "codex_home": "<ABSOLUTE_DEDICATED_AGENT_HOME_OUTSIDE_WORKTREE>",
-  "codex_bin": "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
   "profile": "<ABSOLUTE_PROJECT_PROFILE_JSON>",
   "worker_model": "<WORKER_MODEL>",
   "reviewer_model": "<REVIEWER_MODEL>",
-  "worker_start": "new",
   "max_rounds": 2,
   "phase_timeout_seconds": 1800,
   "github_receipts": {
@@ -17,5 +14,42 @@
   "commit_identity": {
     "name": "<RUNNER_AUTHOR_NAME>",
     "email": "<RUNNER_EMAIL>"
+  },
+  "agent_home": "<ABSOLUTE_DEDICATED_AGENT_HOME_OUTSIDE_WORKTREE>",
+  "agent": {
+    "command": [
+      "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+      "{role_flags}",
+      "exec",
+      "--ignore-user-config",
+      "--cd",
+      "{worktree}",
+      "--model",
+      "{model}",
+      "--color",
+      "never",
+      "--output-schema",
+      "{schema_file}",
+      "--output-last-message",
+      "{output_file}",
+      "-"
+    ],
+    "version_command": [
+      "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+      "--version"
+    ],
+    "version_pattern": "codex-cli 0\\.164\\.0-alpha\\.11\\.1",
+    "worker_flags": [
+      "--approve-for-me"
+    ],
+    "reviewer_flags": [
+      "--ask-for-approval",
+      "never",
+      "--sandbox",
+      "read-only"
+    ],
+    "environment": {
+      "CODEX_HOME": "{agent_home}"
+    }
   }
 }

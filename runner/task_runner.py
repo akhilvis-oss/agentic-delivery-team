@@ -14,15 +14,12 @@ from pathlib import Path
 import re
 import signal
 import stat
+import string
 import subprocess
 import tempfile
 import time
 
-# Adapter compatibility envelope: inspected CLI flags, synthetic protocol tests.
-# Deliberately narrow; extending it requires reviewing flags and lifecycle fixtures.
-CLI_MIN = "0.164.0-alpha.11.1"
-CLI_MAX_EXCLUSIVE = "0.164.0-alpha.11.2"
-PROTOCOL = "codex-jsonl-v1"
+PROTOCOL = "agent-file-v1"
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{40}")
 TERMINAL = {"ready_for_integration", "needs_primary_review", "blocked", "failed", "interrupted"}
@@ -97,10 +94,11 @@ def git(config, *args):
 
 def environment(config):
     # Allowlist instead of guessing every provider's API-key name. HOME retains
-    # its original meaning; agent auth is selected only via dedicated CODEX_HOME.
+    # its original meaning; agent-specific home selection is explicit config.
     env = {k: v for k, v in os.environ.items()
            if k in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT"}}
-    env.update(CODEX_HOME=config["codex_home"], PYTHONDONTWRITEBYTECODE="1")
+    env.update({key: expand(value, config) for key, value in config["agent"].get("environment", {}).items()})
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env[key] = "2"
@@ -149,19 +147,19 @@ def load_profile(path):
 
 def load_config(path):
     config = read(path)
-    for key in ("worktree", "state_dir", "codex_home", "codex_bin", "profile",
+    for key in ("worktree", "state_dir", "agent_home", "profile",
                 "branch", "worker_model", "reviewer_model"):
         if not isinstance(config.get(key), str) or not config[key].strip() or "<" in config[key]:
             raise ValueError("Config requires populated paths, branch and agent models")
-    for key in ("worktree", "state_dir", "codex_home", "codex_bin", "profile"):
+    for key in ("worktree", "state_dir", "agent_home", "profile"):
         if not Path(config[key]).is_absolute():
             raise ValueError("Config paths must be absolute")
     worktree = Path(config["worktree"]).resolve()
-    for key in ("state_dir", "codex_home"):
+    for key in ("state_dir", "agent_home"):
         location = Path(config[key]).resolve()
         if location == worktree or worktree in location.parents:
             raise ValueError("Private state and agent home must be outside the worktree")
-    if Path(config["state_dir"]).resolve() == Path(config["codex_home"]).resolve():
+    if Path(config["state_dir"]).resolve() == Path(config["agent_home"]).resolve():
         raise ValueError("Agent home and runner state must be separate directories")
     if config["branch"] in {"main", "master"}:
         raise ValueError("Runner requires a feature branch")
@@ -180,10 +178,7 @@ def load_config(path):
     if "commit_identity" in config:
         commit_identity(config)
     config["project_profile"] = load_profile(config["profile"])
-    if config.get("worker_start", "new") not in {"new", "fork", "resume"}:
-        raise ValueError("worker_start must be new, fork or resume")
-    if config.get("worker_start", "new") != "new" and not config.get("worker_thread_id"):
-        raise ValueError("Fork/resume needs an explicit seed thread")
+    validate_agent(config)
     return config
 
 
@@ -501,90 +496,80 @@ def public_receipt(receipt):
     return public
 
 
-def version_key(value):
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", value)
-    if not match:
-        raise Blocked("Unrecognised agent CLI version format")
-    pre = match[4]
-    parts = tuple((0, int(p)) if p.isdigit() else (1, p) for p in pre.split(".")) if pre else ()
-    return (*map(int, match.group(1, 2, 3)), 1 if pre is None else 0, parts)
+# Trusted operator templates are always argv data, never shell commands.
+CONTEXT_FIELDS = {"worktree", "agent_home"}
+PHASE_FIELDS = CONTEXT_FIELDS | {"model", "prompt_file", "output_file", "schema_file"}
 
 
-def supported_version(value):
-    return version_key(CLI_MIN) <= version_key(value) < version_key(CLI_MAX_EXCLUSIVE)
+def template_fields(value):
+    if not isinstance(value, str) or not value or "<" in value or "\x00" in value:
+        raise ValueError("Agent templates must be populated nonempty strings")
+    fields = set()
+    for _, field, spec, conversion in string.Formatter().parse(value):
+        if field is not None:
+            if spec or conversion or field not in PHASE_FIELDS | {"role_flags"}:
+                raise ValueError("Unknown or formatted agent placeholder")
+            fields.add(field)
+    return fields
+
+
+def validate_agent(config):
+    if (config.get("worker_start", "new") != "new" or "worker_thread_id" in config
+            or "codex_home" in config or "codex_bin" in config):
+        raise Blocked("Fresh sessions only; migrate legacy agent configuration; resume/fork deferred")
+    agent = config.get("agent")
+    required = {"command", "version_command", "version_pattern"}
+    if (not isinstance(agent, dict) or not required <= set(agent)
+            or set(agent) - required - {"worker_flags", "reviewer_flags", "environment"}):
+        raise ValueError("Agent requires command, version_command and version_pattern")
+    for key in ("command", "version_command", "worker_flags", "reviewer_flags"):
+        args = agent.get(key, [])
+        if not isinstance(args, list) or (key in required and not args):
+            raise ValueError("Agent commands and flags must be argument arrays")
+        allowed = CONTEXT_FIELDS if key == "version_command" else PHASE_FIELDS
+        for arg in args:
+            fields = template_fields(arg)
+            if key == "command" and arg == "{role_flags}":
+                continue
+            if fields - allowed:
+                raise ValueError("Placeholder is not available in this agent template")
+    if ((agent.get("worker_flags") or agent.get("reviewer_flags"))
+            and agent["command"].count("{role_flags}") != 1):
+        raise ValueError("Role flags require exactly one standalone {role_flags} argument")
+    for key in ("command", "version_command"):
+        if not Path(expand(agent[key][0], config)).is_absolute():
+            raise ValueError("Agent executable paths must be absolute")
+    pattern = agent["version_pattern"]
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError("Accepted version pattern must be populated")
+    re.compile(pattern)
+    env = agent.get("environment", {})
+    if not isinstance(env, dict):
+        raise ValueError("Agent environment must be an explicit mapping")
+    for key, value in env.items():
+        if (not isinstance(key, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key)
+                or key in {"HOME", "PATH", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+                or key.startswith(("GIT_", "LD_", "DYLD_"))
+                or template_fields(value) - CONTEXT_FIELDS):
+            raise ValueError("Invalid agent environment setting")
+
+
+def expand(value, config, **phase):
+    return value.format(worktree=config["worktree"], agent_home=config["agent_home"], **phase)
 
 
 def check_cli(config):
+    validate_agent(config)
+    args = [expand(arg, config) for arg in config["agent"]["version_command"]]
     try:
-        result = subprocess.run([config["codex_bin"], "--version"], env=environment(config),
+        result = subprocess.run(args, cwd=config["worktree"], env=environment(config),
                                 capture_output=True, text=True, timeout=10, check=True)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Blocked("Agent CLI version probe failed; no model call made") from exc
-    match = re.fullmatch(r"codex-cli (\S+)\s*", result.stdout)
-    if not match or not supported_version(match[1]):
-        raise Blocked(f"Unsupported agent CLI; supported range is [{CLI_MIN}, {CLI_MAX_EXCLUSIVE})")
-    return match[1]
-
-
-def timestamp(value):
-    stamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if stamp.tzinfo is None:
-        raise ValueError("Missing timezone")
-    return stamp
-
-
-def active_threads(config, required_thread=None):
-    """Fail closed on unknown rollout/lifecycle formats, including partial writes."""
-    active = []
-    known = set()
-    stopped = {}
-    for job_path in (Path(config["state_dir"]) / "tasks").glob("*.json"):
-        job = read(job_path)
-        if job.get("owned_stop_at") and not job.get("child_pid") and job.get("worker_thread_id"):
-            thread, stamp = job["worker_thread_id"], timestamp(job["owned_stop_at"])
-            stopped[thread] = max(stopped.get(thread, stamp), stamp)
-    sessions = Path(config["codex_home"]) / "sessions"
-    for path in sessions.rglob("*.jsonl"):
-        meta, event, latest = None, None, None
-        try:
-            if path.is_symlink():
-                raise ValueError("Symlink rollout")
-            for line in path.read_text().splitlines():
-                row = json.loads(line)
-                stamp = timestamp(row["timestamp"])
-                latest = max(latest, stamp) if latest else stamp
-                payload = row["payload"]
-                if not isinstance(payload, dict):
-                    raise ValueError("Unknown payload")
-                if row["type"] == "session_meta":
-                    if (not isinstance(payload.get("id"), str) or not payload["id"]
-                            or not isinstance(payload.get("cwd"), str)
-                            or not supported_version(payload.get("cli_version", ""))):
-                        raise ValueError("Unknown session metadata")
-                    if meta is None:  # Forks may append copies of parent metadata.
-                        meta = payload
-                elif row["type"] == "event_msg":
-                    kind = payload.get("type")
-                    if kind in {"task_started", "task_complete", "turn_aborted"}:
-                        event = kind
-                    elif kind not in {"token_count", "agent_message", "user_message",
-                                      "agent_reasoning", "agent_reasoning_raw_content"}:
-                        raise ValueError("Unknown lifecycle event")
-                elif row["type"] not in {"response_item", "turn_context", "compacted"}:
-                    raise ValueError("Unknown rollout record")
-            if not meta or event is None:
-                raise ValueError("Missing session/lifecycle metadata")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise Blocked("Unrecognised session/lifecycle format; no model call made") from exc
-        if meta["cwd"] == config["worktree"]:
-            known.add(meta["id"])
-        if meta["cwd"] == config["worktree"] and event == "task_started":
-            stop = stopped.get(meta["id"])
-            if not stop or not latest or latest > stop:
-                active.append(meta["id"])
-    if required_thread is not None and required_thread not in known:
-        raise Blocked("Seed or managed session metadata unavailable for this worktree")
-    return active
+    version = result.stdout.strip()
+    if not version or not re.fullmatch(config["agent"]["version_pattern"], version):
+        raise Blocked("Unsupported agent CLI; version output does not match configured pattern")
+    return version
 
 
 def schema(role):
@@ -668,20 +653,18 @@ def fingerprint(config):
     return h.hexdigest()
 
 
-def command(config, role, output, output_schema):
-    cmd = [config["codex_bin"]]
-    if role == "reviewer":
-        cmd += ["--ask-for-approval", "never"]
-    cmd += ["exec", "--ignore-user-config", "--cd", config["worktree"],
-            "--model", config[f"{role}_model"], "--json", "--color", "never",
-            "--output-schema", str(output_schema), "--output-last-message", str(output)]
-    if role == "worker":
-        cmd += ["--approve-for-me"]
-        if config.get("worker_start", "new") != "new":
-            cmd += [config["worker_start"], config["worker_thread_id"]]
-    else:
-        cmd += ["--sandbox", "read-only"]
-    return cmd + ["-"]
+def command(config, role, output, output_schema, prompt_file):
+    validate_agent(config)
+    phase = dict(model=config[f"{role}_model"], output_file=str(output),
+                 schema_file=str(output_schema), prompt_file=str(prompt_file))
+    args = []
+    for arg in config["agent"]["command"]:
+        if arg == "{role_flags}":
+            args.extend(expand(flag, config, **phase)
+                        for flag in config["agent"].get(f"{role}_flags", []))
+        else:
+            args.append(expand(arg, config, **phase))
+    return args
 
 
 def prompt_for(config, job, role):
@@ -710,31 +693,6 @@ def prompt_for(config, job, role):
                  "Worker claims:\n" + json.dumps(job.get("worker", {})))
     return text + "\nReturn only the supplied result schema.\n"
 
-
-def parse_events(path):
-    """Reject unknown exec lifecycle formats rather than interpreting them as success."""
-    types, thread = [], None
-    try:
-        for line in Path(path).read_text().splitlines():
-            row = json.loads(line)
-            kind = row["type"]
-            if kind == "thread.started":
-                if thread is not None or not isinstance(row.get("thread_id"), str) or not row["thread_id"]:
-                    raise ValueError("Invalid thread event")
-                thread = row["thread_id"]
-            elif kind not in {"turn.started", "turn.completed", "turn.failed", "error",
-                              "item.started", "item.updated", "item.completed"}:
-                raise ValueError("Unknown exec event")
-            types.append(kind)
-    except (ValueError, KeyError, TypeError) as exc:
-        raise Blocked("Unrecognised exec session/lifecycle format") from exc
-    if (not thread or types[:2] != ["thread.started", "turn.started"]
-            or types[-1:] != ["turn.completed"] or types.count("turn.completed") != 1
-            or "turn.failed" in types or "error" in types):
-        raise RuntimeError("Agent did not report a completed turn")
-    return thread
-
-
 def stop_group(proc):
     # Only this Popen's freshly-created process group is ever signalled.
     for sig, timeout in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 2)):
@@ -761,19 +719,19 @@ def execute(config, state, job_path, job, role):
     fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(prompt_for(config, job, role))
+        handle.write(f"\nFinal-answer file: {output}. If your CLI writes the final message "
+                     "there, return JSON as your final message; otherwise write the file "
+                     "using only authorized permissions. Do not request broader access. "
+                     f"Required JSON Schema ({output_schema}):\n" + json.dumps(schema(role)) + "\n")
     job.update(status="running_" + role, updated_at=now())
     save_job(config, job_path, job)
-    run_config = dict(config)
-    thread_file = state / "worker_thread.json"
-    if role == "worker" and thread_file.exists():
-        run_config.update(worker_start="resume", worker_thread_id=read(thread_file)["thread_id"])
-    proc, owned_stop = None, False
+    proc = None
     try:
         with prompt_path.open("rb") as stdin:
-            stdout_fd = os.open(folder / "events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            stdout_fd = os.open(folder / "stdout.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             stderr_fd = os.open(folder / "stderr.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(stdout_fd, "wb") as stdout, os.fdopen(stderr_fd, "wb") as stderr:
-                proc = subprocess.Popen(command(run_config, role, output, output_schema),
+                proc = subprocess.Popen(command(config, role, output, output_schema, prompt_path),
                                         cwd=config["worktree"], env=environment(config),
                                         stdin=stdin, stdout=stdout, stderr=stderr,
                                         start_new_session=True, umask=0o077)
@@ -781,42 +739,36 @@ def execute(config, state, job_path, job, role):
                 save_job(config, job_path, job)
                 deadline = time.monotonic() + config.get("phase_timeout_seconds", 1800)
                 while proc.poll() is None:
-                    # Capture an owned worker identity even if subsequently cancelled.
-                    if role == "worker" and not job.get("worker_thread_id"):
-                        for line in (folder / "events.jsonl").read_text().splitlines()[:10]:
-                            try:
-                                event = json.loads(line)
-                                if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
-                                    job["worker_thread_id"] = event["thread_id"]
-                            except ValueError:
-                                pass
                     if (state / "CANCEL").exists():
-                        owned_stop = True
                         raise Cancelled("Cancelled by local coordinator CANCEL file")
                     if time.monotonic() >= deadline:
-                        owned_stop = True
                         raise TimeoutError(f"{role} exceeded phase time limit")
                     time.sleep(0.05)
         if proc.returncode:
             raise RuntimeError("Agent process failed; inspect private phase logs")
-        thread = parse_events(folder / "events.jsonl")
-        if role == "worker":
-            if run_config.get("worker_start") == "resume" and thread != run_config["worker_thread_id"]:
-                raise Blocked("Resumed worker reported a different session identity")
-            job["worker_thread_id"] = thread
-            save(thread_file, {"thread_id": thread, "updated_at": now()})
-        elif thread == job.get("worker_thread_id"):
-            raise RuntimeError("Reviewer reused worker identity")
-        result = read(output)
+        result = read_answer(output)
         validate_result(result, role)
         return result
     finally:
         if proc is not None:
             stop_group(proc)
-        if owned_stop and role == "worker":
-            # Killing a reviewer proves nothing about an independently busy worker.
-            job["owned_stop_at"] = now()
         job.pop("child_pid", None)
+
+
+def read_answer(path):
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate final-answer field")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError("Non-JSON final-answer constant")
+
+    return json.loads(Path(path).read_text(), object_pairs_hook=unique_fields,
+                      parse_constant=invalid_constant)
 
 
 class GitHubClient:
@@ -948,6 +900,7 @@ def run_once(config, state=None, client=None):
             return
         path, job = queued[0]
         try:
+            validate_agent(config)
             assignment = verify_assignment(config, job)
             dependency = assignment["after_task"]
             if dependency:
@@ -971,21 +924,11 @@ def run_once(config, state=None, client=None):
                 raise Blocked("Branch or HEAD changed since enqueue")
             job["cli_version"] = check_cli(config)
             job["protocol"] = PROTOCOL
-            managed = Path(config["state_dir"]) / "worker_thread.json"
-            seed = (read(managed)["thread_id"] if managed.exists() else config.get("worker_thread_id"))
-            busy = active_threads(config, seed if assignment["kind"] == "work" else None)
-            if busy:
-                job.update(waiting_for_threads=busy, updated_at=now())
-                save_job(config, path, job)
-                return
-            job.pop("waiting_for_threads", None)
             for attempt in range(1, config.get("max_rounds", 2) + 1):
                 job["round"] = attempt
                 if assignment["kind"] == "work":
                     before_head = job["base_commit"] if attempt == 1 else job["head_commit"]
                     check_cli(config)
-                    if active_threads(config):
-                        raise Blocked("Worktree became busy before worker phase")
                     check_dispatch_head(config, before_head)
                     commit_preflight(config, job)
                     job["worker"] = execute(config, state, path, job, "worker")
@@ -999,8 +942,6 @@ def run_once(config, state=None, client=None):
                     runner_commit(config, path, job, before_head)
                 ensure_reviewable(config, job)
                 check_cli(config)
-                if active_threads(config):
-                    raise Blocked("Worktree became busy before reviewer phase")
                 check_dispatch_head(config, job["head_commit"])
                 ensure_reviewable(config, job)
                 before = fingerprint(config)
@@ -1053,7 +994,7 @@ def main(argv=None):
     try:
         config = load_config(args.config)
         state = private_dir(config["state_dir"])
-        private_dir(config["codex_home"])
+        private_dir(config["agent_home"])
         private_dir(state / "tasks")
         if args.action == "enqueue":
             enqueue(config, args.id, args.task.read_text(), kind=args.kind, base=args.base, head=args.head,
