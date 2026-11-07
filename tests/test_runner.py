@@ -801,7 +801,7 @@ def test_invalid_agent_definitions_fail_before_dispatch(setup, tmp_path, overrid
     config_path, settings = populated_config(setup, tmp_path)
     settings['agent'].update(override)
     config_path.write_text(json.dumps(settings))
-    with pytest.raises((ValueError, runner.re.PatternError)):
+    with pytest.raises((ValueError, runner.re.error)):
         runner.load_config(config_path)
 
 
