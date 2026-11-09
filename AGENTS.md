@@ -18,9 +18,9 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 - Write for strangers: docs explain what a piece does, how to adopt it, and its limits.
 
 ## How work is done
-- Work on a feature branch and open a PR to `main`. Never push to `main` directly, and never merge your own PR.
+- Work on a feature branch and open a PR to `main`. Never push to `main` directly, and never click merge yourself. Merges follow **Merge policy** below.
 - Each PR declares its review category (`## Review tier`), as defined in `.github/review-gate.json`. Declare the category the changed paths require, or a higher one.
-- Keep PRs small and single-purpose. Split unrelated changes, especially anything control-critical.
+- Size a PR to one coherent story; a larger work package is fine when it shares one goal and one live trial. Keep control-critical changes in their own PR, and list risky files (workflows, gate, credentials, runner safety code) first in the PR description so reviews focus there.
 - Every behaviour change has tests. Domain-critical code (`runner/`, `digest/`) also needs failure-mode evidence: failure cases, recovery and concurrency.
 - Before opening or updating a PR, run the local checks:
   ```sh
@@ -33,7 +33,24 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 ## Review
 - The Maker never reviews their own work. An independent Checker (a separate agent or session) reviews control-critical and domain-critical PRs against the original issue and the exact head commit, and records PASS, CHANGES REQUIRED or BLOCKED.
 - At most two correction rounds; then escalate unresolved findings to the owner. Continue other independent work meanwhile.
-- A passing gate or an AI review is evidence, not approval. The owner's merge is the approval.
+- A passing gate or an AI review is evidence, not approval on its own. The owner's approval is either their merge or the advance permission in **Merge policy**.
+
+## Merge policy (owner's advance permission, 2026-11-09)
+The owner pre-authorises merges by review category. Once a PR meets every condition for its category on its **current head commit**, the Maker may enable GitHub auto-merge (merge commit); GitHub then merges when the required checks pass. Any new push or description edit restarts the conditions.
+
+| Category (as decided by the trusted `review-gate` check) | Conditions | Who merges |
+| --- | --- | --- |
+| Light | Required checks (`checks`, `review-gate`) pass | Auto-merge |
+| Standard | Required checks pass; independent Checker PASS on the current head | Auto-merge |
+| Domain-critical | Required checks pass; independent Checker PASS and an independent Claude review PASS, both on the current head | Auto-merge |
+| Control-critical | Everything above | **Owner only**; never enable auto-merge |
+| Release tags and release notes | Owner approved the notes | **Owner only** |
+
+- The category is the one the trusted `review-gate` check reports, never a lower one declared or assumed by the Maker.
+- Record each review as a GitHub review or PR comment that starts with `Checker: PASS` or `Claude review: PASS`, names the exact head SHA, and is written by a session separate from the Maker.
+- If any condition is missing, unclear or contradicted (a CHANGES REQUIRED or BLOCKED review, a failing or pending check, an unanswered must-ask item), do not enable auto-merge; leave the PR for the owner.
+- Never merge directly, bypass checks, dismiss reviews, or change branch rules to get a PR merged.
+- **Limit:** agents currently act through the owner's GitHub account, so GitHub cannot tell an agent's action from the owner's. This policy is therefore enforced by agents following it; required checks and the trusted gate remain the technical controls.
 
 ## Assumptions and escalation
 - Proceed on reasonable, recorded assumptions within approved scope. List them in the PR's `## Assumptions` section; they don't need individual approval.
