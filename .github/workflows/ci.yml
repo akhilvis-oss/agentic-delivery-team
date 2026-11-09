@@ -30,6 +30,10 @@ jobs:
           python-version: "3.12"
       - name: Private content check
         run: python scripts/check_private_content.py
+      - name: Verify guard token identity (read-only)
+        env:
+          RUNNER_GITHUB_TOKEN: ${{ github.token }}
+        run: python -I lifecycle/core.py --config .github/task-lifecycle.json guard-identity
       - name: Install pinned development tools
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Lint

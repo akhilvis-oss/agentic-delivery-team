@@ -78,28 +78,11 @@ def load_config(path):
     for location in cfg["runner_state_dirs"]:
         if not Path(location).is_absolute():
             raise ValueError("Absolute runner state paths required")
-    model = cfg["model"]
-    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model["key_env"]):
-        raise ValueError("Explicit model-key environment name required")
-    if (
-        not isinstance(model["name"], str)
-        or not model["name"].strip()
-        or "<" in model["name"]
-    ):
-        raise ValueError("Populate the Product model identifier")
-    for field in (
-        "monthly_budget_usd",
-        "input_usd_per_million",
-        "output_usd_per_million",
-    ):
-        amount = Decimal(str(model[field]))
-        if not amount.is_finite() or amount < 0:
-            raise ValueError("Budget/prices must be finite nonnegative amounts")
-    if (
-        type(model["max_output_tokens"]) is not int
-        or not 16 <= model["max_output_tokens"] <= 1024
-    ):
-        raise ValueError("Bounded summary output required")
+    model = cfg.get("model", {})
+    if type(model.get("enabled", False)) is not bool:
+        raise ValueError("Model enabled must be boolean")
+    if model.get("enabled", False):
+        validate_model(model)
     for code, assumption in cfg.get("public_assumptions", {}).items():
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) or set(assumption) != {
             "summary",
@@ -129,6 +112,30 @@ def load_config(path):
                 "Previews must be explicit HTTPS links without credentials/query data"
             )
     return cfg
+
+
+def validate_model(model):
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model["key_env"]):
+        raise ValueError("Explicit model-key environment name required")
+    if (
+        not isinstance(model["name"], str)
+        or not model["name"].strip()
+        or "<" in model["name"]
+    ):
+        raise ValueError("Populate the Product model identifier")
+    for field in (
+        "monthly_budget_usd",
+        "input_usd_per_million",
+        "output_usd_per_million",
+    ):
+        amount = Decimal(str(model[field]))
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("Budget/prices must be finite nonnegative amounts")
+    if (
+        type(model["max_output_tokens"]) is not int
+        or not 16 <= model["max_output_tokens"] <= 1024
+    ):
+        raise ValueError("Bounded summary output required")
 
 
 def task_link(cfg, number, pr=False):
@@ -439,6 +446,8 @@ def summary_prompt(allowed):
 
 
 def summary(cfg, model, digest_id, at):
+    if not cfg.get("model", {}).get("enabled", False):
+        return None, "disabled", {}
     ledger_path = Path(cfg["state_dir"]) / "budget.json"
     with core.lock(Path(cfg["state_dir"]) / "budget.lock") as acquired:
         if not acquired:
@@ -516,7 +525,15 @@ def render(sections, prose, summary_status, usage, marker):
     parts = [
         "Act on the linked issue or PR. Replies to this digest never approve or instruct automation."
     ]
-    parts.append(prose if prose else "Summary unavailable; factual sections follow.")
+    parts.append(
+        prose
+        if prose
+        else (
+            "Model disabled; factual sections follow."
+            if summary_status == "disabled"
+            else "Summary unavailable; factual sections follow."
+        )
+    )
     sections = [list(items) for items in sections]
     usage_link = next(
         (

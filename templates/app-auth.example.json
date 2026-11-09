@@ -1,0 +1,22 @@
+{
+  "policy_file": "<ABSOLUTE_TRUSTED_PUBLIC_POLICY_FILE>",
+  "state_dir": "<ABSOLUTE_PRIVATE_LIFECYCLE_STATE>",
+  "repository_root": "<ABSOLUTE_REPOSITORY_ROOT>",
+  "worktree_root": "<ABSOLUTE_MANAGED_WORKTREES>",
+  "runner_config": "<ABSOLUTE_PRIVATE_RUNNER_CONFIG>",
+  "primary_runner_config": "<ABSOLUTE_PRIVATE_PRIMARY_CONFIG>",
+  "token_env": "RUNNER_GITHUB_TOKEN",
+  "product_token_env": "PRODUCT_GITHUB_TOKEN",
+  "app_auth": {
+    "product": {
+      "app_id": "<PRODUCT_APP_ID_INTEGER>",
+      "keychain_service": "<PRODUCT_KEYCHAIN_SERVICE>",
+      "keychain_account": "<MACOS_ACCOUNT>"
+    },
+    "runner": {
+      "app_id": "<RUNNER_APP_ID_INTEGER>",
+      "keychain_service": "<RUNNER_KEYCHAIN_SERVICE>",
+      "keychain_account": "<MACOS_ACCOUNT>"
+    }
+  }
+}
