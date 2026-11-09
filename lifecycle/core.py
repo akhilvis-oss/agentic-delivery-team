@@ -1116,11 +1116,7 @@ def pr_event(cfg, client, event):
     incoming = event["pull_request"]
     number = incoming["number"]
     pr = client.request("GET", f"/pulls/{number}")
-    if (
-        pr["head"]["sha"] != incoming["head"]["sha"]
-        or pr["body"] != incoming["body"]
-        or pr["base"]["ref"] != cfg.get("base_branch", "main")
-    ):
+    if pr["head"]["sha"] != incoming["head"]["sha"] or pr["body"] != incoming["body"]:
         raise Unavailable("PR changed during lifecycle event")
     issues = sorted(
         {
@@ -1128,8 +1124,24 @@ def pr_event(cfg, client, event):
             for n in re.findall(r"\bCloses\s+#([1-9]\d*)\b", pr.get("body") or "", re.I)
         }
     )
-    if not issues:
+    managed = {}
+    for issue in issues:
+        evidence = records(cfg, client.comments(issue), issue)
+        if any(
+            r["kind"] == "transition"
+            and r["to"] == "dispatched"
+            and has_role(cfg, r["actor"], "runner")
+            for r in evidence
+        ):
+            managed[issue] = evidence
+        else:
+            print(f"Issue #{issue}: not a lifecycle task; skipped")
+    if not managed:
+        if not issues:
+            print("not a lifecycle task; skipped")
         return
+    if pr["base"]["ref"] != cfg.get("base_branch", "main"):
+        raise Unavailable("PR targets an unsupported lifecycle base")
     if event["action"] == "closed":
         target = "merged" if pr["merged"] else "needs-owner"
     else:
@@ -1139,8 +1151,7 @@ def pr_event(cfg, client, event):
         raise Unavailable("Foreign PR cannot drive lifecycle state")
     if pr.get("user", {}).get("login") not in set(cfg["actors"].values()):
         raise Unavailable("Untrusted PR actor")
-    for issue in issues:
-        evidence = records(cfg, client.comments(issue), issue)
+    for evidence in managed.values():
         reviewed = [
             r
             for r in evidence
@@ -1150,6 +1161,9 @@ def pr_event(cfg, client, event):
         ]
         if not reviewed:
             raise Unavailable("PR head has no trusted successful task review")
+    # Validate every managed target before creating any transition intents.
+    # Unmanaged links never enter the outbox or trigger a flush of older work.
+    for issue in managed:
         record = public_record(
             cfg,
             issue,
