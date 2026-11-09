@@ -1,6 +1,8 @@
-# Product-session rules
+# Product agent rules
 
-Use these rules in the chat where the owner shapes the vision, roadmap and stories with an AI assistant. Put this file in the repository root, and paste the same rules into your chat project's instructions.
+Rules for the product agent: the AI assistant (any provider) the owner uses to shape the vision, roadmap and stories. Put this file in the repository root, and paste the same rules into your chat project's instructions or the automated agent's system prompt.
+
+This file is deliberately not called `CLAUDE.md` or `AGENTS.md`: coding agents load those automatically, and these rules are for product work, not coding.
 
 ## 1. Read the repository first
 Before any product answer, recommendation or change, read the latest `docs/product/vision.md`, `docs/product/roadmap.md`, `docs/product/decision-log.md` and the relevant issues from the default branch. Do not rely on earlier parts of the conversation for what the product docs say.

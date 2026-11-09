@@ -7,7 +7,7 @@ Everything a new project copies to adopt the whole way of working, not only the 
 | File | Copy to | Purpose |
 | --- | --- | --- |
 | [`AGENTS.md`](AGENTS.md) | `AGENTS.md` | Working agreement every coding agent reads: boundaries, assumptions, escalation, must-ask items, review and merge policy |
-| [`CLAUDE.md`](CLAUDE.md) | `CLAUDE.md` (and your chat project's instructions) | Product-session rules for the chat where you shape the roadmap and stories |
+| [`PRODUCT_AGENT.md`](PRODUCT_AGENT.md) | `PRODUCT_AGENT.md` (and your product chat's instructions) | Rules for whichever AI assistant you use to shape the roadmap and stories |
 | [`docs/product/vision.md`](docs/product/vision.md) | `docs/product/vision.md` | Why the product exists, for whom, and what it will not do |
 | [`docs/product/roadmap.md`](docs/product/roadmap.md) | `docs/product/roadmap.md` | Ordered outcomes, each linked to its stories |
 | [`docs/product/decision-log.md`](docs/product/decision-log.md) | `docs/product/decision-log.md` | Settled decisions and accepted assumptions, newest first |
@@ -19,7 +19,7 @@ From the kit's own folders, also copy:
 
 ## Set up a new project, in order
 
-1. **Write the product docs first.** Fill in `vision.md` and `roadmap.md` with your product chat (see `CLAUDE.md`). Agents read these as the truth, so keep them short and current.
+1. **Write the product docs first.** Fill in `vision.md` and `roadmap.md` with your product chat (see `PRODUCT_AGENT.md`). Agents read these as the truth, so keep them short and current.
 2. **Make product docs owner-controlled.** In `.github/review-gate.json`, add `docs/product/*` to the **control-critical** patterns, so no agent can change scope or priorities without your decision.
 3. **Fill in `AGENTS.md`:** your repository name, the must-ask list for your domain (payments, personal data, real-world actions, and so on), and your build and test commands.
 4. **Install the review gate** and make its check required where your GitHub plan allows.

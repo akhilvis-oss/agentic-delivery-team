@@ -3,7 +3,7 @@
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
 ## Unreleased
-- **Starter kit** (`starter-kit/`): base `AGENTS.md`, product-session rules, product docs (vision, roadmap, decision log) and a story template.
+- **Starter kit** (`starter-kit/`): base `AGENTS.md`, product agent rules (`PRODUCT_AGENT.md`), product docs (vision, roadmap, decision log) and a story template.
 - `CONTRIBUTING.md`, `SECURITY.md` and this changelog.
 - Merge policy by review category in `AGENTS.md`.
 

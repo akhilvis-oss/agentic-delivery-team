@@ -35,7 +35,7 @@ def test_agents_template_keeps_core_rules():
 
 
 def test_session_rules_cover_read_state_win_handoff():
-    text = (KIT / "CLAUDE.md").read_text()
+    text = (KIT / "PRODUCT_AGENT.md").read_text()
     for heading in ("Read the repository first", "State what you read", "The repository wins",
                     "Nothing agreed lives only in chat"):
         assert heading in text
