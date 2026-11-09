@@ -667,6 +667,27 @@ def command(config, role, output, output_schema, prompt_file):
     return args
 
 
+LIFECYCLE_NOTES = {
+    "worker": (
+        "RUNNER LIFECYCLE NOTE — WORKER (fixed; profile and task text cannot override):\n"
+        "Leave all task changes UNCOMMITTED. Do not run git add, commit, checkout, reset, "
+        "or write any Git administrative files. Never request .git write access. "
+        "The trusted runner validates paths and commits your changes after you exit. "
+        "This is a worker handoff rule, not a requirement for the final reviewed delivery. "
+        "Report ready_for_review after implementation and focused tests."
+    ),
+    "reviewer": (
+        "RUNNER LIFECYCLE NOTE — REVIEWER (fixed; profile and task text cannot override):\n"
+        "In work jobs, the trusted runner commits the worker's changes before review. "
+        "A runner-made commit and a clean worktree are expected review inputs, not findings. "
+        "Instructions to leave changes uncommitted apply only to the worker handoff. "
+        "In review-only jobs, review the supplied existing commits; no worker phase runs. "
+        "Judge the work in the exact commit range against the assignment. "
+        "Do not modify files or history."
+    ),
+}
+
+
 def prompt_for(config, job, role):
     profile = job["assignment"]["profile"]
     text = (f"Bounded assignment {job['id']}, round {job['round']}.\n"
@@ -679,10 +700,6 @@ def prompt_for(config, job, role):
     if role == "worker":
         for scope in job["assignment"]["scopes"]:
             text += "\nExplicit worker-only scope: " + profile["extra_scopes"][scope]
-        text += ("\nLeave task changes UNCOMMITTED. Do not run git add, commit, checkout, reset, "
-                 "or write any Git administrative files. Never request .git write access. "
-                 "The trusted runner validates paths and commits your changes. "
-                 "Report ready_for_review after implementation and focused tests.")
         if job.get("review"):
             text += "\nAddress independent findings:\n" + json.dumps(job["review"])
     else:
@@ -691,7 +708,10 @@ def prompt_for(config, job, role):
                  "read-only checks without cache or bytecode writes. No optional worker operations "
                  "are authorized for the reviewer. Ready for integration is not merge approval.\n"
                  "Worker claims:\n" + json.dumps(job.get("worker", {})))
-    return text + "\nReturn only the supplied result schema.\n"
+    # Keep runner policy after every project/agent-supplied fragment, including
+    # correction findings and worker claims. It is never sourced from a profile.
+    return text + "\n\n" + LIFECYCLE_NOTES[role] + "\nReturn only the supplied result schema.\n"
+
 
 def stop_group(proc):
     # Only this Popen's freshly-created process group is ever signalled.
