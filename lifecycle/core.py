@@ -870,7 +870,8 @@ def sync_job(config_path, job, client=None):
         read(p) for p in (Path(cfg["state_dir"]) / "followups").glob("*.json")
     ]
     job["lifecycle_unsynced"] = any(
-        x["record"]["job"] == job["id"] and x["status"] != "synced" for x in pending
+        x["record"]["job"] == job["id"] and x["status"] not in {"synced", "superseded"}
+        for x in pending
     ) or any(
         x["job"] == job["id"] and x["status"] != "posted" for x in pending_followups
     )

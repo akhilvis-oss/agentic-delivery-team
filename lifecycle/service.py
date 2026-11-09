@@ -250,7 +250,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     claim["cleanup_pending"] = "untrusted_close_state"
                 core.save(path, claim)
                 continue
-            if run_jobs and claim["stage"] == "enqueued":
+            if claim["stage"] == "enqueued":
                 recovery_config = runner.load_config(claim["config"])
                 recovery_path = (
                     Path(recovery_config["state_dir"])
@@ -258,7 +258,13 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     / (claim["job"] + ".json")
                 )
                 previous = runner.read(recovery_path)
-                if previous["status"].startswith("running_"):
+                if previous["status"] in runner.TERMINAL:
+                    # Completion is durable in the job before the claim. Recover
+                    # that boundary without replaying work or re-admitting it.
+                    claim.update(stage="finished", head=previous.get("head_commit"))
+                    core.save(path, claim)
+                    continue
+                if run_jobs and previous["status"].startswith("running_"):
                     # run_once only marks an unclean phase interrupted; never
                     # signals a persisted PID or starts a second agent.
                     runner.run_once(recovery_config)
@@ -298,7 +304,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 )
                 dispatches = [r for r in remote_records if r["to"] == "dispatched"]
                 if (
-                    core.state(fresh) != "dispatched"
+                    core.state(fresh)
+                    not in (
+                        {"dispatched"}
+                        if claim["stage"] == "dispatched"
+                        else {
+                            "dispatched",
+                            "in-progress",
+                            "committed",
+                            "in-review",
+                            "changes-requested",
+                        }
+                    )
                     or not dispatches
                     or dispatches[-1]["job"] != claim["job"]
                 ):

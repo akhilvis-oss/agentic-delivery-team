@@ -251,7 +251,12 @@ def test_digest_transport_retry_cannot_duplicate_or_recall_model(tmp_path, failu
 def test_privacy_dedup_commit_refusal_and_ready_sections(tmp_path):
     cfg = configuration(tmp_path)
     h = Hub(cfg["lifecycle"])
-    h.issue(state="blocked")
+    h.issue(state="in-review")
+    record = core.public_record(h.cfg, 1, "job", 0, "dispatched")
+    record.update({"from": "approved", "actor": h.cfg["actors"]["runner"]})
+    h.comments_by_issue[1].append(
+        dict(user={"login": h.cfg["actors"]["runner"]}, body=core.record_body(record))
+    )
     sha = "a" * 40
     job = dict(
         id="job",
@@ -447,3 +452,68 @@ def test_three_consecutive_owner_skips_become_overdue(tmp_path):
             )
     assert posted(h)[-1]["title"].startswith("[Overdue]")
     assert core.state(h.issues[1]) == "draft"
+
+
+@pytest.mark.parametrize(
+    "state,closed,superseded",
+    [
+        ("in-review", False, False),
+        ("in-review", True, False),
+        ("accepted", False, False),
+        ("merged", True, False),
+        ("in-review", False, True),
+    ],
+)
+def test_ready_demo_requires_current_open_dispatch(tmp_path, state, closed, superseded):
+    cfg = configuration(tmp_path)
+    h = Hub(cfg["lifecycle"])
+    issue = h.issue(state=state)
+    issue["state"] = "closed" if closed else "open"
+    record = core.public_record(
+        h.cfg, 1, "new-job" if superseded else "job", 0, "dispatched"
+    )
+    record.update({"from": "approved", "actor": h.cfg["actors"]["runner"]})
+    h.comments_by_issue[1].append(
+        dict(user={"login": h.cfg["actors"]["runner"]}, body=core.record_body(record))
+    )
+    sha = "a" * 40
+    core.save(
+        Path(cfg["runner_state_dirs"][0]) / "tasks/job.json",
+        dict(
+            id="job",
+            status="ready_for_integration",
+            updated_at=AT.isoformat(),
+            head_commit=sha,
+            reviewed_head=sha,
+            assignment={"lifecycle": {"issue": 1}},
+            review={"status": "ready_for_integration"},
+        ),
+    )
+    sections = standup.collect(cfg, h.client("product"), AT - dt.timedelta(days=1), AT)
+    assert bool(sections[2]) == (state == "in-review" and not closed and not superseded)
+
+
+def test_pause_counts_only_missed_scheduled_digests(tmp_path):
+    cfg = configuration(tmp_path)
+    cfg["cadence"].update(weekdays=[0, 1, 2, 3, 4], time="10:00")
+    cfg["paused"] = True
+    h = Hub(cfg["lifecycle"])
+    h.issue(state="draft")
+    path = Path(cfg["state_dir"]) / "digest.json"
+    saturday = AT + dt.timedelta(days=5)
+    for at, request in [
+        (saturday, None),
+        (saturday + dt.timedelta(days=1), None),
+        (AT.replace(hour=9), None),
+        (AT, "manual-paused"),
+    ]:
+        assert (
+            standup.run_once(
+                cfg, h.client("product"), Model(), at=at, request_id=request
+            )["status"]
+            == "skipped"
+        )
+        assert core.read(path)["skips"] == 0
+    for _ in range(2):
+        standup.run_once(cfg, h.client("product"), Model(), at=AT)
+        assert core.read(path)["skips"] == 1

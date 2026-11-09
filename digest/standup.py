@@ -171,12 +171,11 @@ def collect(cfg, client, since, at):
         (i for i in client.pages("/issues?state=all") if "pull_request" not in i),
         key=lambda i: i["number"],
     )
-    tasks = {}
+    demo_jobs = {}
     for issue in issues:
         if core.is_report(policy, issue):
             continue
         number = issue["number"]
-        tasks[number] = issue
         url = task_link(cfg, number)
         try:
             current = core.state(issue)
@@ -195,6 +194,13 @@ def collect(cfg, client, since, at):
             )
             continue
         history = core.records(policy, client.comments(number), number)
+        dispatches = [r for r in history if r["to"] == "dispatched"]
+        if (
+            issue["state"] == "open"
+            and current in {"in-review", "pr-open"}
+            and dispatches
+        ):
+            demo_jobs[number] = dispatches[-1]["job"]
         recent = [r for r in history if core.stamp(r["timestamp"]) > since]
         if current in {"needs-owner", "blocked", "draft"} and issue["state"] == "open":
             text = (
@@ -273,6 +279,7 @@ def collect(cfg, client, since, at):
         url = task_link(cfg, number)
         if (
             job["status"] == "ready_for_integration"
+            and demo_jobs.get(number) == job["id"]
             and number not in demos
             and core.SHA.fullmatch(job.get("head_commit", ""))
             and job.get("reviewed_head") == job["head_commit"]
@@ -330,7 +337,9 @@ def collect(cfg, client, since, at):
         if (
             job.get("lifecycle_unsynced")
             and not relevant
-            or any(entry["status"] != "synced" for entry in relevant)
+            or any(
+                entry["status"] not in {"synced", "superseded"} for entry in relevant
+            )
             or pending_minor
         ):
             sections[4].append(
@@ -349,7 +358,7 @@ def collect(cfg, client, since, at):
     # Outbox failures are visible even when the last job update predates them.
     for path in (Path(policy["state_dir"]) / "outbox").glob("*.json"):
         item = core.read(path)
-        if item["status"] != "synced":
+        if item["status"] not in {"synced", "superseded"}:
             number = item["record"]["issue"]
             sections[4].append(
                 linked(
@@ -607,8 +616,16 @@ def run_once(cfg, client, model=None, *, at=None, request_id=None):
             ),
             default=dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc),
         )
+        scheduled_due = (
+            local.weekday() in cfg["cadence"]["weekdays"]
+            and local.strftime("%H:%M") >= cfg["cadence"]["time"]
+        )
         if cfg.get("paused") or period in cfg.get("pause_dates", []):
-            if period not in journal["skipped_dates"]:
+            if (
+                request_id is None
+                and scheduled_due
+                and period not in journal["skipped_dates"]
+            ):
                 journal["skipped_dates"].append(period)
                 journal["skips"] += 1
             core.save(path, journal)
@@ -622,10 +639,7 @@ def run_once(cfg, client, model=None, *, at=None, request_id=None):
         if prior and prior.get("issue"):
             core.save(path, journal)
             return {"status": "already_posted", "issue": prior["issue"]}
-        if request_id is None and (
-            local.weekday() not in cfg["cadence"]["weekdays"]
-            or local.strftime("%H:%M") < cfg["cadence"]["time"]
-        ):
+        if request_id is None and not scheduled_due:
             core.save(path, journal)
             return {"status": "not_due"}
         marker = "<!-- agentic-digest-v1:" + digest_id + " -->"

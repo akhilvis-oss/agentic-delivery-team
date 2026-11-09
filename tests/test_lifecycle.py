@@ -925,3 +925,29 @@ def test_workflow_uncertain_rerun_does_not_repeat_absent_comment(tmp_path):
     path = core.queue(cfg, record)
     core.flush(cfg, client)
     assert core.read(path)["status"] == "uncertain" and not client.comments(1)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_claim_recovers_durable_terminal_job_without_readmission(
+    tmp_path, monkeypatch, closed
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(path)
+    job.update(status="ready_for_integration", head_commit="a" * 40)
+    core.save(path, job)
+    h.event(1, "in-progress", "runner")
+    h.event(1, "committed", "runner")
+    h.event(1, "in-review", "runner")
+    if closed:
+        h.issues[1]["state"] = "closed"
+    monkeypatch.setattr(
+        runner, "run_once", lambda *a: pytest.fail("never replay completed job")
+    )
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    assert core.read(claim_path)["stage"] == "finished"
+    assert core.read(claim_path)["head"] == "a" * 40
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    assert core.read(claim_path)["stage"] == "finished"
