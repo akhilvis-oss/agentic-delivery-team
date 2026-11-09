@@ -1,0 +1,126 @@
+# v0.4: issue lifecycle and stand-up digest
+
+This is one opt-in work package for #19 and #25. The owner still controls scope approval, product acceptance, control-critical merges and releases. No service, token, workflow, label or model account is installed by running tests or importing modules. A private GitHub Free repository uses the same labels, comments and Actions; Projects, paid rulesets and project-board fields are not required. GitHub Actions quotas and provider charges still apply.
+
+## Risky components first
+
+1. `templates/task-lifecycle.yml` and `lifecycle/core.py`: default-branch guard, actor verification, repository-scoped writes and durable outbox.
+2. `templates/task-lifecycle.example.json` and `lifecycle/service.py`: permissions, approved scope snapshots, event-specific claims, primary dispatch and owned worktree cleanup.
+3. `runner/task_runner.py`: opt-in lifecycle hooks and push-back. Existing path/commit/fingerprint/process controls remain enforced.
+4. `digest/standup.py` and `templates/standup.example.json`: privacy filters, publication, skip/cadence and model-budget reservations.
+5. `.github/review-gate.json`: lifecycle code/tests are classified control-critical. The trusted review gate itself is unchanged.
+
+## Installation and identities
+
+Keep the trusted `runner/`, `lifecycle/` and `digest/` directories together outside agent-writable worktrees. Use Python 3.11+, Git and a POSIX host. The implementation has no new Python runtime dependencies. Existing one-file runner installations work with lifecycle disabled; enabling it requires the complete directory layout.
+
+Copy the two example JSON files into private files. Fill absolute paths locally, outside source/agent worktrees. Protect files with mode 0600 and directories with 0700. Never commit the populated private configuration or credentials. For service dispatch, populate both a normal `runner_config` and a `primary_runner_config`; the latter supplies a primary worker profile and the same independent-review controls. The service creates isolated feature worktrees under the configured private `worktree_root`, from the local configured base branch. It never pushes a branch or opens a PR automatically.
+
+Configure explicit `identity_roles`: the owner identity has `["owner", "product"]`, and the Product App identity has `["product"]`. Runner and Actions identities have their respective roles. The separate `actors` map selects the concrete publishing identity for each automated channel; it is not a one-role-per-person restriction. Role membership controls permitted actions, while owner-only decisions still require the designated owner identity. Configure the canonical `owner`, `runner`, `product` and `workflow` publishing identities. Runner/Product identities must differ from the owner. Use a repository-installed GitHub App installation token or a dedicated machine account's fine-grained token. The runtime performs a fixed read-only GraphQL viewer query before **any write**, and refuses a mismatched/owner identity. An installation/token that cannot satisfy that check is unsupported until verified; use a dedicated account rather than falling back to the owner's credentials. Authentication is explicit environment variables (`token_env`, `product_token_env`), with no `gh`/owner credential discovery, token minting or automatic account switching.
+
+Grant repository-scoped **Issues write** for labels, comments, follow-ups, assignments and digest issues. Reads of PRs, trusted gate checks and workflow-run metadata additionally require Pull requests read, Checks read and Actions read. Content/Git reads needed by your existing tooling are separate; the service uses your already-present local Git repository, without automatic fetches. Do not grant repository settings, administration, contents write or workflow write to the automation token. The local client restricts all writes to issue/label endpoints in the single configured repository, rejects redirects, and never interpolates issue/comment text into shell commands.
+
+The Product App publishing identity posts stand-ups and minor follow-up issues. The owner also has the Product role, but the automated client never falls back to the owner's token. Set a separate Claude API key in `model.key_env` for optional prose. The digest's model identifier, token cap, current prices and monthly USD estimate budget are all private configuration; no model or price is hardcoded. The owner's subscription is not used for this API path.
+
+## Policy, labels and guard setup
+
+`transitions` is the complete, version-controlled allowed state/actor graph. `approved` is owner-only; `accepted` is owner-only unless acceptance is explicitly delegated to the Product actor. Configuration cannot grant approval to an automated actor. Each issue has exactly one current `status:*` label:
+
+`draft → approved → dispatched → in-progress → committed → in-review`, then correction, primary/owner escalation, PR, acceptance and merge states as allowed by the graph. A passing review stays `in-review` with a distinct result record until its PR opens. Owner approvals later in the lifecycle are new events, not retries of an old approval.
+
+Run setup once with the dedicated runner credentials:
+
+```sh
+python -m lifecycle.core --config '<PRIVATE_LIFECYCLE_JSON>' setup-labels
+```
+
+The owner installs `templates/task-lifecycle.yml` as `.github/workflows/task-lifecycle.yml` through a reviewed merge. Provide a **public-policy-only** `.github/task-lifecycle.json`: repository, actor logins, transitions, thresholds and environment-variable names. Leave machine paths as placeholders; the guard uses `RUNNER_TEMP` for its own ephemeral state. Do not copy the populated local machine configuration into GitHub. Nothing in this work package activates the template in this repository automatically.
+
+The template handles issue opened/edited/label events and PR opened/edited/reopened/updated/closed events. It checks out only the repository's default branch, never PR head code, uses pinned actions, has no secrets and runs no dependencies/build scripts. Its write permission is limited to issues. Install it on the default branch before expecting enforcement; labels alone are not a security boundary. Events may be processed after a delay; service admission fails closed on ambiguous/mismatched states.
+
+For owner `approved` label events, the guard records an approved body SHA with the authenticated owner and a unique matching label-event ID. A missing/ambiguous timestamp/event snapshot is not guessed: dispatch waits for reconciliation/re-approval. The service requires the trusted guard attestation and an unchanged issue body before claiming work. Editing approved scope invalidates approval, and edits/closure/revocation observed before dispatch or a later phase stop further model phases. During a GitHub outage an already-admitted frozen assignment may continue; use local `CANCEL` for immediate cancellation of the currently owned process group.
+
+PR synchronization accepts only same-repository PRs from configured trusted actors with `Closes #N`, an exact matching successful task-review record, and the configured base branch. A name-colliding check cannot provide gate evidence: complete check-run collections, exact head, registered trusted workflow, run event and PR/head binding must agree. Missing evidence is explicitly unavailable. Closed-unmerged PRs go to `needs-owner`. Merged PRs record the merge SHA; **GitHub**, not the runner, closes the issue through its closing keyword on the default branch. Acceptance and merge authority are not inferred from a digest or an agent verdict.
+
+## Polling, records and recovery
+
+```sh
+python -m lifecycle.service --config '<PRIVATE_LIFECYCLE_JSON>' run-once
+python -m lifecycle.service --config '<PRIVATE_LIFECYCLE_JSON>' serve
+python -m lifecycle.service --config '<PRIVATE_LIFECYCLE_JSON>' reconcile
+python -m lifecycle.core --config '<PRIVATE_LIFECYCLE_JSON>' flush
+```
+
+`serve` uses `poll_seconds`; no launchd installation is performed. An optional private `digest_config` lets the same loop check digest cadence. Only owner-approved labels dispatch normal work; `needs-primary` dispatches the configured Primary once. Other states wait. The service claims `(issue, approval event, deterministic job ID)` in durable private JSON before changing GitHub or enqueuing. Records use atomic, exclusive publication; crashes after labels/comments/enqueue are reconciled against the same claim/job rather than creating another job. Owner re-approval has a new event ID and a new job.
+
+Issue history consists of fixed-field machine blocks authored by trusted identities. Repository, enclosing issue, author/role, transition, key, types and timestamps are checked. Owner label events supply approval authority; arbitrary comments, including digest replies, never do. Public records contain state, actor, job/event IDs, round, commit SHA, outcome, severity counts and fixed reason codes. Finding prose, arguments, paths, logs, task text and worker summaries stay private. P2 follow-up issues contain fixed metadata and reference their source issue; Primary consults private detail during triage.
+
+GitHub updates have a private outbox. Labels/assignments are idempotent; append-only writes are marked attempted **before** sending. A lost response is searched for by its trusted record key. If an attempted comment/issue cannot be found, it remains uncertain for manual reconciliation; it is never blindly reposted. Known rejected writes can retry. A conflict on one issue does not authorize overwriting an owner's state or starting another job. Actions runs have ephemeral local storage: a rerun with missing prior comment proof refuses to repost and requires manual reconciliation. Distinct PR event deliveries are separately keyed; a rerun retains the same delivery/run ID. This conservative rule can leave missing metadata after a failed workflow, rather than risking a duplicate append. `reconcile` reports local/GitHub mismatches without changing either side. Unsynced/uncertain records appear in the stand-up.
+
+Do not delete claims, outbox, digest journals or budgets to force a retry. A process crash is not permission to replay a model phase: an unclean running record becomes interrupted and requires manual reconciliation. Storage loss, compromised trusted accounts and multiple independent private state roots for the same repository are outside the exactly-once claim guarantee. Use one coordinator/state root, protect it, and retain backups. GitHub label updates have no cross-client transaction with local JSON; the guard repairs invalid labels and ambiguous evidence blocks action.
+
+Managed cleanup is restricted to registered worktrees/branches created under the service root with the recorded ownership/head binding. Dirty work, changed history, closed-unmerged tasks and branches not yet included in the local base are retained for owner reconciliation. Refresh the local base yourself before expecting branch deletion after a server-side merge. Cleanup never force-deletes history, signals a recovered PID, edits an adopting project, or controls another service.
+
+## Product clarifications and owner decisions
+
+Product-role membership does not grant scope or story approval. The Product App may answer a clarification only with verified repository evidence and citations. `product_policy` requires repository sources and citations and routes `scope_change`, `acceptance_criteria_change` and `story_approval` to the owner. Those constraints cannot be disabled by config. Unknown requests and missing/unsupported citations also escalate; no new approval is inferred from an answer.
+
+The bounded v0.4 clarification interface is extractive: one to five short quotes from configured repository text-file globs, each pinned to a full commit SHA and exact line range. Contents are fetched only from the configured repository, Git blob integrity is checked, quotes must match exactly, and the reply contains computed commit/line permalinks. There is no free-form model answer that could attach a valid citation to an invented claim. Broader Product acceptance/planning automation remains out of scope.
+
+Submit a private structured request through the Product App client:
+
+```sh
+python -m lifecycle.product --config '<PRIVATE_LIFECYCLE_JSON>' --request '<PRIVATE_REQUEST_JSON>'
+```
+
+A clarification request has `id`, `issue`, `kind: "clarification"`, and `citations` entries with `path`, `ref` (full commit SHA), `start`, `end` and exact `quote`. Decision requests use the owner-only kind; they cannot be answered through repository quoting. The App marks `needs-owner` and notifies the owner without copying request prose. This CLI/API accepts explicit structured requests; it never polls comments for commands. A Product clarification is informational and does not change the issue's current state. Both the owner's and App's Product roles are recognized, but neither Product-role membership nor a forged owner comment can substitute for a trusted guard approval snapshot or independent Runner review.
+
+## Push-back and the single disagreement exchange
+
+Current reviewer schema uses **P0/P1/P2 only**. Critical maps to P0; high and medium map to P1; low/minor map to P2. Historical mapping is documented for interpretation, not permission to rewrite old receipts or reuse old verdicts. Unknown severity fails validation.
+
+- P0/P1 force rework; P2 defaults to nonblocking follow-up issues. Projects can strengthen severity blocking but cannot make P0/P1 nonblocking.
+- Lifecycle jobs allow an initial attempt plus at most **two correction rounds**, configured in `pushback`. Each new head has a fresh independent review. Exhaustion routes to `needs-primary`; an unresolved Primary job routes to the owner instead of creating an endless chain.
+- Reviewer `blocked` or missing actionable findings goes directly to `needs-owner`, without a correction loop. Review-only jobs never run a correction worker.
+- The lifecycle worker schema adds nullable `disagreement: {kind: technical|product|scope, reason: string}`. Once, on a clean previously reviewed head, the worker can record a disagreement without changing files. The reviewer reconsiders that same exact head once. Remaining technical disagreement goes to Primary; product/scope questions go to the owner. The reason stays private; no arbitrary argument is posted or executed.
+- Primary receives the previous head and private findings and keeps the original review base, so its resulting work is independently reviewed across the complete feature range. PR gate formatting failures do not consume these rounds.
+
+Standalone runner operation without `lifecycle_config` keeps its existing two-attempt bound and default worker schema. Configure/migrate review prompts to the canonical severity names before enabling the new mode.
+
+## Stand-up setup and cadence
+
+```sh
+python -m digest.standup --config '<PRIVATE_DIGEST_JSON>'
+python -m digest.standup --config '<PRIVATE_DIGEST_JSON>' --id '<UNIQUE_ON_DEMAND_ID>'
+```
+
+The first command checks configured IANA timezone, weekdays and local time. The on-demand ID bypasses the scheduled time, not pause/identity/budget/privacy controls; reuse of the ID never creates another issue. `paused` or `pause_dates` skip a day. An owner-authored `digest:skip` label on a published report defers its reporting window. Skips never approve or merge anything; the next digest becomes overdue after `overdue_after_skips` consecutive skips (default three). Items carry forward, including completed items from skipped windows.
+
+Facts come from complete GitHub collections and trusted lifecycle records, plus protected local runner jobs and commit/refusal records. There are six sections: decisions, meaningful assumptions, demo readiness, completed work, progress/risk, usage/cost. Empty sections are omitted; if the first three are all empty, **no report or model call** is made. Stale thresholds are per state and use state label-event age; stale work is flagged, not retried. Urgent `blocked`/`needs-owner` states assign the owner independently of digest cadence, pause or model availability.
+
+Issue/PR titles and comment prose are not copied. Every factual item links to its issue/PR; Product usage links to the repository issue list. Ready-to-demo work requires the exact reviewed head. Commits deduplicate by job/round/SHA and only `state: committed` counts as done. Prepared publication is uncertain and needs reconciliation. Refusals expose fixed reason codes, never paths. Runner cost is explicitly unavailable when not recorded.
+
+For assumptions, configure approved public code-to-summary/view pairs in `public_assumptions` and matching `public_assumption_codes` in lifecycle policy. The Product identity can publish a metadata-only code using:
+
+```sh
+python -m lifecycle.core --config '<PRIVATE_LIFECYCLE_JSON>' assumption \
+  --issue '<ISSUE_NUMBER>' --code '<APPROVED_PUBLIC_CODE>'
+```
+
+Only trusted Product records with configured codes enter that section. Preview URLs are explicit operator-approved HTTPS config, with no credentials/query data. These configured public strings/links are an intentional publication boundary; review them before enabling a public repository. No raw agent text is used as an assumption summary or Product view.
+
+## Model privacy, cost and failure behavior
+
+The Claude Messages API writes only a short non-factual introduction, constrained to eligible safe sentences. This intentionally limits stylistic variety: unsupported prose is discarded, so model output cannot introduce a number, state, link, SHA, name, list item or alleged fact. All six factual sections and fallback wording are deterministic. The API receives no issue bodies, findings, refusal paths, logs or task text. If the API fails or prose validation fails, factual sections still post with “summary unavailable”.
+
+A UTC-month private budget ledger records a conservative byte-based input-token estimate, configured output cap, configured prices and reserved USD estimate before the call. It refuses a model call whose reservation would exceed `monthly_budget_usd`; factual publication continues. Failed/ambiguous calls keep their reservation and are not called again for the same digest ID. Reported API token usage is retained when valid; estimates are not an exact provider invoice or a substitute for provider-side limits. Set and review current prices yourself; no credential, price, model name or subscription assumption is shipped in code.
+
+Private state contains full assignments and findings. Public GitHub reports do not: they use whitelisted fields, fixed prose, IDs, issue links and commit metadata only. Public-repository users must explicitly accept that these facts become public. Replies to digest issues are never collected as decisions, approvals or instructions. A report issue has a dedicated marker/author/label and is excluded from task automation, preventing recursive digests.
+
+Sources: [GitHub issue events](https://docs.github.com/en/rest/issues/events), [labels](https://docs.github.com/en/rest/issues/labels), [assignees](https://docs.github.com/en/rest/issues/assignees), [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation), and [Claude Messages API](https://platform.claude.com/docs/en/api/messages/create).
+
+## Validation and combined live acceptance
+
+Tests use fake GitHub/model clients and synthetic actors, timestamps, scopes and temporary Git repositories. They cover repeated polling, re-approval, crash boundaries, outages, uncertain writes, actor/scope guard failures, fixed-field privacy, budget/skip behavior, push-back and disagreement. Run the repository's scanner, Ruff and full pytest suite before publishing a PR. No test uses real tokens, model accounts or other projects/services.
+
+The owner chose **implementation and tests now; combined live trial pending separate runner/Product identities**. After identities and the owner-merged default-branch workflow are ready, run one combined trial using disposable local worktrees/state and clearly marked throwaway issues in the authorized repository. Verify owner approval and guard rejection; owner/App Product role mapping, a cited repository clarification, and owner escalation for scope/AC/story-approval requests; repeated polling without duplicate jobs; runner commit, one correction/disagreement path and fresh review; PR open/close/merge lifecycle as authorized; stale/unsynced risk; one Product-authored digest; model/budget fallback; skip without approval; and urgent notification independent of cadence. Capture exact source/head, transition keys, sanitized receipts, budget and digest evidence. Close/delete throwaway issues/branches as authorized and remove local worktrees/state/auth copies. Never substitute synthetic evidence for this live acceptance or use the owner's token as an automated identity. No release tag is authorized by this package.

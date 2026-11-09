@@ -1,0 +1,953 @@
+"""Synthetic actors, API responses, outages and disposable Git worktrees only."""
+
+import copy
+import hashlib
+import io
+import json
+from pathlib import Path
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from lifecycle import core, service
+import test_runner as fixtures
+
+ROOT = Path(__file__).resolve().parents[1]
+WHEN = "2026-01-02T10:00:00+00:00"
+
+
+def policy(tmp_path):
+    cfg = core.read(ROOT / "templates/task-lifecycle.example.json")
+    cfg.update(
+        repository="example/project",
+        state_dir=str(tmp_path / "lifecycle"),
+        repository_root=str(tmp_path / "source"),
+        worktree_root=str(tmp_path / "worktrees"),
+        runner_config=str(tmp_path / "runner.json"),
+        primary_runner_config=str(tmp_path / "primary.json"),
+    )
+    cfg["actors"] = dict(
+        owner="owner-fixture",
+        runner="runner-fixture",
+        product="product-fixture",
+        workflow="github-actions[bot]",
+    )
+    cfg["identity_roles"] = {
+        cfg["actors"]["owner"]: ["owner", "product"],
+        cfg["actors"]["product"]: ["product"],
+        cfg["actors"]["runner"]: ["runner"],
+        cfg["actors"]["workflow"]: ["workflow"],
+    }
+    path = tmp_path / "lifecycle.json"
+    core.save(path, cfg)
+    cfg["config_path"] = str(path)
+    return cfg
+
+
+class Hub:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.issues = {}
+        self.comments_by_issue = {}
+        self.events_by_issue = {}
+        self.prs = {}
+        self.calls = []
+        self.fail_read = False
+        self.fail_write = None
+        self.labels = []
+        self.checks = []
+        self.counter = 100
+
+    def client(self, role="runner"):
+        return Client(self, role)
+
+    def issue(
+        self, number=1, state="approved", body="Implement the approved synthetic task."
+    ):
+        issue = dict(
+            number=number,
+            labels=[{"name": "status:" + state}],
+            body=body,
+            state="open",
+            updated_at=WHEN,
+            closed_at=None,
+            user={"login": self.cfg["actors"]["owner"]},
+            assignees=[],
+        )
+        self.issues[number] = issue
+        self.comments_by_issue[number] = []
+        self.events_by_issue[number] = []
+        if state != "draft":
+            # Build actual policy-valid history for each state.
+            chain = ["approved"]
+            if state in {
+                "dispatched",
+                "in-progress",
+                "committed",
+                "in-review",
+                "changes-requested",
+                "needs-primary",
+                "pr-open",
+                "accepted",
+                "merged",
+            }:
+                chain += ["dispatched", "in-progress", "committed", "in-review"]
+            if state not in chain:
+                chain.append(state)
+            for value in chain:
+                role = (
+                    "owner"
+                    if value in {"approved", "accepted"}
+                    else "workflow"
+                    if value in {"pr-open", "merged"}
+                    else "runner"
+                )
+                self.event(number, value, role)
+        return issue
+
+    def event(self, number, target, role="owner"):
+        self.counter += 1
+        item = dict(
+            id=self.counter,
+            event="labeled",
+            label={"name": "status:" + target},
+            actor={"login": self.cfg["actors"].get(role, role)},
+            created_at=WHEN,
+        )
+        self.events_by_issue[number].append(item)
+        self.issues[number]["labels"] = [
+            x
+            for x in self.issues[number]["labels"]
+            if not x["name"].startswith("status:")
+        ] + [{"name": "status:" + target}]
+        return item
+
+    def approve(self, number=1):
+        event = self.events_by_issue[number][-1]
+        record = core.public_record(
+            self.cfg,
+            number,
+            "approval",
+            0,
+            "approved",
+            event=event["id"],
+            kind="approval",
+            approved_by=self.cfg["actors"]["owner"],
+            scope_sha256=hashlib.sha256(
+                self.issues[number]["body"].encode()
+            ).hexdigest(),
+        )
+        record.update({"from": "approved", "actor": self.cfg["actors"]["workflow"]})
+        self.comments_by_issue[number].append(
+            dict(
+                user={"login": self.cfg["actors"]["workflow"]},
+                body=core.record_body(record),
+            )
+        )
+        return event
+
+
+class Client:
+    def __init__(self, hub, role):
+        self.hub, self.cfg, self.role = hub, hub.cfg, role
+
+    def issue(self, number):
+        if self.hub.fail_read:
+            raise core.Unavailable("offline")
+        return copy.deepcopy(self.hub.issues[number])
+
+    def comments(self, number):
+        if self.hub.fail_read:
+            raise core.Unavailable("offline")
+        return copy.deepcopy(self.hub.comments_by_issue[number])
+
+    def events(self, number):
+        return copy.deepcopy(self.hub.events_by_issue[number])
+
+    def pages(self, path):
+        if self.hub.fail_read:
+            raise core.Unavailable("offline")
+        if path.startswith("/issues"):
+            return [
+                copy.deepcopy(i)
+                for i in self.hub.issues.values()
+                if "state=open" not in path or i["state"] == "open"
+            ]
+        if path.startswith("/pulls"):
+            return copy.deepcopy(list(self.hub.prs.values()))
+        if path.startswith("/labels"):
+            return [{"name": name} for name in self.hub.labels]
+        raise AssertionError(path)
+
+    def set_state(self, number, target):
+        self.hub.calls.append(("label", number, target))
+        self.hub.event(number, target, self.role)
+
+    def notify(self, number):
+        if not any(
+            a["login"] == self.cfg["actors"]["owner"]
+            for a in self.hub.issues[number]["assignees"]
+        ):
+            self.hub.calls.append(("notify", number))
+            self.hub.issues[number]["assignees"].append(
+                {"login": self.cfg["actors"]["owner"]}
+            )
+
+    def request(self, method, path, data=None):
+        self.hub.calls.append((method, path, copy.deepcopy(data)))
+        if method == "GET" and path.startswith("/pulls/"):
+            return copy.deepcopy(self.hub.prs[int(path.split("/")[2])])
+        if method == "GET" and "/check-runs" in path:
+            return {"check_runs": self.hub.checks, "total_count": len(self.hub.checks)}
+        if method == "POST" and path.endswith("/comments"):
+            number = int(path.split("/")[2])
+            value = {
+                "user": {"login": self.cfg["actors"][self.role]},
+                "body": data["body"],
+            }
+            if self.hub.fail_write == "before":
+                raise core.Unavailable("rejected")
+            self.hub.comments_by_issue[number].append(value)
+            if self.hub.fail_write == "after":
+                raise core.Uncertain("response lost")
+            return copy.deepcopy(value)
+        if method == "POST" and path == "/issues":
+            if self.hub.fail_write == "before":
+                raise core.Unavailable("rejected")
+            number = max(self.hub.issues, default=0) + 1
+            value = self.hub.issue(number, "draft", data["body"])
+            value.update(
+                title=data["title"],
+                labels=[{"name": x} for x in data["labels"]],
+                user={"login": self.cfg["actors"][self.role]},
+            )
+            if self.hub.fail_write == "after":
+                raise core.Uncertain("response lost")
+            return copy.deepcopy(value)
+        if method == "POST" and path == "/labels":
+            self.hub.labels.append(data["name"])
+            return data
+        if method == "GET":
+            raise core.Unavailable("metadata unavailable")
+        raise AssertionError((method, path, data))
+
+
+@pytest.mark.parametrize(
+    "field,value", [("owner", "runner-fixture"), ("product", "owner-fixture")]
+)
+def test_owner_cannot_be_an_automated_actor(tmp_path, field, value):
+    cfg = policy(tmp_path)
+    cfg["actors"][field] = value
+    core.save(cfg["config_path"], cfg)
+    with pytest.raises(ValueError):
+        core.load_config(cfg["config_path"])
+
+
+def test_token_identity_checked_before_any_write(tmp_path):
+    cfg = policy(tmp_path)
+    client = core.GitHub(cfg, token="fake")
+    calls = []
+
+    def opened(req, timeout):
+        calls.append(req.full_url)
+        return io.BytesIO(
+            json.dumps({"data": {"viewer": {"login": cfg["actors"]["owner"]}}}).encode()
+        )
+
+    client.opener = SimpleNamespace(open=opened)
+    with pytest.raises(core.Unavailable, match="Wrong automation identity"):
+        client.request("PUT", "/issues/1/labels", {"labels": ["status:dispatched"]})
+    assert calls == ["https://api.github.com/graphql"]
+
+
+def test_transition_records_bind_actor_role_and_issue(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    client = h.client()
+    r = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    core.queue(cfg, r)
+    core.flush(cfg, client)
+    assert len(core.records(cfg, client.comments(1), 1)) == 1
+    assert core.records(cfg, client.comments(1), 2) == []
+    forged = copy.deepcopy(client.comments(1)[0])
+    forged["user"]["login"] = cfg["actors"]["product"]
+    value = json.loads(forged["body"].split(core.PREFIX)[1][: -len(core.SUFFIX)])
+    value["actor"] = cfg["actors"]["product"]
+    forged["body"] = core.record_body(value)
+    assert core.records(cfg, [forged], 1) == []
+    forged["user"]["login"] = "untrusted-fixture"
+    assert core.records(cfg, [forged], 1) == []
+
+
+@pytest.mark.parametrize("failure", ["before", "after", "read"])
+def test_outbox_recovers_outage_and_never_duplicates_comments(tmp_path, failure):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    client = h.client()
+    r = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    path = core.queue(cfg, r)
+    h.fail_write = failure if failure != "read" else None
+    h.fail_read = failure == "read"
+    core.flush(cfg, client)
+    h.fail_write = None
+    h.fail_read = False
+    core.queue(cfg, r)
+    core.flush(cfg, client)
+    core.flush(cfg, client)
+    assert core.read(path)["status"] == "synced"
+    assert len(client.comments(1)) == 1
+    assert core.state(client.issue(1)) == "dispatched"
+
+
+def test_atomic_queue_does_not_reset_attempted_or_synced(tmp_path):
+    cfg = policy(tmp_path)
+    r = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    path = core.queue(cfg, r)
+    entry = core.read(path)
+    entry.update(comment_attempted=True, status="uncertain")
+    core.save(path, entry)
+    for _ in range(5):
+        core.queue(cfg, r)
+    assert core.read(path) == entry
+
+
+def test_uncertain_comment_absent_is_not_reposted(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    client = h.client()
+    r = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    path = core.queue(cfg, r)
+    entry = core.read(path)
+    entry.update(comment_attempted=True)
+    entry["record"].update({"from": "approved", "actor": cfg["actors"]["runner"]})
+    core.save(path, entry)
+    core.flush(cfg, client)
+    assert core.read(path)["status"] == "uncertain" and client.comments(1) == []
+
+
+def test_guard_reverts_invalid_actor_and_missing_multiple_labels(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    client = h.client("workflow")
+    h.event(1, "dispatched", "attacker-fixture")
+    assert core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    h.issues[1]["labels"] += [{"name": "status:blocked"}]
+    assert core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    assert not core.guard_issue(cfg, client, 1)
+
+
+def test_approval_attestation_uses_owner_event_and_scope_snapshot(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    issue = h.issue()
+    client = h.client("workflow")
+    event = dict(
+        action="labeled",
+        label={"name": "status:approved"},
+        sender={"login": cfg["actors"]["owner"]},
+        issue=copy.deepcopy(issue),
+    )
+    core.attest_approval(cfg, client, event)
+    proof = core.records(cfg, client.comments(1), 1)[0]
+    assert proof["scope_sha256"] == hashlib.sha256(issue["body"].encode()).hexdigest()
+    assert service.claim_event(cfg, issue, client.events(1))
+    h.event(1, "approved", "owner")  # same-second ambiguity is never guessed
+    with pytest.raises(core.Unavailable, match="ambiguous"):
+        core.attest_approval(cfg, client, event)
+
+
+def configured_service(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    h.approve()
+    repo = Path(cfg["repository_root"])
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "seed",
+            "--allow-empty",
+        ],
+        check=True,
+    )
+    profile = tmp_path / "profile.json"
+    core.save(
+        profile,
+        dict(
+            worker_prompt="Implement.",
+            reviewer_prompt="Review.",
+            scope="Synthetic only.",
+            extra_scopes={},
+            coordination_files=[],
+        ),
+    )
+    runner = fixtures.runner
+    settings = dict(
+        worktree=str(tmp_path / "unused"),
+        branch="feature",
+        state_dir=str(tmp_path / "unused-state"),
+        agent_home=str(tmp_path / "agent-home"),
+        profile=str(profile),
+        worker_model="fixture",
+        reviewer_model="fixture",
+        agent=fixtures.agent_config("/must-not-launch"),
+        commit_identity={"name": "Fixture", "email": "fixture@example.invalid"},
+    )
+    core.save(cfg["runner_config"], settings)
+    core.save(cfg["primary_runner_config"], settings)
+    monkeypatch.setattr(service, "runner_module", lambda: runner)
+    monkeypatch.setattr(runner, "_LIFECYCLE", core)
+    monkeypatch.setattr(core, "GitHub", lambda c, role="runner", **kw: h.client(role))
+    monkeypatch.setattr(runner, "check_cli", lambda c: "fixture version")
+    return cfg, h, runner
+
+
+def test_claim_before_enqueue_repeat_poll_and_later_reapproval(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    assert service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100) == [
+        "issue-1-event-101"
+    ]
+    claims = list((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    assert len(claims) == 1
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 200)
+    assert (
+        len(list((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json")))
+        == 1
+    )
+    h.event(1, "approved", "owner")
+    h.approve()
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 300)
+    assert len(list((Path(cfg["state_dir"]) / "claims").glob("*.json"))) == 2
+
+
+def test_scope_edit_or_owner_stop_prevents_dispatch(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    h.issues[1]["body"] = "changed after approval"
+    assert service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100) == []
+    assert not list((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    h.event(1, "approved", "owner")
+    h.approve()
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 200)
+    h.event(1, "needs-owner", "owner")
+    monkeypatch.setattr(runner, "run_once", lambda *a: pytest.fail("must not start"))
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    claim = core.read(next((Path(cfg["state_dir"]) / "claims").glob("*.json")))
+    assert claim["stage"] == "suspended"
+
+
+def test_runner_phases_pushback_and_minor_followup_privacy(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            fixtures.deliver(config)
+            return fixtures.result("ready_for_review")
+        value = fixtures.result("needs_changes", "reviewer")
+        value["findings"][0].update(
+            severity="P1" if job["round"] == 1 else "P2",
+            path="/workspace/private.bin",
+            detail="PRIVATE-AGENT-OUTPUT",
+        )
+        return value
+
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, h.client(), clock=lambda: 100)
+    job = service.jobs(cfg)[0]
+    assert job["status"] == "ready_for_integration" and len(job["runner_commits"]) == 2
+    assert len(job["review_history"]) == 2
+    public = json.dumps(h.comments_by_issue) + json.dumps(h.issues)
+    assert (
+        "PRIVATE-AGENT-OUTPUT" not in public and "/workspace/private.bin" not in public
+    )
+    assert any("Minor follow-up" in i.get("title", "") for i in h.issues.values())
+    records = core.records(cfg, h.comments_by_issue[1], 1)
+    assert {
+        "dispatched",
+        "in-progress",
+        "committed",
+        "in-review",
+        "changes-requested",
+    } <= {r["to"] for r in records}
+
+
+def test_reconcile_reports_mismatch_without_writes(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    job = dict(
+        id="job",
+        round=1,
+        status="running_worker",
+        assignment={"lifecycle": {"issue": 1, "event": 101}},
+        runner_commits=[],
+    )
+    assert core.reconcile(cfg, [job], h.client()) == [
+        dict(issue=1, job="job", local="in-progress", remote="approved")
+    ]
+    assert h.calls == []
+
+
+def test_workflow_uses_default_branch_no_pr_code_and_narrow_permissions():
+    text = (ROOT / "templates/task-lifecycle.yml").read_text()
+    assert "ref: ${{ github.event.repository.default_branch }}" in text
+    assert "pull_request.head" not in text and "pull_request.base" not in text
+    assert "issues: write" in text and "contents: write" not in text
+    assert "persist-credentials: false" in text and "secrets." not in text
+    assert "python -I lifecycle/core.py" in text
+
+
+@pytest.mark.parametrize(
+    "verdict,rounds,status",
+    [("blocked", 1, "needs_owner"), ("needs_changes", 3, "needs_primary_review")],
+)
+def test_blocked_has_no_rework_and_exhaustion_uses_two_corrections(
+    tmp_path, monkeypatch, verdict, rounds, status
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            fixtures.deliver(config)
+            return fixtures.result("ready_for_review")
+        return fixtures.result(verdict, "reviewer")
+
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, h.client(), clock=lambda: 100)
+    job = service.jobs(cfg)[0]
+    assert (
+        job["status"] == status
+        and job["round"] == rounds
+        and len(job["review_history"]) == rounds
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        ("technical", "needs_primary_review"),
+        ("product", "needs_owner"),
+        ("scope", "needs_owner"),
+    ],
+)
+def test_one_disagreement_reconsideration_same_exact_head(
+    tmp_path, monkeypatch, kind, status
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    reviews = []
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            value = fixtures.result("ready_for_review")
+            if job["round"] == 1:
+                fixtures.deliver(config)
+            else:
+                value["disagreement"] = {
+                    "kind": kind,
+                    "reason": "Synthetic reason, retained privately.",
+                }
+            return value
+        reviews.append(job["head_commit"])
+        return fixtures.result("needs_changes", "reviewer")
+
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, h.client(), clock=lambda: 100)
+    job = service.jobs(cfg)[0]
+    assert job["status"] == status and job["disagreement_exchanges"] == 1
+    assert (
+        len(reviews) == 2 and len(set(reviews)) == 1 and len(job["runner_commits"]) == 1
+    )
+
+
+def test_claim_recovers_after_comment_and_after_enqueue_without_duplicate_job(
+    tmp_path, monkeypatch
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    original = runner.enqueue
+    calls = []
+
+    def crash(*args, **kwargs):
+        path = original(*args, **kwargs)
+        calls.append(path)
+        raise RuntimeError("crash after durable enqueue")
+
+    monkeypatch.setattr(runner, "enqueue", crash)
+    with pytest.raises(RuntimeError):
+        service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    monkeypatch.setattr(runner, "enqueue", original)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 200)
+    assert len(service.jobs(cfg)) == 1 and len(calls) == 1
+    records = core.records(cfg, h.comments_by_issue[1], 1)
+    assert sum(r["to"] == "dispatched" for r in records) == 1
+
+
+def test_claim_crash_after_record_and_git_outage_does_not_start_duplicate(
+    tmp_path, monkeypatch
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    original = service.ensure_worktree
+    monkeypatch.setattr(
+        service,
+        "ensure_worktree",
+        lambda *a: (_ for _ in ()).throw(core.Unavailable("git unavailable")),
+    )
+    with pytest.raises(core.Unavailable):
+        service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    assert len(list((Path(cfg["state_dir"]) / "claims").glob("*.json"))) == 1
+    monkeypatch.setattr(service, "ensure_worktree", original)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 200)
+    assert len(service.jobs(cfg)) == 1
+
+
+def test_unclean_owned_phase_is_interrupted_without_model_replay(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(path)
+    job.update(status="running_worker", child_pid=999999)
+    core.save(path, job)
+    h.event(1, "in-progress", "runner")
+    monkeypatch.setattr(
+        runner, "execute", lambda *a: pytest.fail("never replay crashed phase")
+    )
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    assert core.read(path)["status"] == "interrupted"
+
+
+def test_state_binding_prevents_cross_repository_reuse(tmp_path):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    changed = copy.deepcopy(cfg)
+    changed["repository"] = "example/other"
+    with pytest.raises(ValueError, match="another repository"):
+        core.bind_state(changed)
+
+
+def test_owned_cleanup_preserves_dirty_and_unmerged_work(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(path)
+    root = Path(claim["worktree"])
+    (root / "private.txt").write_text("synthetic local edit")
+    issue = copy.deepcopy(h.issues[1])
+    issue.update(state="closed", labels=[{"name": "status:merged"}])
+    service.cleanup(cfg, claim, issue)
+    assert root.exists() and claim["cleanup_pending"] == "dirty_worktree_requires_owner"
+    (root / "private.txt").unlink()
+    service.cleanup(cfg, claim, issue)
+    assert not root.exists() and claim["cleaned"]
+
+
+def test_service_git_does_not_inherit_git_dir_or_execute_hooks(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    trap = Path(cfg["repository_root"]) / "hook-trap"
+    hook = Path(cfg["repository_root"]) / ".git/hooks/post-checkout"
+    hook.write_text("#!/bin/sh\ntouch " + str(trap) + "\n")
+    hook.chmod(0o700)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "must-not-read"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "must-not-write"))
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    assert not trap.exists() and len(service.jobs(cfg)) == 1
+
+
+def pr_fixture(cfg, h):
+    sha = "a" * 40
+    h.issue(state="in-review")
+    review = core.public_record(
+        cfg,
+        1,
+        "job",
+        1,
+        "in-review",
+        commit=sha,
+        kind="review",
+        outcome="ready_for_integration",
+    )
+    review.update({"from": "in-review", "actor": cfg["actors"]["runner"]})
+    h.comments_by_issue[1].append(
+        {"user": {"login": cfg["actors"]["runner"]}, "body": core.record_body(review)}
+    )
+    pr = dict(
+        number=7,
+        state="open",
+        merged=False,
+        body="Closes #1",
+        head={"sha": sha, "repo": {"full_name": cfg["repository"]}},
+        base={"ref": "main"},
+        user={"login": cfg["actors"]["owner"]},
+    )
+    h.prs[7] = pr
+    return pr
+
+
+@pytest.mark.parametrize(
+    "action,merged,target",
+    [
+        ("opened", False, "pr-open"),
+        ("closed", False, "needs-owner"),
+        ("closed", True, "merged"),
+    ],
+)
+def test_pr_lifecycle_requires_exact_trusted_review(tmp_path, action, merged, target):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    if action == "closed":
+        h.event(1, "pr-open", "workflow")
+    pr.update(merged=merged, merge_commit_sha="b" * 40 if merged else None)
+    core.pr_event(
+        cfg, h.client("workflow"), {"action": action, "pull_request": copy.deepcopy(pr)}
+    )
+    assert core.state(h.issues[1]) == target
+    assert len(h.comments_by_issue[1]) == 2
+
+
+@pytest.mark.parametrize("mutation", ["fork", "head", "author", "draft"])
+def test_unrelated_pr_cannot_advance_task(tmp_path, mutation):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    if mutation == "fork":
+        pr["head"]["repo"]["full_name"] = "example/foreign"
+    elif mutation == "head":
+        pr["head"]["sha"] = "c" * 40
+    elif mutation == "author":
+        pr["user"]["login"] = "attacker-fixture"
+    else:
+        h.comments_by_issue[1] = []
+        h.issues[1]["labels"] = [{"name": "status:draft"}]
+    with pytest.raises(core.Unavailable):
+        core.pr_event(
+            cfg,
+            h.client("workflow"),
+            {"action": "opened", "pull_request": copy.deepcopy(pr)},
+        )
+    assert core.state(h.issues[1]) != "pr-open"
+
+
+def test_atomic_queue_concurrent_with_flush(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    client = h.client()
+    record = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: core.queue(cfg, record), range(20)))
+    core.flush(cfg, client)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: core.queue(cfg, record), range(20)))
+    core.flush(cfg, client)
+    assert len(client.comments(1)) == 1
+    assert core.read(core.queue(cfg, record))["status"] == "synced"
+
+
+@pytest.mark.parametrize(
+    "legacy,canonical",
+    [
+        ("critical", "P0"),
+        ("high", "P1"),
+        ("medium", "P1"),
+        ("low", "P2"),
+        ("minor", "P2"),
+    ],
+)
+def test_historical_severity_mapping_does_not_downgrade_medium(legacy, canonical):
+    assert core.canonical_severity(legacy) == canonical
+    with pytest.raises(ValueError):
+        core.canonical_severity("unknown-fixture")
+
+
+def test_primary_dispatch_inherits_failed_head_and_reviews_original_range(
+    tmp_path, monkeypatch
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            fixtures.deliver(config)
+            return fixtures.result("ready_for_review")
+        return fixtures.result("needs_changes", "reviewer")
+
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, h.client(), clock=lambda: 100)
+    original = service.jobs(cfg)[0]
+    assert original["status"] == "needs_primary_review"
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    all_jobs = service.jobs(cfg)
+    primary = next(j for j in all_jobs if j["assignment"]["lifecycle"]["primary"])
+    assert primary["base_commit"] == original["head_commit"]
+    assert primary["review_base"] == original["base_commit"]
+    assert primary["status"] == "needs_owner"
+    prompt = runner.prompt_for(
+        runner.load_config(
+            next((Path(cfg["state_dir"]) / "jobs").glob(primary["id"] + "/config.json"))
+        ),
+        primary,
+        "reviewer",
+    )
+    assert original["base_commit"] + ".." + primary["head_commit"] in prompt
+
+
+def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    client = h.client("workflow")
+    h.checks = [
+        dict(
+            id=1,
+            name="review-gate",
+            app={"slug": "github-actions"},
+            head_sha=pr["head"]["sha"],
+            details_url="https://github.com/example/project/actions/runs/90/job/91",
+            status="completed",
+            conclusion="success",
+        )
+    ]
+    original = client.request
+
+    def request(method, path, data=None):
+        if path == "/actions/workflows/pr-review-gate.yml":
+            return {"id": 7, "path": ".github/workflows/pr-review-gate.yml"}
+        if path == "/actions/runs/90":
+            return dict(
+                workflow_id=7,
+                path=".github/workflows/pr-review-gate.yml",
+                event="pull_request",
+                head_sha=pr["head"]["sha"],
+                pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
+            )
+        return original(method, path, data)
+
+    client.request = request
+    assert core.trusted_gate(cfg, client, pr) == "unavailable"
+
+    def incomplete(method, path, data=None):
+        if "/check-runs" in path:
+            return {"total_count": 2, "check_runs": h.checks}
+        return request(method, path, data)
+
+    client.request = incomplete
+    assert core.trusted_gate(cfg, client, pr) == "unavailable"
+
+
+def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    client = h.client("workflow")
+    check = dict(
+        id=1,
+        name="review-gate",
+        app={"slug": "github-actions"},
+        head_sha=pr["head"]["sha"],
+        details_url="https://github.com/example/project/actions/runs/90/job/91",
+        status="completed",
+        conclusion="success",
+    )
+    run = dict(
+        workflow_id=7,
+        path=".github/workflows/pr-review-gate.yml",
+        event="pull_request_target",
+        head_sha=pr["head"]["sha"],
+        pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
+    )
+
+    def request(method, path, data=None):
+        if "/check-runs" in path:
+            return {"total_count": 1, "check_runs": [check]}
+        if path == "/actions/workflows/pr-review-gate.yml":
+            return {"id": 7, "path": run["path"]}
+        if path == "/actions/runs/90":
+            return run
+        raise core.Unavailable("unknown metadata")
+
+    client.request = request
+    assert core.trusted_gate(cfg, client, pr) == "pass"
+    run["head_sha"] = "c" * 40
+    assert core.trusted_gate(cfg, client, pr) == "unavailable"
+
+
+def test_new_owner_approval_supersedes_stale_phase_without_replaying_it(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue()
+    h.approve()
+    client = h.client()
+    record = core.public_record(
+        cfg, 1, "issue-1-event-101", 1, "in-progress", event=101
+    )
+    path = core.queue(cfg, record)
+    # Old phase cannot advance directly from approved; it becomes a conflict.
+    core.flush(cfg, client)
+    assert core.read(path)["status"] == "conflict"
+    h.event(1, "approved", "owner")
+    h.approve()
+    core.flush(cfg, client)
+    assert core.read(path)["status"] == "superseded"
+    assert core.state(h.issues[1]) == "approved"
+
+
+def test_workflow_uncertain_rerun_does_not_repeat_absent_comment(tmp_path):
+    cfg = policy(tmp_path)
+    cfg["uncertain_workflow_resume"] = True
+    h = Hub(cfg)
+    h.issue()
+    client = h.client()
+    record = core.public_record(cfg, 1, "job", 0, "dispatched", event=101)
+    path = core.queue(cfg, record)
+    core.flush(cfg, client)
+    assert core.read(path)["status"] == "uncertain" and not client.comments(1)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_claim_recovers_durable_terminal_job_without_readmission(
+    tmp_path, monkeypatch, closed
+):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(path)
+    job.update(status="ready_for_integration", head_commit="a" * 40)
+    core.save(path, job)
+    h.event(1, "in-progress", "runner")
+    h.event(1, "committed", "runner")
+    h.event(1, "in-review", "runner")
+    if closed:
+        h.issues[1]["state"] = "closed"
+    monkeypatch.setattr(
+        runner, "run_once", lambda *a: pytest.fail("never replay completed job")
+    )
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    assert core.read(claim_path)["stage"] == "finished"
+    assert core.read(claim_path)["head"] == "a" * 40
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    assert core.read(claim_path)["stage"] == "finished"
