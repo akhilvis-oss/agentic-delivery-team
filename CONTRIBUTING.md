@@ -6,6 +6,9 @@ Thanks for your interest. This kit is young and changes quickly; small, focused 
 - **Open an issue first** for anything beyond a small fix, so we can agree the approach before you build it.
 - Read [`AGENTS.md`](AGENTS.md). It's written for AI agents but applies to everyone: boundaries, review categories, must-ask items and the merge policy.
 
+## How issues are labelled
+This repository runs its own task lifecycle. Every issue carries one `status:` label; a new or edited issue without one is labelled `status:draft` automatically. That's expected: it means not yet approved for work. Only the owner approves work.
+
 ## Making a change
 1. Fork the repository and work on a branch.
 2. Keep the change to one coherent purpose. Don't mix control-critical changes (workflows, the review gate, `AGENTS.md`) with other work.
