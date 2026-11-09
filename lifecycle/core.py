@@ -481,7 +481,7 @@ class GitHub:
 
     def __init__(self, cfg, role="runner", token=None):
         self.cfg, self.role = cfg, role
-        self.app_settings = cfg.get("app_auth", {}).get(role) if token is None else None
+        self.use_app_auth = token is None and role in cfg.get("app_auth", {})
         self.token_expiry = None
         self.token = (
             token
@@ -492,7 +492,7 @@ class GitHub:
                 else cfg.get("token_env", "RUNNER_GITHUB_TOKEN")
             )
         )
-        if self.app_settings is not None:
+        if self.use_app_auth:
             self.refresh_app_token()
         if not self.token or cfg["actors"][role] == cfg["actors"]["owner"]:
             raise Unavailable("Dedicated automation token required")

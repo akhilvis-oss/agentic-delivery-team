@@ -265,3 +265,15 @@ def test_preflight_posts_once_and_never_blind_retries(tmp_path, monkeypatch):
     with pytest.raises(core.Unavailable, match="outcome unknown"):
         preflight.run(cfg, 32)
     assert not h.comments_by_issue[32]
+
+
+def test_explicit_null_app_settings_never_fall_back_to_environment(
+    tmp_path, monkeypatch
+):
+    cfg = configured(tmp_path)
+    cfg["app_auth"]["product"] = None
+    monkeypatch.setenv(cfg["product_token_env"], "synthetic-environment-credential")
+    with pytest.raises(
+        core.Unavailable, match="Invalid private App authentication settings"
+    ):
+        core.GitHub(cfg, "product")
