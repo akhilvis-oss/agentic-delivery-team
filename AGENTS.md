@@ -13,6 +13,7 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 
 ## Public and generic by default
 - **No private content.** Never commit personal paths, account or seat names, machine names, credentials, tokens, billing details or private project data. Local settings live in uncommitted config; the repository holds only generic code and `*.example` files.
+- Owner-approved exception: owner and bot GitHub logins may be committed in the public-policy `.github/task-lifecycle.json`. Paths, App IDs and Keychain references remain private local settings. This exception does not permit credentials or other private content.
 - Run `python scripts/check_private_content.py` before every commit. Exempt a line with the allow marker only for a reviewed placeholder, and say why in the PR.
 - **No project specifics in code.** Anything particular to one project (paths, requirement IDs, domain rules, model names) becomes configuration with a documented example.
 - Write for strangers: docs explain what a piece does, how to adopt it, and its limits.

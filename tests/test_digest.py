@@ -22,6 +22,7 @@ def configuration(tmp_path):
         runner_state_dirs=[lifecycle["state_dir"]],
     )
     cfg["model"].update(
+        enabled=True,
         name="fixture-model",
         monthly_budget_usd="1",
         input_usd_per_million="1",
@@ -517,3 +518,20 @@ def test_pause_counts_only_missed_scheduled_digests(tmp_path):
     for _ in range(2):
         standup.run_once(cfg, h.client("product"), Model(), at=AT)
         assert core.read(path)["skips"] == 1
+
+
+@pytest.mark.parametrize("model_setting", [None, {}, {"enabled": False}])
+def test_disabled_model_never_calls_or_reserves_budget(tmp_path, model_setting):
+    cfg = configuration(tmp_path)
+    if model_setting is None:
+        cfg.pop("model")
+    else:
+        cfg["model"] = model_setting
+    h = Hub(cfg["lifecycle"])
+    h.issue(state="draft")
+    model = Model()
+    result = standup.run_once(cfg, h.client("product"), model, at=AT)
+    assert result["status"] == "posted" and result["summary"] == "disabled"
+    assert model.calls == 0
+    assert "Model disabled; factual sections follow." in posted(h)[0]["body"]
+    assert not (Path(cfg["state_dir"]) / "budget.json").exists()

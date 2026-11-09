@@ -19,6 +19,7 @@
   "paused": false,
   "pause_dates": [],
   "model": {
+    "enabled": false,
     "name": "<PRODUCT_MODEL>",
     "key_env": "PRODUCT_API_KEY",
     "monthly_budget_usd": "<MONTHLY_USD_BUDGET>",

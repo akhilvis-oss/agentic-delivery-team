@@ -7,11 +7,13 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -129,6 +131,28 @@ def key(value):
 
 def load_config(path, *, local=True):
     cfg = read(path)
+    if "policy_file" in cfg:
+        if not local or not Path(cfg["policy_file"]).is_absolute():
+            raise ValueError(
+                "Public policy must be loaded from an absolute local reference"
+            )
+        local_fields = {
+            "policy_file",
+            "state_dir",
+            "repository_root",
+            "worktree_root",
+            "runner_config",
+            "primary_runner_config",
+            "token_env",
+            "product_token_env",
+            "app_auth",
+        }
+        if not set(cfg) <= local_fields:
+            raise ValueError("Public policy fields belong in the policy file")
+        policy = read(cfg["policy_file"])
+        if set(policy) & local_fields:
+            raise ValueError("Private settings must not appear in public policy")
+        cfg = {**policy, **cfg}
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", cfg.get("repository", "")):
         raise ValueError("Explicit repository required")
     roles = cfg.get("actors", {})
@@ -457,15 +481,19 @@ class GitHub:
 
     def __init__(self, cfg, role="runner", token=None):
         self.cfg, self.role = cfg, role
+        self.use_app_auth = token is None and role in cfg.get("app_auth", {})
+        self.token_expiry = None
         self.token = (
             token
             if token is not None
             else os.environ.get(
                 cfg.get("product_token_env", "PRODUCT_GITHUB_TOKEN")
                 if role == "product"
-                else cfg["token_env"]
+                else cfg.get("token_env", "RUNNER_GITHUB_TOKEN")
             )
         )
+        if self.use_app_auth:
+            self.refresh_app_token()
         if not self.token or cfg["actors"][role] == cfg["actors"]["owner"]:
             raise Unavailable("Dedicated automation token required")
         if any(ord(c) < 33 for c in self.token):
@@ -473,7 +501,23 @@ class GitHub:
         self.opener = urllib.request.build_opener(NoRedirect)
         self.identity_verified = False
 
+    def refresh_app_token(self):
+        # Also works when core.py is executed in isolated mode by the guard or
+        # imported by the standalone runner; no path from config is executable.
+        spec = importlib.util.spec_from_file_location(
+            "_agentic_app_tokens", Path(__file__).with_name("app_tokens.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            self.token, self.token_expiry = module.mint(self.cfg, self.role)
+        except module.AuthenticationError as error:
+            raise Unavailable(str(error)) from None
+        self.identity_verified = False
+
     def ensure_actor(self):
+        if self.token_expiry is not None and time.time() >= self.token_expiry - 60:
+            self.refresh_app_token()
         if self.identity_verified:
             return
         # Fixed read-only GraphQL query authenticates the token before ANY write.
@@ -497,7 +541,7 @@ class GitHub:
             actor != self.cfg["actors"][self.role]
             or actor == self.cfg["actors"]["owner"]
         ):
-            raise Unavailable("Wrong automation identity; no write made")
+            raise Unavailable("Wrong automation identity; no write made: " + str(actor))
         self.identity_verified = True
 
     def request(self, method, path, data=None):
@@ -1132,13 +1176,22 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
-        "action", choices=["setup-labels", "flush", "guard-event", "assumption"]
+        "action",
+        choices=[
+            "setup-labels",
+            "flush",
+            "guard-event",
+            "guard-identity",
+            "assumption",
+        ],
     )
     parser.add_argument("--event", type=Path)
     parser.add_argument("--issue", type=int)
     parser.add_argument("--code")
     args = parser.parse_args(argv)
-    cfg = load_config(args.config, local=args.action != "guard-event")
+    cfg = load_config(
+        args.config, local=args.action not in {"guard-event", "guard-identity"}
+    )
     if args.action == "guard-event":
         cfg["state_dir"] = str(Path(os.environ["RUNNER_TEMP"]) / "task-lifecycle")
         cfg["uncertain_workflow_resume"] = (
@@ -1146,13 +1199,16 @@ def main(argv=None):
         )
     role = (
         "workflow"
-        if args.action == "guard-event"
+        if args.action in {"guard-event", "guard-identity"}
         else "product"
         if args.action == "assumption"
         else "runner"
     )
     client = GitHub(cfg, role)
-    if args.action == "assumption":
+    if args.action == "guard-identity":
+        client.ensure_actor()
+        print(json.dumps({"identity": cfg["actors"]["workflow"], "preflight": "PASS"}))
+    elif args.action == "assumption":
         if args.code not in cfg.get("public_assumption_codes", []):
             raise ValueError("Assumption code must be approved in local config")
         record = public_record(
