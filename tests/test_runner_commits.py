@@ -204,7 +204,7 @@ def test_correction_rounds_have_distinct_runner_commits(setup, monkeypatch):
 
 def test_worker_never_gets_git_write_access_or_commit_instructions(setup):
     cfg, _, _, job = setup
-    command = runner.command(cfg, "worker", Path("out"), Path("schema"))
+    command = runner.command(cfg, "worker", Path("out"), Path("schema"), Path("prompt"))
     assert "--approve-for-me" in command
     assert not any(x in command for x in ["--add-dir", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox"])
     assert all(".git" not in argument for argument in command)
