@@ -6,8 +6,9 @@ from v04_trial_greeting import greet
 
 
 class GreetingTests(unittest.TestCase):
-    def test_greet_ordinary_name(self):
+    def test_greet_trims_surrounding_whitespace(self):
         self.assertEqual(greet("Ada"), "Hello, Ada!")
+        self.assertEqual(greet(" Ada "), "Hello, Ada!")
 
 
 if __name__ == "__main__":

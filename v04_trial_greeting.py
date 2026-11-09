@@ -3,4 +3,4 @@
 
 def greet(name):
     """Return a greeting for the supplied name."""
-    return f"Hello, {name}!"
+    return f"Hello, {name.strip()}!"
