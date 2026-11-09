@@ -1,0 +1,49 @@
+name: Story
+description: A user story with context and verbatim acceptance criteria. Agents start only after the owner approves it.
+title: "<Short outcome-focused title>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write for an agent that has never seen your chats: everything it needs must be here or in `docs/product/`.
+  - type: textarea
+    id: story
+    attributes:
+      label: Story
+      description: "As a <user>, I want <capability>, so that <outcome>."
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and rationale
+      description: Why this matters now, background from the product docs, and links to related decisions.
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: |
+        One per line, numbered, testable. Agents copy these into the PR verbatim.
+        Example: "- AC-1: Given ..., when ..., then ..."
+      value: |
+        - AC-1:
+        - AC-2:
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Out of scope
+      description: What this story deliberately does not cover.
+  - type: textarea
+    id: must_ask
+    attributes:
+      label: Must-ask overrides (optional)
+      description: Extra items agents must ask about for this story, or items pre-approved for it (for example "schema change expected").
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Stories or decisions this depends on.
