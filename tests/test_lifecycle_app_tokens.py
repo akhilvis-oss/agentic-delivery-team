@@ -277,3 +277,37 @@ def test_explicit_null_app_settings_never_fall_back_to_environment(
         core.Unavailable, match="Invalid private App authentication settings"
     ):
         core.GitHub(cfg, "product")
+
+
+def test_stateless_token_is_opaque_through_mint_and_repository_request(
+    tmp_path, monkeypatch
+):
+    cfg = configured(tmp_path)
+    api = API(cfg)
+    # Synthetic token: 520 characters and two dots. Do not parse JWT claims or
+    # assume the provider's token length; pass the opaque credential unchanged.
+    opaque = "ghs_" + "a" * 170 + "." + "b" * 170 + "." + "c" * 174
+    assert len(opaque) == 520 and opaque.count(".") == 2
+    api.responses[2].update(
+        token=opaque, permissions={**auth.PERMISSIONS["product"], "metadata": "read"}
+    )
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: b"private-fixture")
+    monkeypatch.setattr(auth, "jwt", lambda *a: "jwt-fixture")
+    token, _ = auth.mint(cfg, "product", at=AT, opener=api)
+    assert json.loads(api.calls[2].data)["permissions"] == auth.PERMISSIONS["product"]
+    client = core.GitHub(cfg, "product", token=token)
+    calls = []
+
+    def opened(req, timeout):
+        calls.append(req)
+        assert req.headers["Authorization"] == "Bearer " + opaque
+        value = (
+            {"data": {"viewer": {"login": cfg["actors"]["product"]}}}
+            if req.full_url.endswith("/graphql")
+            else {"number": 32, "state": "open"}
+        )
+        return io.BytesIO(json.dumps(value).encode())
+
+    client.opener = SimpleNamespace(open=opened)
+    assert client.request("GET", "/issues/32")["number"] == 32
+    assert len(calls) == 2 and client.identity_verified

@@ -508,6 +508,7 @@ def test_reconcile_reports_mismatch_without_writes(tmp_path):
 
 def test_workflow_uses_default_branch_no_pr_code_and_narrow_permissions():
     text = (ROOT / "templates/task-lifecycle.yml").read_text()
+    assert (ROOT / ".github/workflows/task-lifecycle.yml").read_text() == text
     assert "ref: ${{ github.event.repository.default_branch }}" in text
     assert "pull_request.head" not in text and "pull_request.base" not in text
     assert "issues: write" in text and "contents: write" not in text
