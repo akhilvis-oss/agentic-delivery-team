@@ -1,64 +1,59 @@
 # agentic-delivery-team
 
-An open-source kit that lets a product owner steer an app's build by AI coding agents, with checks and balances, once the product vision exists.
+An open-source kit for building software with AI coding agents while you stay the product owner. Agents do the building; the kit adds the checks and balances a good team has, so you only spend time on decisions that need you.
 
-> **Status: v0, experimental.** Pieces are extracted one at a time from a working setup and proven on a real project before being called stable. Expect changes.
+> **Status: experimental (version 0).** Each piece is used on a real project before release. Expect changes between versions. See [Limits](#limits) before relying on it.
 
-## The idea
+## How it works
 
-You are the customer and product owner. You agree the vision, roadmap and stories with a product agent. Engineering agents build in thin, demoable slices. The kit supplies the guardrails so you only spend time on what needs you:
+You work the way a product owner works with a team:
 
-- **Proportional review.** Every pull request gets a review category from the files it changes. Low-risk changes need little ceremony; changes to financial logic, credentials or the review rules themselves need full evidence and an independent checker.
-- **Nothing irreversible without you.** Scope approval, product acceptance and merge authority stay with the owner and are separate recorded steps.
-- **Assumptions over interruptions.** Agents proceed on recorded assumptions within approved scope, and escalate only when a choice conflicts with approved direction or would be costly to reverse.
-- **GitHub as the record.** Issues, PRs and reviews hold the durable history, so work survives a lost chat or a restarted agent.
+1. **You shape the product** with an AI assistant (the *product agent*): vision, roadmap and stories with acceptance criteria. Everything agreed is written to the repository, so no decision lives only in chat memory.
+2. **You approve a story.** Nothing starts before that.
+3. **A coding agent builds it.** It records reasonable assumptions and keeps going, and asks you only when a choice conflicts with what you approved, touches a must-ask area (money, personal data, credentials and so on) or would be costly to undo.
+4. **A separate agent reviews it**, fresh, read-only, against your criteria. Serious findings go back for rework; at most two rounds, then it escalates.
+5. **A pull request opens with its evidence.** A review gate decides how much evidence it needs from the files it changes. Low-risk changes merge on passing checks; high-risk ones wait for you.
+6. **You read a short stand-up** listing only what needs you, each item linked to the issue or PR to act on.
+
+GitHub is the record throughout: issues, labels, pull requests and reviews hold the history, so work survives a lost chat or a restarted agent.
 
 ## What's in the kit
 
-| Piece | Status | Where |
+| Piece | What it does | Status | Docs |
+| --- | --- | --- | --- |
+| **Starter kit** | Agent rules (`AGENTS.md`), product agent rules, product docs and a story template to copy into your project | Unreleased | [`starter-kit/`](starter-kit/) |
+| **Review gate** | Four review categories (light, standard, domain-critical, control-critical) derived from changed files and enforced in CI | [v0.2.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.2.0) | [Review categories](docs/review-categories.md) |
+| **Task runner** | Delegates one approved task to a coding agent, gets an independent review, and makes the commit itself after checking the changed paths | [v0.3.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.3.0) | [Task runner](docs/task-runner.md) |
+| **Task lifecycle and stand-up** | One status label per issue, guarded transitions, owner-only approval, and a factual stand-up digest | Merged; live trial pending | [Lifecycle and digest](docs/v04-lifecycle-digest.md) |
+| **Private-content check** | Catches personal paths and private names before they reach a public repository | Released with v0.2.0 | [`scripts/`](scripts/check_private_content.py) |
+
+The kit works with any coding agent you can run from the command line; agents are defined in configuration, not code.
+
+## Get started
+
+Start small and add pieces as you need them. **[Quickstart](docs/quickstart.md)** walks through each level.
+
+| Level | You get | Time |
 | --- | --- | --- |
-| Review gate: four review categories enforced in CI | **v0.2, unreleased** | [`gate/`](gate/), [`templates/`](templates/), [docs](docs/review-categories.md) |
-| Private-content check for public repos | **v0.1, this release** | [`scripts/check_private_content.py`](scripts/check_private_content.py) |
-| Local task runner: bounded delegation, review-only jobs and safe recovery | **v0.3, unreleased** | [`runner/`](runner/), [setup and safety](docs/task-runner.md) |
-| Issue lifecycle and stand-up digest: approval claims, phase history, guarded states and owner decisions | **v0.4, unreleased** | [`lifecycle/`](lifecycle/), [`digest/`](digest/), [setup and limits](docs/v04-lifecycle-digest.md) |
-| Base agent rules and project profile (assumptions, escalation, permissions) | Planned | `templates/` |
+| 1. Rules and review gate | Agents follow one working agreement; every PR is reviewed in proportion to its risk | About 15 minutes |
+| 2. Task runner | Bounded delegation with an independent reviewer and runner-made commits | About an hour |
+| 3. Lifecycle and stand-up | Approval-driven dispatch, guarded states and a daily digest | Half a day, plus bot identities |
 
-## Quick start: the review gate
+## Limits
 
-1. Copy [`gate/review_gate.py`](gate/review_gate.py) to `scripts/review_gate.py` in your project.
-2. Copy [`templates/review-gate.example.json`](templates/review-gate.example.json) to `.github/review-gate.json` and edit:
-   - `repo_url` and `allowed_bases`
-   - `requirement_ids` (your ID scheme, or `null`)
-   - `domain_evidence`: what "domain-critical" evidence means for your project
-   - the path patterns for each category
-   - `gate_paths`: the code, config, workflows and tests that must stay control-critical
-3. Copy [`templates/pull_request_template.md`](templates/pull_request_template.md) to `.github/pull_request_template.md`.
-4. Copy [`templates/review-gate.yml`](templates/review-gate.yml) to `.github/workflows/review-gate.yml`.
-5. Have the owner install the workflow, gate and config together on the default branch in a reviewed merge. There is no fallback to PR code. Target branches must contain the gate and config too.
-6. Open a fresh test PR after that merge: the trusted workflow only starts enforcing once installed on the default branch. Have the owner make its **`review-gate`** job a required status check. In this repository, add it to the **Protect Main** ruleset alongside **`checks`**.
-   - **Private repository on GitHub Free?** Required checks aren't available there, so the gate runs but can't block a merge: never merge a PR whose `review-gate` check failed. Making it blocking needs a public repository or GitHub Pro, Team or Enterprise Cloud. See [Limits](docs/review-categories.md#limits).
+Read these before relying on the kit:
 
-The trusted workflow uses `pull_request_target`, checks out only the base SHA's gate and config, and runs no PR code. It uses the automatic read-only GitHub token for metadata; it needs no configured secrets. Complete API file lists are bound to the PR's head SHA, base SHA, description and changed-file count. Missing, malformed, partial or stale API evidence fails closed.
+- **The gate checks structure, not truth.** It confirms a PR carries the evidence its category needs; it can't prove the evidence is true or that a review was independent.
+- **Agents may act through your GitHub account.** Until coding agents have their own identity ([#31](https://github.com/akhilvis-oss/agentic-delivery-team/issues/31)), the merge policy is followed by agents, not enforced by GitHub. The lifecycle and stand-up already use separate bot identities.
+- **Private repositories on GitHub Free can't block merges.** Required checks need a public repository or a paid plan; there the gate warns but can't stop a merge.
+- **Experimental.** Version 0 may change behaviour between releases. The task runner is tested with Codex; other agents need a configuration entry and a test run.
+- **You remain responsible.** The kit reduces the review burden; it doesn't remove the need for the owner's judgement on what ships.
 
-Upgrading from v0.1: replace the adopter workflow and gate together, add `gate_paths` from the example with your installed paths, and keep every listed path control-critical. Rules must have nonempty reasons and patterns. Bare N/A evidence now needs a reason, domain labels must occur once, and result cells need an exact result word. `ci.yml` remains PR-controlled build/test feedback; it is not the trusted enforcement path.
+## Contributing and security
 
-The gate checks a PR description's structure. It does not prove evidence is true or that a review is authentic, and it never grants merge authority. See [docs/review-categories.md](docs/review-categories.md) for the rules and their limits.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md); report vulnerabilities privately, not in public issues. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
-## Quick start: the local task runner
-
-Copy the placeholder config/profile in [`runner/`](runner/) into private local files, choose a dedicated feature worktree and agent home, and enqueue an explicitly approved assignment. Review-only jobs let the primary request an independent read-only check of committed work. Workers leave files uncommitted; the trusted runner validates paths and makes commits under a locally configured runner identity. Local receipts always persist, including commit/refusal metadata for the future digest; GitHub receipt comments are opt-in and contain only fixed summaries and commit metadata.
-
-Read [setup, commands, compatibility limits and recovery](docs/task-runner.md) before running it. Agents are defined by local command/version/permission configuration; all phases start fresh and the runner never reads agent session files. The shipped Codex example accepts one recorded CLI version. Nothing installs or starts a service automatically; the launchd file is a placeholder template.
-
-## Optional v0.4 lifecycle and digest
-
-The [combined setup guide](docs/v04-lifecycle-digest.md) describes separate bot identities, owner approval, a default-branch guard template and local polling. It is opt-in: existing standalone runner configurations keep working. No workflow, token, label or local service is installed automatically. The digest uses fixed-field facts and a bounded optional Claude API introduction; model failure still produces the factual sections. Live acceptance remains pending dedicated identities and the owner's merge.
-
-## Using this repository
-
-This repository uses its own gate on its own pull requests: [`.github/review-gate.json`](.github/review-gate.json) is both its config and a worked example.
-
-Local checks:
+This repository uses its own gate on its own pull requests: [`.github/review-gate.json`](.github/review-gate.json) is both its config and a worked example. Local checks:
 
 ```sh
 python -m pip install -r requirements-dev.txt

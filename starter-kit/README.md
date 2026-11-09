@@ -14,7 +14,7 @@ Everything a new project copies to adopt the whole way of working, not only the 
 | [`.github/ISSUE_TEMPLATE/story.yml`](.github/ISSUE_TEMPLATE/story.yml) | `.github/ISSUE_TEMPLATE/story.yml` | Story template: context, verbatim acceptance criteria, must-ask overrides |
 
 From the kit's own folders, also copy:
-- the review gate: [`gate/review_gate.py`](../gate/review_gate.py), [`templates/review-gate.example.json`](../templates/review-gate.example.json), [`templates/pull_request_template.md`](../templates/pull_request_template.md) and [`templates/review-gate.yml`](../templates/review-gate.yml) ([setup](../README.md#quick-start-the-review-gate));
+- the review gate: [`gate/review_gate.py`](../gate/review_gate.py), [`templates/review-gate.example.json`](../templates/review-gate.example.json), [`templates/pull_request_template.md`](../templates/pull_request_template.md) and [`templates/review-gate.yml`](../templates/review-gate.yml) ([setup](../docs/quickstart.md#install-the-review-gate-10-minutes));
 - the task runner, if you delegate to coding agents locally ([setup](../docs/task-runner.md)).
 
 ## Set up a new project, in order
