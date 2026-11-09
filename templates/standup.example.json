@@ -1,0 +1,31 @@
+{
+  "state_dir": "<ABSOLUTE_PRIVATE_DIGEST_STATE>",
+  "lifecycle_config": "<ABSOLUTE_PRIVATE_LIFECYCLE_CONFIG>",
+  "runner_state_dirs": [
+    "<ABSOLUTE_PRIVATE_LIFECYCLE_STATE>"
+  ],
+  "cadence": {
+    "timezone": "UTC",
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "time": "09:00",
+    "overdue_after_skips": 3
+  },
+  "paused": false,
+  "pause_dates": [],
+  "model": {
+    "name": "<PRODUCT_MODEL>",
+    "key_env": "PRODUCT_API_KEY",
+    "monthly_budget_usd": "<MONTHLY_USD_BUDGET>",
+    "input_usd_per_million": "<INPUT_USD_PER_MILLION>",
+    "output_usd_per_million": "<OUTPUT_USD_PER_MILLION>",
+    "max_output_tokens": 128
+  },
+  "public_assumptions": {},
+  "previews": {}
+}

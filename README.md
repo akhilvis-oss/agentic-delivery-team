@@ -20,7 +20,7 @@ You are the customer and product owner. You agree the vision, roadmap and storie
 | Review gate: four review categories enforced in CI | **v0.2, unreleased** | [`gate/`](gate/), [`templates/`](templates/), [docs](docs/review-categories.md) |
 | Private-content check for public repos | **v0.1, this release** | [`scripts/check_private_content.py`](scripts/check_private_content.py) |
 | Local task runner: bounded delegation, review-only jobs and safe recovery | **v0.3, unreleased** | [`runner/`](runner/), [setup and safety](docs/task-runner.md) |
-| Stand-up digest: one plain-language summary of decisions, demos and risks waiting for the owner | Planned | `digest/` |
+| Issue lifecycle and stand-up digest: approval claims, phase history, guarded states and owner decisions | **v0.4, unreleased** | [`lifecycle/`](lifecycle/), [`digest/`](digest/), [setup and limits](docs/v04-lifecycle-digest.md) |
 | Base agent rules and project profile (assumptions, escalation, permissions) | Planned | `templates/` |
 
 ## Quick start: the review gate
@@ -49,6 +49,10 @@ The gate checks a PR description's structure. It does not prove evidence is true
 Copy the placeholder config/profile in [`runner/`](runner/) into private local files, choose a dedicated feature worktree and agent home, and enqueue an explicitly approved assignment. Review-only jobs let the primary request an independent read-only check of committed work. Workers leave files uncommitted; the trusted runner validates paths and makes commits under a locally configured runner identity. Local receipts always persist, including commit/refusal metadata for the future digest; GitHub receipt comments are opt-in and contain only fixed summaries and commit metadata.
 
 Read [setup, commands, compatibility limits and recovery](docs/task-runner.md) before running it. Agents are defined by local command/version/permission configuration; all phases start fresh and the runner never reads agent session files. The shipped Codex example accepts one recorded CLI version. Nothing installs or starts a service automatically; the launchd file is a placeholder template.
+
+## Optional v0.4 lifecycle and digest
+
+The [combined setup guide](docs/v04-lifecycle-digest.md) describes separate bot identities, owner approval, a default-branch guard template and local polling. It is opt-in: existing standalone runner configurations keep working. No workflow, token, label or local service is installed automatically. The digest uses fixed-field facts and a bounded optional Claude API introduction; model failure still produces the factual sections. Live acceptance remains pending dedicated identities and the owner's merge.
 
 ## Using this repository
 

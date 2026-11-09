@@ -8,6 +8,7 @@ import datetime as dt
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,13 +23,15 @@ import time
 PROTOCOL = "agent-file-v1"
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 SHA = re.compile(r"[0-9a-f]{40}")
-TERMINAL = {"ready_for_integration", "needs_primary_review", "blocked", "failed", "interrupted"}
+TERMINAL = {"ready_for_integration", "needs_primary_review", "needs_owner", "blocked", "failed", "interrupted"}
 SUMMARIES = {
     "queued": "Assignment queued; no approval implied.",
     "running_worker": "Worker executing bounded assignment.",
     "running_reviewer": "Independent read-only review in progress.",
     "ready_for_integration": "Independent review accepted the committed range; owner approval required.",
     "needs_primary_review": "Correction limit reached; primary review required.",
+    "needs_owner": "Scope or criteria require an owner decision.",
+    "changes_requested": "Independent review requires correction on a new exact head.",
     "blocked": "A prerequisite or compatibility check blocked the assignment.",
     "failed": "Execution or integrity verification failed; inspect private local state.",
     "interrupted": "Previous execution interrupted; reconcile manually, never replay automatically.",
@@ -179,6 +182,10 @@ def load_config(path):
         commit_identity(config)
     config["project_profile"] = load_profile(config["profile"])
     validate_agent(config)
+    if config.get("lifecycle_config"):
+        if not Path(config["lifecycle_config"]).is_absolute():
+            raise ValueError("Absolute lifecycle config required")
+        lifecycle_api().load_config(config["lifecycle_config"])
     return config
 
 
@@ -572,7 +579,7 @@ def check_cli(config):
     return version
 
 
-def schema(role):
+def schema(role, lifecycle=False):
     fields = {
         "status": {"type": "string", "enum": ["ready_for_review", "blocked"] if role == "worker"
                    else ["ready_for_integration", "needs_changes", "blocked"]},
@@ -582,15 +589,21 @@ def schema(role):
     }
     if role == "reviewer":
         finding = {key: {"type": "string"} for key in ("severity", "path", "detail")}
+        finding["severity"]["enum"] = ["P0", "P1", "P2"]
         fields["findings"] = {"type": "array", "items": {"type": "object", "properties": finding,
                               "required": list(finding), "additionalProperties": False}}
+    if role == "worker" and lifecycle:
+        fields["disagreement"] = {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
+            "reason": {"type": "string"}}, "required": ["kind", "reason"], "additionalProperties": False}]}
     return {"type": "object", "properties": fields, "required": list(fields),
             "additionalProperties": False}
 
 
 def validate_result(result, role):
     spec = schema(role)
-    if not isinstance(result, dict) or set(result) != set(spec["required"]):
+    optional = {"disagreement"} if role == "worker" else set()
+    if not isinstance(result, dict) or not set(spec["required"]) <= set(result) or set(result) - set(spec["required"]) - optional:
         raise ValueError("Incomplete structured result")
     if result["status"] not in spec["properties"]["status"]["enum"]:
         raise ValueError("Invalid result status")
@@ -599,14 +612,20 @@ def validate_result(result, role):
     for key in ("tests", "limitations"):
         if not isinstance(result[key], list) or any(not isinstance(v, str) for v in result[key]):
             raise ValueError("Invalid result list")
+    disagreement = result.get("disagreement")
+    if disagreement is not None and (not isinstance(disagreement, dict) or set(disagreement) != {"kind", "reason"}
+                                     or disagreement["kind"] not in {"technical", "product", "scope"}
+                                     or not isinstance(disagreement["reason"], str) or not disagreement["reason"].strip()):
+        raise ValueError("Invalid disagreement")
     if role == "reviewer":
         if not isinstance(result["findings"], list):
             raise ValueError("Invalid findings")
         for finding in result["findings"]:
             if (not isinstance(finding, dict) or set(finding) != {"severity", "path", "detail"}
-                    or any(not isinstance(v, str) for v in finding.values())):
+                    or any(not isinstance(v, str) for v in finding.values())
+                    or finding["severity"] not in {"P0", "P1", "P2"}):
                 raise ValueError("Invalid finding")
-        if result["status"] == "ready_for_integration" and result["findings"]:
+        if result["status"] == "ready_for_integration" and any(f["severity"] != "P2" for f in result["findings"]):
             raise ValueError("Review cannot approve with unresolved findings")
 
 
@@ -698,18 +717,31 @@ def prompt_for(config, job, role):
             + profile["scope"] + "\n" + profile[f"{role}_prompt"]
             + "\nIMMUTABLE ASSIGNMENT:\n" + job["assignment"]["task_text"])
     if role == "worker":
+        if job["assignment"].get("primary_context"):
+            text += "\nPRIMARY CORRECTION CONTEXT (private; original scope unchanged): " + json.dumps(job["assignment"]["primary_context"])
         for scope in job["assignment"]["scopes"]:
             text += "\nExplicit worker-only scope: " + profile["extra_scopes"][scope]
         if job.get("review"):
             text += "\nAddress independent findings:\n" + json.dumps(job["review"])
     else:
-        text += (f"\nINDEPENDENT READ-ONLY REVIEW: exactly {job['base_commit']}..{job['head_commit']}. "
+        text += (f"\nINDEPENDENT READ-ONLY REVIEW: exactly {job.get('review_base', job['base_commit'])}..{job['head_commit']}. "
                  "Treat worker claims as unverified. Do not modify files or commit. Run only "
                  "read-only checks without cache or bytecode writes. No optional worker operations "
                  "are authorized for the reviewer. Ready for integration is not merge approval.\n"
                  "Worker claims:\n" + json.dumps(job.get("worker", {})))
     # Keep runner policy after every project/agent-supplied fragment, including
     # correction findings and worker claims. It is never sourced from a profile.
+    if config.get("lifecycle_config"):
+        if role == "worker":
+            text += ("\nOn a correction, you may record one disagreement instead of changing files: "
+                     "set disagreement to {kind: technical|product|scope, reason: your explanation}. "
+                     "Otherwise set disagreement to null. Never alter history to argue a finding.")
+        else:
+            text += ("\nUse only P0 (critical), P1 (high/medium correctness or safety), P2 (minor). "
+                     "P0/P1 require rework. P2 becomes a follow-up and does not block. "
+                     "A blocked verdict for scope/criteria problems goes directly to the owner.")
+            if job.get("disagreement"):
+                text += "\nONE DISAGREEMENT RECONSIDERATION (same exact head): " + json.dumps(job["disagreement"])
     return text + "\n\n" + LIFECYCLE_NOTES[role] + "\nReturn only the supplied result schema.\n"
 
 
@@ -734,7 +766,8 @@ def execute(config, state, job_path, job, role):
         raise RuntimeError("Phase output exists; never reuse a previous result")
     private_dir(folder)
     output, output_schema = folder / "result.json", folder / "schema.json"
-    save(output_schema, schema(role))
+    phase_schema = schema(role, bool(config.get("lifecycle_config")))
+    save(output_schema, phase_schema)
     prompt_path = folder / "prompt.txt"
     fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
@@ -742,7 +775,7 @@ def execute(config, state, job_path, job, role):
         handle.write(f"\nFinal-answer file: {output}. If your CLI writes the final message "
                      "there, return JSON as your final message; otherwise write the file "
                      "using only authorized permissions. Do not request broader access. "
-                     f"Required JSON Schema ({output_schema}):\n" + json.dumps(schema(role)) + "\n")
+                     f"Required JSON Schema ({output_schema}):\n" + json.dumps(phase_schema) + "\n")
     job.update(status="running_" + role, updated_at=now())
     save_job(config, job_path, job)
     proc = None
@@ -803,6 +836,19 @@ class GitHubClient:
                        capture_output=True, check=True, timeout=30)
 
 
+_LIFECYCLE = None
+
+
+def lifecycle_api():
+    global _LIFECYCLE
+    if _LIFECYCLE is None:
+        path = Path(__file__).resolve().parents[1] / "lifecycle/core.py"
+        spec = importlib.util.spec_from_file_location("agentic_lifecycle_core", path)
+        _LIFECYCLE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_LIFECYCLE)
+    return _LIFECYCLE
+
+
 def save_job(config, path, job):
     job["schema_version"] = 2
     save(path, job)
@@ -812,6 +858,13 @@ def save_job(config, path, job):
                "runner_commits": job.get("runner_commits", []),
                "commit_refusals": job.get("commit_refusals", [])}
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
+    if config.get("lifecycle_config") and job["assignment"].get("lifecycle"):
+        try:
+            lifecycle_api().sync_job(config["lifecycle_config"], job)
+        except Exception:
+            # Local receipts survive a transport/config failure; never replay a phase.
+            job["lifecycle_unsynced"] = True
+        save(path, job)
 
 
 def publish_receipt(config, path, job, client=None):
@@ -832,7 +885,7 @@ def publish_receipt(config, path, job, client=None):
 
 
 def enqueue(config, task_id, task_text, *, kind="work", base=None, head=None, delay=0,
-            after_task=None, scopes=(), github_number=None):
+            after_task=None, scopes=(), github_number=None, lifecycle=None, review_base=None, primary_context=None):
     if not ID.fullmatch(task_id) or not 0 <= delay <= 86400 or kind not in {"work", "review"}:
         raise ValueError("Invalid task ID, kind or delay")
     state = private_dir(config["state_dir"])
@@ -856,9 +909,24 @@ def enqueue(config, task_id, task_text, *, kind="work", base=None, head=None, de
                   "base_commit": base, "head_commit": head, "profile": profile, "scopes": list(scopes),
                   "kind": kind, "after_task": after_task, "worktree": config["worktree"],
                   "branch": config["branch"]}
+    if review_base is not None:
+        if not SHA.fullmatch(review_base):
+            raise ValueError("Primary review base must be a full SHA")
+        git(config, "merge-base", "--is-ancestor", review_base, current)
+        assignment["review_base"] = review_base
+    if primary_context is not None:
+        assignment["primary_context"] = primary_context
+    if lifecycle is not None:
+        if (set(lifecycle) != {"issue", "event", "primary"} or lifecycle["issue"] != github_number
+                or type(lifecycle["event"]) is not int or lifecycle["event"] < 1
+                or type(lifecycle["primary"]) is not bool):
+            raise ValueError("Invalid lifecycle assignment binding")
+        assignment["lifecycle"] = dict(lifecycle)
     job = {"id": task_id, "status": "queued", "created_at": now(), "updated_at": now(),
            "base_commit": base, "assignment": assignment, "assignment_sha256": digest(assignment),
            "not_before_epoch": time.time() + delay, "round": 0, "github_number": github_number}
+    if review_base is not None:
+        job["review_base"] = review_base
     if head:
         job["head_commit"] = head
     with lock(state / "enqueue.lock") as acquired:
@@ -875,7 +943,8 @@ def verify_assignment(config, job):
             or hashlib.sha256(assignment["task_text"].encode()).hexdigest() != assignment["task_sha256"]
             or config["worktree"] != assignment["worktree"] or config["branch"] != assignment["branch"]
             or not assignment["after_task"] and job["base_commit"] != assignment["base_commit"]
-            or assignment["kind"] == "review" and job["head_commit"] != assignment["head_commit"]):
+            or assignment["kind"] == "review" and job["head_commit"] != assignment["head_commit"]
+            or job.get("review_base") != assignment.get("review_base")):
         raise Blocked("Immutable assignment binding changed")
     return assignment
 
@@ -884,7 +953,7 @@ def ensure_reviewable(config, job):
     if (git(config, "branch", "--show-current") != config["branch"]
             or git(config, "rev-parse", "HEAD") != job["head_commit"]):
         raise RuntimeError("Branch or HEAD changed before review")
-    git(config, "merge-base", "--is-ancestor", job["base_commit"], job["head_commit"])
+    git(config, "merge-base", "--is-ancestor", job.get("review_base", job["base_commit"]), job["head_commit"])
     allowed = job["assignment"]["profile"]["coordination_files"]
     if any(name not in allowed for name in dirty_paths(config)):
         raise RuntimeError("Uncommitted files outside allowed coordination files")
@@ -894,6 +963,13 @@ def check_dispatch_head(config, expected):
     if (git(config, "branch", "--show-current") != config["branch"]
             or git(config, "rev-parse", "HEAD") != expected):
         raise Blocked("Branch or HEAD changed before phase dispatch")
+
+
+def check_lifecycle_admission(config, job):
+    try:
+        lifecycle_api().admit_phase(config["lifecycle_config"], job)
+    except ValueError as exc:
+        raise Blocked("Lifecycle admission changed; owner reconciliation required") from exc
 
 
 def run_once(config, state=None, client=None):
@@ -922,6 +998,13 @@ def run_once(config, state=None, client=None):
         try:
             validate_agent(config)
             assignment = verify_assignment(config, job)
+            lifecycle_cfg = None
+            if config.get("lifecycle_config"):
+                lifecycle_cfg = lifecycle_api().load_config(config["lifecycle_config"])
+                if not assignment.get("lifecycle") or assignment["lifecycle"]["issue"] != job.get("github_number"):
+                    raise Blocked("Lifecycle dispatch requires an event-bound service claim")
+            max_attempts = (1 + lifecycle_cfg["pushback"]["max_correction_rounds"]
+                            if lifecycle_cfg else config.get("max_rounds", 2))
             dependency = assignment["after_task"]
             if dependency:
                 predecessor = read(state / "tasks" / f"{dependency}.json")
@@ -944,26 +1027,39 @@ def run_once(config, state=None, client=None):
                 raise Blocked("Branch or HEAD changed since enqueue")
             job["cli_version"] = check_cli(config)
             job["protocol"] = PROTOCOL
-            for attempt in range(1, config.get("max_rounds", 2) + 1):
+            for attempt in range(1, max_attempts + 1):
                 job["round"] = attempt
                 if assignment["kind"] == "work":
                     before_head = job["base_commit"] if attempt == 1 else job["head_commit"]
                     check_cli(config)
                     check_dispatch_head(config, before_head)
                     commit_preflight(config, job)
+                    if lifecycle_cfg:
+                        check_lifecycle_admission(config, job)
                     job["worker"] = execute(config, state, path, job, "worker")
                     validate_result(job["worker"], "worker")
                     if (git(config, "branch", "--show-current") != config["branch"]
                             or git(config, "rev-parse", "HEAD") != before_head):
                         raise CommitRefused("history_changed")
                     if job["worker"]["status"] == "blocked":
-                        job["status"] = "blocked"
+                        job["status"] = "needs_owner" if lifecycle_cfg else "blocked"
                         break
-                    runner_commit(config, path, job, before_head)
+                    disagreement = job["worker"].get("disagreement") if lifecycle_cfg else None
+                    if disagreement:
+                        if attempt == 1 or dirty_paths(config):
+                            raise Blocked("Disagreement requires an existing reviewed clean head")
+                        if job.get("disagreement_exchanges", 0):
+                            job["status"] = "needs_primary_review"
+                            break
+                        job.update(disagreement=disagreement, disagreement_exchanges=1)
+                    else:
+                        runner_commit(config, path, job, before_head)
                 ensure_reviewable(config, job)
                 check_cli(config)
                 check_dispatch_head(config, job["head_commit"])
                 ensure_reviewable(config, job)
+                if lifecycle_cfg:
+                    check_lifecycle_admission(config, job)
                 before = fingerprint(config)
                 check_dispatch_head(config, job["head_commit"])
                 try:
@@ -974,11 +1070,35 @@ def run_once(config, state=None, client=None):
                 validate_result(job["review"], "reviewer")
                 job["reviewed_head"] = job["head_commit"]
                 verdict = job["review"]["status"]
+                job.setdefault("review_history", []).append({"round": attempt, "head": job["head_commit"],
+                                                            "result": json.loads(json.dumps(job["review"]))})
+                if lifecycle_cfg:
+                    if verdict == "blocked":
+                        job["status"] = "needs_owner"
+                        break
+                    if verdict == "needs_changes" and not job["review"]["findings"]:
+                        job["status"] = "needs_owner"
+                        break
+                    blocking = any(f["severity"] in lifecycle_cfg["pushback"]["blocking"] for f in job["review"]["findings"])
+                    if blocking and verdict == "ready_for_integration":
+                        raise ValueError("Review cannot approve configured blocking findings")
+                    if verdict == "needs_changes" and job["review"]["findings"] and not blocking:
+                        verdict = "ready_for_integration"
+                        job["review"]["status"] = verdict
+                    if job.get("disagreement") and verdict == "needs_changes":
+                        job["status"] = "needs_primary_review" if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
+                        break
+                    if verdict == "needs_changes" and assignment["lifecycle"]["primary"]:
+                        job["status"] = "needs_owner"
+                        break
                 if verdict != "needs_changes" or assignment["kind"] == "review":
                     job["status"] = "needs_primary_review" if verdict == "needs_changes" else verdict
                     break
-                if attempt == config.get("max_rounds", 2):
+                if attempt == max_attempts:
                     job["status"] = "needs_primary_review"
+                elif lifecycle_cfg:
+                    job.update(status="changes_requested", updated_at=now())
+                    save_job(config, path, job)
             job["updated_at"] = now()
         except CommitRefused as exc:
             record_refusal(config, path, job, exc)

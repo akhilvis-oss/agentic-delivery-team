@@ -1,0 +1,398 @@
+{
+  "repository": "<OWNER>/<REPOSITORY>",
+  "base_branch": "main",
+  "state_dir": "<ABSOLUTE_PRIVATE_LIFECYCLE_STATE>",
+  "token_env": "RUNNER_GITHUB_TOKEN",
+  "actors": {
+    "owner": "<OWNER_LOGIN>",
+    "runner": "<RUNNER_BOT_LOGIN>",
+    "product": "<PRODUCT_BOT_LOGIN>",
+    "workflow": "github-actions[bot]"
+  },
+  "delegate_acceptance": false,
+  "poll_seconds": 60,
+  "transitions": {
+    "draft": {
+      "draft": [
+        "owner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ]
+    },
+    "approved": {
+      "approved": [
+        "owner"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "dispatched": [
+        "runner"
+      ]
+    },
+    "dispatched": {
+      "dispatched": [
+        "owner",
+        "runner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "in-progress": [
+        "runner"
+      ]
+    },
+    "in-progress": {
+      "in-progress": [
+        "owner",
+        "runner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "committed": [
+        "runner"
+      ]
+    },
+    "committed": {
+      "committed": [
+        "owner",
+        "runner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "in-review": [
+        "runner"
+      ]
+    },
+    "in-review": {
+      "in-review": [
+        "runner"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "changes-requested": [
+        "runner"
+      ],
+      "needs-primary": [
+        "runner"
+      ]
+    },
+    "changes-requested": {
+      "changes-requested": [
+        "owner",
+        "runner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "in-progress": [
+        "runner"
+      ]
+    },
+    "needs-primary": {
+      "needs-primary": [
+        "owner",
+        "runner",
+        "product",
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "dispatched": [
+        "runner"
+      ]
+    },
+    "blocked": {
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ]
+    },
+    "needs-owner": {
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ]
+    },
+    "pr-open": {
+      "pr-open": [
+        "workflow"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "accepted": [
+        "owner"
+      ],
+      "merged": [
+        "workflow"
+      ]
+    },
+    "accepted": {
+      "accepted": [
+        "owner"
+      ],
+      "blocked": [
+        "owner",
+        "runner",
+        "workflow"
+      ],
+      "needs-owner": [
+        "owner",
+        "runner",
+        "workflow",
+        "product"
+      ],
+      "pr-open": [
+        "workflow"
+      ],
+      "approved": [
+        "owner"
+      ],
+      "merged": [
+        "workflow"
+      ]
+    },
+    "merged": {
+      "merged": [
+        "workflow"
+      ]
+    }
+  },
+  "stale_seconds": {
+    "draft": 86400,
+    "approved": 86400,
+    "dispatched": 86400,
+    "in-progress": 86400,
+    "committed": 86400,
+    "in-review": 86400,
+    "changes-requested": 86400,
+    "needs-primary": 86400,
+    "blocked": 86400,
+    "needs-owner": 86400,
+    "pr-open": 259200,
+    "accepted": 86400,
+    "merged": 86400
+  },
+  "pushback": {
+    "blocking": [
+      "P0",
+      "P1"
+    ],
+    "minor": [
+      "P2"
+    ],
+    "max_correction_rounds": 2
+  },
+  "repository_root": "<ABSOLUTE_LOCAL_REPOSITORY_ROOT>",
+  "worktree_root": "<ABSOLUTE_PRIVATE_WORKTREE_ROOT>",
+  "runner_config": "<ABSOLUTE_PRIVATE_RUNNER_CONFIG>",
+  "primary_runner_config": "<ABSOLUTE_PRIVATE_PRIMARY_RUNNER_CONFIG>",
+  "product_token_env": "PRODUCT_GITHUB_TOKEN",
+  "trusted_gate_workflow": ".github/workflows/pr-review-gate.yml",
+  "public_assumption_codes": [],
+  "identity_roles": {
+    "<OWNER_LOGIN>": [
+      "owner",
+      "product"
+    ],
+    "<PRODUCT_BOT_LOGIN>": [
+      "product"
+    ],
+    "<RUNNER_BOT_LOGIN>": [
+      "runner"
+    ],
+    "github-actions[bot]": [
+      "workflow"
+    ]
+  },
+  "product_policy": {
+    "clarification_source_globs": [
+      "README.md",
+      "docs/*"
+    ],
+    "citations_required": true,
+    "repository_sources_only": true,
+    "owner_only": [
+      "scope_change",
+      "acceptance_criteria_change",
+      "story_approval"
+    ]
+  }
+}

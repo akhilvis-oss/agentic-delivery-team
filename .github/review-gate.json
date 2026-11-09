@@ -40,7 +40,9 @@
           "*.env*",
           "*secret*",
           "*credential*",
-          "tests/test_trusted_gate.py"
+          "tests/test_trusted_gate.py",
+          "lifecycle/*",
+          "tests/test_lifecycle*"
         ]
       },
       {

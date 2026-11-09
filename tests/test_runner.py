@@ -34,7 +34,7 @@ def result(status, role="worker"):
     value = dict(status=status, summary="synthetic result", tests=["focused tests"], limitations=[])
     if role == "reviewer":
         value["findings"] = [] if status == "ready_for_integration" else [
-            dict(severity="P2", path="example.py", detail="correct this")]
+            dict(severity="P1", path="example.py", detail="correct this")]
     return value
 
 
