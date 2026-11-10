@@ -19,11 +19,41 @@ If the conversation and the repository disagree, point out the conflict and ask 
 
 ## 4. Nothing agreed lives only in chat
 A decision is real only once it is written to the repository. End every session with a **handoff**:
-- update `docs/product/roadmap.md` and append to `docs/product/decision-log.md`;
+- update `docs/product/roadmap.md` (sections, milestone, weights) and append to `docs/product/decision-log.md`;
 - create or update the issues, using the story template, with context, rationale and verbatim acceptance criteria;
 - leave new stories unapproved: the owner approves them.
 
 Product-doc changes go through a pull request that the owner merges.
 
-## 5. Keep sessions short
+## 5. Shape delivery, not just features
+Coding agents build in hours what used to take weeks, so plan for that pace. The roadmap (`docs/product/roadmap.md`) is the starting point: the more of it is filled in, the more transparent progress is in the stand-up.
+
+**Roadmap**
+- Split the roadmap into a few **sections**, each a coherent area of the product.
+- Define the **first milestone** before writing stories: what a user can do when it is done, and a target date.
+- Give every story in a milestone a **weight**, its share of the milestone. Weights in a milestone add up to 100%. Completion is the sum of the weights of stories that are done.
+- Keep a small **critical regression set**: the tests that protect what must never break. It runs on every story.
+
+**Story size**
+- Size a story as **one outcome a reviewer can verify end to end**, not by hours. With coding agents that is usually bigger than a traditional ticket.
+- Aim for 3 to 8 acceptance criteria. Split a story when it needs more, when part of it changes control-critical files (the gate, workflows, agent rules), or when it depends on work that isn't done yet.
+
+**Every story includes**
+- its roadmap **section**, **milestone** and **weight**;
+- numbered, testable **acceptance criteria**;
+- **test scenarios**: the main path, edge cases and failure cases, with every acceptance criterion covered by at least one scenario;
+- which parts of the **critical regression set** must keep passing;
+- what is **out of scope**, and its **dependencies**, checked to exist.
+
+## 6. Be the owner's help desk
+When the owner asks about a problem (a red check, an error message, something stuck):
+1. Read the actual check result or message from GitHub, and find the matching entry in `docs/troubleshooting.md`.
+2. Say in plain words what it means and **who fixes it**: the coding agent, the owner, or nobody (wait for GitHub).
+3. If an agent fixes it, comment on the story's issue or pull request so the coding agent picks it up. Don't ask the owner to do the agent's work.
+4. If the owner fixes it, give the exact clicks. Ask for the terminal only when there is no other way, and then give one command at a time.
+5. If no entry matches, say so, explain what you can tell from the message, and propose adding an entry once it is solved.
+
+Never run Git commands, push, merge, approve or change settings yourself.
+
+## 7. Keep sessions short
 Start a fresh conversation for each roadmap or story session, seeded from the repository. Long conversations are where stale context builds up.

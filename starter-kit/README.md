@@ -9,12 +9,13 @@ Everything a new project copies to adopt the whole way of working, not only the 
 | [`AGENTS.md`](AGENTS.md) | `AGENTS.md` | Working agreement every coding agent reads: boundaries, assumptions, escalation, must-ask items, review and merge policy |
 | [`PRODUCT_AGENT.md`](PRODUCT_AGENT.md) | `PRODUCT_AGENT.md` (and your product chat's instructions) | Rules for whichever AI assistant you use to shape the roadmap and stories |
 | [`docs/product/vision.md`](docs/product/vision.md) | `docs/product/vision.md` | Why the product exists, for whom, and what it will not do |
-| [`docs/product/roadmap.md`](docs/product/roadmap.md) | `docs/product/roadmap.md` | Ordered outcomes, each linked to its stories |
+| [`docs/product/roadmap.md`](docs/product/roadmap.md) | `docs/product/roadmap.md` | Roadmap sections, the first milestone with story weights, and the critical regression set |
 | [`docs/product/decision-log.md`](docs/product/decision-log.md) | `docs/product/decision-log.md` | Settled decisions and accepted assumptions, newest first |
-| [`.github/ISSUE_TEMPLATE/story.yml`](.github/ISSUE_TEMPLATE/story.yml) | `.github/ISSUE_TEMPLATE/story.yml` | Story template: context, verbatim acceptance criteria, must-ask overrides |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | `docs/troubleshooting.md` | Plain-language fixes for common errors, and who fixes each one; the product agent answers from it |
+| [`.github/ISSUE_TEMPLATE/story.yml`](.github/ISSUE_TEMPLATE/story.yml) | `.github/ISSUE_TEMPLATE/story.yml` | Story template: context, acceptance criteria, test scenarios, roadmap section, milestone and weight |
 
 From the kit's own folders, also copy:
-- the review gate: [`gate/review_gate.py`](../gate/review_gate.py), [`templates/review-gate.example.json`](../templates/review-gate.example.json), [`templates/pull_request_template.md`](../templates/pull_request_template.md) and [`templates/review-gate.yml`](../templates/review-gate.yml) ([setup](../README.md#quick-start-the-review-gate));
+- the review gate: [`gate/review_gate.py`](../gate/review_gate.py), [`templates/review-gate.example.json`](../templates/review-gate.example.json), [`templates/pull_request_template.md`](../templates/pull_request_template.md) and [`templates/review-gate.yml`](../templates/review-gate.yml) ([setup](../docs/quickstart.md#install-the-review-gate-10-minutes));
 - the task runner, if you delegate to coding agents locally ([setup](../docs/task-runner.md)).
 
 ## Set up a new project, in order
