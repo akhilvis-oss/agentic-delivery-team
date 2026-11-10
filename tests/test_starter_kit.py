@@ -110,3 +110,11 @@ def test_claude_code_product_agent_settings_deny_merge_approval_and_workflows():
     assert not any("gh issue edit" in rule or "label" in rule for rule in allow)
     edits = [rule for rule in allow if rule.startswith(("Edit(", "Write("))]
     assert edits and all(rule.endswith("(docs/product/**)") for rule in edits)
+
+
+def test_review_policy_works_with_a_single_model():
+    for path in (ROOT / "AGENTS.md", KIT / "AGENTS.md"):
+        text = path.read_text()
+        assert "only if one is configured" in text or "only if a second reviewer" in text, path
+        assert "Claude review PASS" not in text, path
+        assert "same model" in text, path
