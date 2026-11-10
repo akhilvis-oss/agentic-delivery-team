@@ -19,7 +19,7 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 - Write for strangers: docs explain what a piece does, how to adopt it, and its limits.
 
 ## How work is done
-- Work on a feature branch and open a PR to `main`. Never push to `main` directly, and never click merge yourself. Merges follow **Merge policy** below.
+- Work on a feature branch and open a PR to `main`. Never push to `main` directly. Merges follow **Merge policy** below.
 - Each PR declares its review category (`## Review tier`), as defined in `.github/review-gate.json`. Declare the category the changed paths require, or a higher one.
 - Size a PR to one coherent story; a larger work package is fine when it shares one goal and one live trial. Keep control-critical changes in their own PR, and list risky files (workflows, gate, credentials, runner safety code) first in the PR description so reviews focus there.
 - Every behaviour change has tests. Domain-critical code (`runner/`, `digest/`) also needs failure-mode evidence: failure cases, recovery and concurrency.
@@ -39,6 +39,8 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 ## Merge policy (owner's advance permission, 2026-11-09)
 The owner pre-authorises merges by review category. Once a PR meets every condition for its category on its **current head commit**, the Maker may enable GitHub auto-merge (merge commit); GitHub then merges when the required checks pass. Any new push or description edit restarts the conditions.
 
+If GitHub refuses to enable auto-merge because the PR is already mergeable ("clean status"), the Maker may merge it directly with a merge commit, pinned to the verified head (`sha` on the merge request), after re-checking every condition on that head immediately before merging. Record the merge in the PR with the head SHA and the reviews relied on.
+
 | Category (as decided by the trusted `review-gate` check) | Conditions | Who merges |
 | --- | --- | --- |
 | Light | Required checks (`checks`, `review-gate`) pass | Auto-merge |
@@ -50,7 +52,7 @@ The owner pre-authorises merges by review category. Once a PR meets every condit
 - The category is the one the trusted `review-gate` check reports, never a lower one declared or assumed by the Maker.
 - Record each review as a GitHub review or PR comment that starts with `Checker: PASS` or `Claude review: PASS`, names the exact head SHA, and is written by a session separate from the Maker.
 - If any condition is missing, unclear or contradicted (a CHANGES REQUIRED or BLOCKED review, a failing or pending check, an unanswered must-ask item), do not enable auto-merge; leave the PR for the owner.
-- Never merge directly, bypass checks, dismiss reviews, or change branch rules to get a PR merged.
+- Never merge a control-critical PR or a PR that misses any condition, and never bypass checks, dismiss reviews, or change branch rules to get a PR merged.
 - **Limit:** agents currently act through the owner's GitHub account, so GitHub cannot tell an agent's action from the owner's. This policy is therefore enforced by agents following it; required checks and the trusted gate remain the technical controls.
 
 ## Assumptions and escalation
