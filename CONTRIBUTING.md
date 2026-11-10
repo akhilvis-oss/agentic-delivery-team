@@ -20,6 +20,7 @@ This repository runs its own task lifecycle. Every issue carries one `status:` l
    python -m pytest -q
    ```
 4. Open a pull request using the template. Declare the review category your changed files require (the `review-gate` check will tell you if it's too low), copy the issue's acceptance criteria verbatim, and report test results exactly as run.
+5. Until the lifecycle fix in [#49](https://github.com/akhilvis-oss/agentic-delivery-team/issues/49) ships, use `Refs #N` rather than closing keywords such as `Closes #N` for issues that were not dispatched by the task runner. This temporary workaround avoids an unrelated red lifecycle check; it does not approve a task or change merge requirements. Runner-managed task PRs keep their closing keyword.
 
 ## What we look for
 - Generic code: anything specific to one project becomes configuration with a documented example.
