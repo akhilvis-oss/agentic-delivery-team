@@ -177,6 +177,14 @@ def local_jobs(cfg):
 def collect(cfg, client, since, at):
     policy = cfg["lifecycle"]
     sections = [[] for _ in SECTION_NAMES]
+    from lifecycle.service import heartbeat
+
+    last_poll = heartbeat(policy)
+    message = (
+        "Service last polled: never" if last_poll is None else
+        f"Service last polled {max(0, int((at.timestamp() - last_poll) // 60))} minutes ago"
+    )
+    sections[4].append(linked(message, f"https://github.com/{policy['repository']}/issues"))
     issues = sorted(
         (i for i in client.pages("/issues?state=all") if "pull_request" not in i),
         key=lambda i: i["number"],

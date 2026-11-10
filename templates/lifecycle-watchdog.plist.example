@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>org.example.agentic-lifecycle-watchdog</string>
+  <key>ProgramArguments</key><array>
+    <string>__ABSOLUTE_PYTHON__</string><string>-m</string><string>lifecycle.service</string>
+    <string>--config</string><string>__PRIVATE_CONFIG__</string><string>watchdog</string>
+  </array>
+  <key>WorkingDirectory</key><string>__KIT_DIRECTORY__</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>__PRIVATE_STDOUT_LOG__</string>
+  <key>StandardErrorPath</key><string>__PRIVATE_STDERR_LOG__</string>
+</dict></plist>
