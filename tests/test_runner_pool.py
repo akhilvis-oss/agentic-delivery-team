@@ -67,6 +67,9 @@ def test_concurrent_assignment_and_cross_review_without_deadlock(setup, monkeypa
 
     def execute(config, state, job_path, job, role):
         slot = config['pool_slot']
+        if role == 'reviewer':
+            assert job['verification_runs'][-1]['status'] == 'passed'
+            assert job['verification_runs'][-1]['head'] == job['head_commit']
         with guard:
             assert slot not in active
             active.add(slot)
@@ -294,10 +297,11 @@ def test_owner_approval_priority_and_concurrency_drain(setup, monkeypatch):
 def test_refresh_test_failure_keeps_original_approval_invalid(setup, monkeypatch):
     cfg, path = setup
     cfg['stories'] = cfg['stories'][:1]
-    cfg['test_commands'] = [[sys.executable, '-c', 'raise SystemExit(1)']]
     runner.save(path, cfg)
     monkeypatch.setattr(runner, 'execute_phase', delivery)
     pool.Pool(pool.load_config(path)).run_once()
+    cfg['test_commands'] = [[sys.executable, '-c', 'raise SystemExit(1)']]
+    runner.save(path, cfg)
     repo = Path(cfg['repository_root'])
     (repo / 'main.txt').write_text('new main\n')
     git(repo, 'add', 'main.txt')

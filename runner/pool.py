@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import subprocess
 import threading
 import time
 
@@ -59,11 +58,11 @@ def load_config(path):
         raise ValueError('Select a mode and a configured lead')
     if not integer(cfg['max_concurrency'], 1) or cfg['max_concurrency'] > len(slots) or type(cfg['paused']) is not bool:
         raise ValueError('Invalid concurrency or pause setting')
-    if not isinstance(cfg.get('test_commands'), list) or not cfg['test_commands']:
-        raise ValueError('Explicit post-merge test argument arrays required')
-    for command in cfg['test_commands']:
-        if not isinstance(command, list) or not command or any(not isinstance(a, str) or not a for a in command):
-            raise ValueError('Tests must be nonempty argument arrays')
+    verification = {'commands': cfg.get('test_commands'),
+                    'timeout_seconds': cfg.get('verification_timeout_seconds', 1800)}
+    if 'verification_scratch_dir' in cfg:
+        verification['scratch_dir'] = cfg['verification_scratch_dir']
+    runner.verification_options({'verification': verification})
     seen = set()
     for story in cfg.get('stories', []):
         if not runner.ID.fullmatch(story['id']) or story['id'] in seen:
@@ -165,6 +164,7 @@ class Pool:
     def runner_config(self, story):
         active_config = self.data['stories'].get(story['id'], {}).get('active_config', story['runner_config'])
         cfg = runner.load_config(active_config)
+        self.configure_verification(cfg)
         path = Path(cfg['worktree']).resolve()
         if path.parent != Path(self.cfg['worktree_root']).resolve():
             raise ValueError('Pool job must use a dedicated owned worktree')
@@ -175,6 +175,14 @@ class Pool:
             if common != source:
                 raise ValueError('Pool job belongs to another repository')
         return cfg
+
+    def configure_verification(self, cfg):
+        cfg['verification'] = {'commands': self.cfg['test_commands'],
+                               'timeout_seconds': self.cfg.get('verification_timeout_seconds', cfg.get('phase_timeout_seconds', 1800))}
+        cfg['_verification_agent_homes'] = [slot['agent_home'] for slot in self.cfg['slots']]
+        if 'verification_scratch_dir' in self.cfg:
+            cfg['verification']['scratch_dir'] = self.cfg['verification_scratch_dir']
+        runner.verification_options(cfg)
 
     @contextmanager
     def phase(self, story, config, job, role, admission=None):
@@ -215,8 +223,6 @@ class Pool:
                 self.condition.release()
                 result = None
                 try:
-                    if role == 'reviewer' and record.get('queued_refresh'):
-                        self.tests(story, phase_cfg)
                     if admission is not None:
                         runner.check_lifecycle_admission(*admission)
                     yield phase_cfg
@@ -252,6 +258,7 @@ class Pool:
             job = runner.read(task)
             if job['status'] == 'queued' and job['base_commit'] != self.main:
                 cfg, task, job = self.refresh_queued(story, cfg, task, job)
+                self.configure_verification(cfg)
                 cfg.update(agent=slot['agent'], agent_home=slot['agent_home'],
                            worker_model=slot['worker_model'], reviewer_model=slot['reviewer_model'],
                            pool_expected_files=story['expected_files'])
@@ -324,16 +331,6 @@ class Pool:
             self.save()
         return fresh, path, runner.read(path)
 
-    def tests(self, story, cfg):
-        for i, command in enumerate(self.cfg['test_commands']):
-            log = self.root / ('refresh-' + story['id'] + '-' + str(i) + '.log')
-            with log.open('wb') as output:
-                log.chmod(0o600)
-                result = subprocess.run(command, cwd=cfg['worktree'], env=runner.environment(cfg),
-                                        stdout=output, stderr=subprocess.STDOUT, timeout=3600)
-            if result.returncode:
-                raise runner.Blocked('Post-merge tests failed')
-
     def refresh(self, story, cfg, path, job):
         current = self.git('rev-parse', self.cfg.get('base_branch', 'main')).strip()
         name = story['id']
@@ -366,7 +363,6 @@ class Pool:
                 self.save()
             return
         new_head = self.git('rev-parse', 'HEAD', config=cfg)
-        self.tests(story, cfg)
         # Separate runner state and a new review-only job keep original frozen
         # assignments immutable. No lifecycle side effects from stale evidence.
         fresh_cfg = {**cfg, 'state_dir': str(self.root / 'refresh' / name / current)}
@@ -387,6 +383,7 @@ class Pool:
         # frozen assignment. Queued/intermediate refresh state stays private.
         job.update(status='ready_for_integration', head_commit=new_head, reviewed_head=new_head,
                    review=review['review'], updated_at=runner.now())
+        job.setdefault('verification_runs', []).extend(review.get('verification_runs', []))
         job.setdefault('review_history', []).append({
             'round': job['round'], 'head': new_head, 'result': review['review']})
         runner.save_job(cfg, path, job)

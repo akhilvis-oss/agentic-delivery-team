@@ -104,14 +104,30 @@ of a failed/interrupted model phase occurs.
 The owner must update the **local** configured main after a merge; the pool never
 fetches, pushes, merges PRs or changes remote refs. `status` invalidates readiness
 when local main differs from `validated_main`. A subsequent run rebases a clean,
-unchanged completed branch, reruns every explicit `test_commands` argument array,
+unchanged completed branch, reruns every explicit `test_commands` argument array in a disposable copy,
 and runs a fresh cross-slot read-only review of the new exact main-to-head range.
 Clean queued branches are rebased and receive new immutable assignments in separate state; original frozen assignments and review receipts are retained. Refreshed review jobs
 use separate private state. The pool's `validated_main`, current head and refreshed
 review receipt are the integration evidence; an old original-job approval is invalid.
 
-Tests run under the runner's filtered environment with a one-hour bound; they execute
-project code. Do not give test commands credentials. A rebase conflict is left intact
+Before **every** review (initial, correction, review-only and main refresh), the runner executes
+`test_commands` in a fresh independent Git checkout of the reviewed head. The reviewer
+retains its configured read-only sandbox and receives the runner's recorded evidence; it
+does not rerun required tests in the reviewed checkout. Private job and receipt records
+include the exact head, argv, exit status, timestamps, output hash/tail and reported test
+counts. Unrecognized counts remain unavailable. Failed required tests cannot become
+integration readiness through a reviewer PASS.
+
+Tests run under a filtered environment without agent credentials or user Git config.
+The timeout defaults to the job phase timeout (1,800 seconds); optional pool keys
+`verification_timeout_seconds` (1–3,600) and `verification_scratch_dir` configure it.
+By default scratch is created under each private runner state directory. An explicit
+scratch directory must already exist, be owned by the current user, have mode 0700,
+and be outside every registered worktree and agent home. Unavailable scratch, inability
+to launch tests, cancellation, timeout or failed cleanup returns `blocked`, without
+launching the reviewer. See [runner verification and recovery](task-runner.md#runner-owned-required-tests).
+These owner-approved commands execute trusted project code on the host; a disposable
+copy is not an OS sandbox. Never give test commands credentials. A rebase conflict is left intact
 and blocks for the owner: no resolution, reset, abort, force-push or dirty-worktree
 discard is automatic. Test failure, branch drift, unavailable reviewers, quota and
 another main change during refresh also block readiness. Integration detection uses Git ancestry; squashed or cherry-picked work needs owner reconciliation. Check main again immediately
