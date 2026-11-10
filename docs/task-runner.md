@@ -168,3 +168,82 @@ After the owner merges #23, run the trusted runner from that merged `main` in a 
 ## Optional v0.4 issue lifecycle
 
 See [lifecycle and digest setup](v04-lifecycle-digest.md). Adding a private absolute `lifecycle_config` opts a runner into event-bound service dispatch, canonical P0/P1/P2 findings, private review history and synchronized metadata-only issue records. Standalone v0.3 dispatch remains available without this option. New lifecycle jobs allow an initial delivery plus at most two correction rounds; review-only jobs still never run a correction worker. The lifecycle worker schema adds a nullable structured `disagreement`; the default standalone worker schema is unchanged. All review outputs now use the canonical severity enum. Historical critical/high/medium/low/minor map to P0/P1/P1/P2/P2; unknown severity requires primary review rather than silent downgrading. Do not rewrite old receipts or reinterpret an old verdict as approval of a new head.
+
+## Runner-owned required tests
+
+For standalone jobs, optional private config `verification` enables runner-owned
+checks before every reviewer dispatch. Existing configs without this key retain
+their behavior; the pool always supplies its required `test_commands`. For example:
+
+```json
+{"verification": {"commands": [["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"]], "timeout_seconds": 1800}}
+```
+
+Commands are explicit argv arrays (no shell interpolation); use an absolute executable
+when needed. Do not put secrets in argv or output. Each review attempt gets a private,
+disposable independent Git clone checked out at the exact reviewed SHA. It has its own
+index and copied objects, no origin, user hooks/config or alternate object database,
+and excludes untracked and ignored source files. Tests can create fixtures, cache and
+bytecode in this copy without granting the reviewer writes. Submodules and symlinks
+escaping the copy are unsupported and block. Locally installed dependencies must be
+available through the configured executable: untracked virtual environments and ignored
+artifacts are not copied or installed automatically.
+
+The runner sets temporary-directory variables to private scratch and removes agent
+credentials and user Git configuration from the environment. Default scratch is
+`verification` under private job state. Optional `verification.scratch_dir` must be an
+existing private directory owned by the current user, outside registered worktrees and
+agent home. A missing explicit directory is never created or replaced with a fallback.
+Unavailable space, invalid scratch, launch failure, cancellation, timeout (1–3,600
+seconds per command) and cleanup failure yield `blocked`. The runner stops its owned
+process group and cleans scratch after each attempt. Interrupted attempts remain
+recorded and require owner reconciliation; they are never silently replayed.
+
+Required tests execute **builder-written code**, including tests, `conftest.py` and
+imported modules, **outside the agent sandbox**, with the runner OS user's full
+access and network. This is the same trust as running an AI-written pull request's
+tests on your own machine. Approving `pytest` does not constrain the code it loads.
+Environment filtering and disposable copies do not prevent access to files or
+Keychain items readable by that user (including through `/usr/bin/security`), or
+network use. The supported pool setup uses a dedicated OS user with no Keychain
+items or GitHub credentials; the lifecycle service's App keys stay under a different
+user inaccessible to the pool user. See [pool setup](agent-pool.md#private-setup).
+An optional test sandbox is [follow-up #73](https://github.com/akhilvis-oss/agentic-delivery-team/issues/73), not part of this change.
+The runner snapshots actual source bytes/types/modes and relevant Git index, HEAD
+and configuration before and after tests, without trusting index flags or Git diff.
+Unrelated branch refs can advance concurrently. A change blocks without resetting or hiding it. This protects normal fixture/cache
+writes by isolation and detects checkout drift, rather than containing hostile code.
+It cannot undo disclosure or other host/network effects.
+
+Private job JSON and local receipts contain `verification_runs`: head, round, command
+set hash, timestamps, per-command argv, status/exit code, output hash and bounded output
+tail, plus reported pytest counts or unittest total. Other count formats remain null;
+the runner never infers zero tests or independent coverage from an unknown summary.
+Full output is kept privately in `test-runs`. The strictly read-only reviewer receives
+the corresponding evidence as data and must assess sufficiency and failures without
+rerunning required tests. A reviewer PASS cannot override a failed required command.
+Review findings can request the existing bounded correction cycle, which runs new
+checks on the new head. Verification is never inferred from worker claims.
+
+Raw verification records are excluded from automatic public GitHub receipts: argv and
+output can contain private paths. Publish a manually sanitized receipt with paths and
+private output removed. Main-refresh reviews have separate state; their actual test
+records also appear in the original job receipt after successful refresh, alongside
+the earlier head records. Readiness still requires the fresh cross-slot review and
+current-main/admission checks. No reviewer permission flags change for this feature.
+
+### Recovery of blocked pool reviews
+
+Preserve the old blocked job, immutable assignment, receipts and worker commit. After
+an owner merges and releases this fix, export that new tagged tool separately and
+record its release SHA; never patch the pinned old export or use the source worktree
+as the tool. In a new private pool/job state, explicitly enqueue a **review-only**
+assignment (`--kind review --base <ORIGINAL_BASE_SHA> --head <PRESERVED_WORKER_SHA>`)
+against the clean preserved worktree. Configure the pool's base to that original base
+for this initial exact-range review and retain the recorded builder slot via
+`force_slot`; lead-and-team assigns its independent reviewer to the other slot.
+Do not reset the old job to queued, remove its blocked receipt, or replay its worker.
+The new receipt must show zero worker phases/commits, required-test evidence at the
+preserved head and the independent verdict. After that review passes, advance the
+configured local base to current main and use normal main-refresh/review before
+integration. If the pool cannot honor these constraints, stop and report the limitation.
