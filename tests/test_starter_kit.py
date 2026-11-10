@@ -64,6 +64,13 @@ def test_roadmap_template_defines_sections_milestone_and_regression_set():
     assert "add up to 100%" in text
 
 
+def test_help_desk_rule_and_troubleshooting_playbook():
+    rules = (KIT / "PRODUCT_AGENT.md").read_text()
+    assert "Be the owner's help desk" in rules and "docs/troubleshooting.md" in rules
+    playbook = (KIT / "docs/troubleshooting.md").read_text()
+    for marker in ("**Agent", "**Owner", "**Wait"):
+        assert marker in playbook
+
 def test_branch_ruleset_template_requires_gate_and_blocks_bypass():
     import json
     ruleset = json.loads((ROOT / "templates/branch-ruleset.json").read_text())
