@@ -1,0 +1,26 @@
+{
+  "name": "pull_request_target allowance",
+  "target": "actions",
+  "enforcement": "active",
+  "conditions": {
+    "workflow_path": {
+      "exclude": [],
+      "include": [
+        ".github/workflows/review-gate.yml",
+        ".github/workflows/task-lifecycle.yml"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "restrict_action_events",
+      "parameters": {
+        "allowed_events": [
+          "issues",
+          "pull_request_target"
+        ]
+      }
+    }
+  ],
+  "bypass_actors": []
+}
