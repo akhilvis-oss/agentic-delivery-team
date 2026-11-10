@@ -97,3 +97,16 @@ def test_actions_policy_allows_pull_request_target_only_for_trusted_workflows():
     (rule,) = policy["rules"]
     assert rule["type"] == "restrict_action_events"
     assert sorted(rule["parameters"]["allowed_events"]) == ["issues", "pull_request_target"]
+
+
+def test_claude_code_product_agent_settings_deny_merge_approval_and_workflows():
+    import json
+    settings = json.loads((ROOT / "templates/claude-code-product-agent.settings.json").read_text())
+    allow, deny = settings["permissions"]["allow"], settings["permissions"]["deny"]
+    for rule in ("Bash(gh pr merge *)", "Bash(gh release *)", "Bash(gh api *)", "Bash(gh label *)",
+                 "Bash(gh workflow *)", "Bash(git push origin main *)", "Edit(.github/**)", "Edit(AGENTS.md)"):
+        assert rule in deny
+    # Labels are how stories get approved; the product agent must never be allowed to edit them.
+    assert not any("gh issue edit" in rule or "label" in rule for rule in allow)
+    edits = [rule for rule in allow if rule.startswith(("Edit(", "Write("))]
+    assert edits and all(rule.endswith("(docs/product/**)") for rule in edits)
