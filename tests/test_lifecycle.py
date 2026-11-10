@@ -674,9 +674,19 @@ def test_service_git_does_not_inherit_git_dir_or_execute_hooks(tmp_path, monkeyp
     assert not trap.exists() and len(service.jobs(cfg)) == 1
 
 
+def dispatch_comment(cfg, issue=1):
+    record = core.public_record(cfg, issue, "job", 0, "dispatched", event=101)
+    record.update({"from": "approved", "actor": cfg["actors"]["runner"]})
+    return {
+        "user": {"login": cfg["actors"]["runner"]},
+        "body": core.record_body(record),
+    }
+
+
 def pr_fixture(cfg, h):
     sha = "a" * 40
     h.issue(state="in-review")
+    h.comments_by_issue[1].append(dispatch_comment(cfg))
     review = core.public_record(
         cfg,
         1,
@@ -723,10 +733,10 @@ def test_pr_lifecycle_requires_exact_trusted_review(tmp_path, action, merged, ta
         cfg, h.client("workflow"), {"action": action, "pull_request": copy.deepcopy(pr)}
     )
     assert core.state(h.issues[1]) == target
-    assert len(h.comments_by_issue[1]) == 2
+    assert len(h.comments_by_issue[1]) == 3
 
 
-@pytest.mark.parametrize("mutation", ["fork", "head", "author", "draft"])
+@pytest.mark.parametrize("mutation", ["fork", "head", "author"])
 def test_unrelated_pr_cannot_advance_task(tmp_path, mutation):
     cfg = policy(tmp_path)
     h = Hub(cfg)
@@ -737,9 +747,6 @@ def test_unrelated_pr_cannot_advance_task(tmp_path, mutation):
         pr["head"]["sha"] = "c" * 40
     elif mutation == "author":
         pr["user"]["login"] = "attacker-fixture"
-    else:
-        h.comments_by_issue[1] = []
-        h.issues[1]["labels"] = [{"name": "status:draft"}]
     with pytest.raises(core.Unavailable):
         core.pr_event(
             cfg,
@@ -952,3 +959,173 @@ def test_claim_recovers_durable_terminal_job_without_readmission(
     assert core.read(claim_path)["head"] == "a" * 40
     service.poll(cfg, h.client(), clock=lambda: 300)
     assert core.read(claim_path)["stage"] == "finished"
+
+
+@pytest.mark.parametrize(
+    "action,merged", [("opened", False), ("closed", False), ("closed", True)]
+)
+def test_non_runner_pr_closing_issue_is_noop(
+    tmp_path, monkeypatch, capsys, action, merged
+):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.comments_by_issue[1] = []
+    pr.update(merged=merged, user={"login": "outside-contributor"})
+    pr["head"]["repo"]["full_name"] = "outside/project"
+    before = copy.deepcopy(h.issues)
+    monkeypatch.setattr(
+        core,
+        "trusted_gate",
+        lambda *a: pytest.fail("unmanaged PR needs no task gate query"),
+    )
+    core.pr_event(
+        cfg, h.client("workflow"), {"action": action, "pull_request": copy.deepcopy(pr)}
+    )
+    assert "not a lifecycle task; skipped" in capsys.readouterr().out
+    assert h.issues == before and h.comments_by_issue[1] == []
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+@pytest.mark.parametrize("source", ["untrusted", "product_info", "guard", "review"])
+def test_only_authenticated_runner_transition_dispatch_marks_managed(
+    tmp_path, monkeypatch, capsys, source
+):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    forged = dispatch_comment(cfg)
+    value = json.loads(forged["body"].split(core.PREFIX)[1][: -len(core.SUFFIX)])
+    if source == "untrusted":
+        forged["user"]["login"] = "untrusted-fixture"
+    else:
+        role, kind = {
+            "product_info": ("product", "clarification"),
+            "guard": ("workflow", "guard"),
+            "review": ("runner", "review"),
+        }[source]
+        value = core.public_record(
+            cfg,
+            1,
+            "job",
+            0,
+            "dispatched",
+            kind=kind,
+            reason="invalid_status_change" if kind == "guard" else None,
+        )
+        value.update({"from": "dispatched", "actor": cfg["actors"][role]})
+        forged["user"]["login"] = cfg["actors"][role]
+    forged["body"] = core.record_body(value)
+    h.comments_by_issue[1] = [forged]
+    before = copy.deepcopy(h.issues)
+    monkeypatch.setattr(
+        core, "trusted_gate", lambda *a: pytest.fail("no trusted dispatch")
+    )
+    core.pr_event(
+        cfg,
+        h.client("workflow"),
+        {"action": "opened", "pull_request": copy.deepcopy(pr)},
+    )
+    assert "not a lifecycle task; skipped" in capsys.readouterr().out
+    assert h.issues == before and len(h.comments_by_issue[1]) == 1
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_managed_pr_missing_exact_review_still_fails(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.comments_by_issue[1] = [dispatch_comment(cfg)]
+    with pytest.raises(core.Unavailable, match="no trusted successful task review"):
+        core.pr_event(
+            cfg,
+            h.client("workflow"),
+            {"action": "opened", "pull_request": copy.deepcopy(pr)},
+        )
+    assert core.state(h.issues[1]) == "in-review"
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_mixed_managed_and_unmanaged_links_change_only_managed_issue(
+    tmp_path, monkeypatch, capsys
+):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.issue(2, state="draft")
+    pr["body"] = "Closes #2 and Closes #1"
+    untouched = copy.deepcopy(h.issues[2])
+    queried = []
+    monkeypatch.setattr(core, "trusted_gate", lambda *a: queried.append(True) or "pass")
+    core.pr_event(
+        cfg,
+        h.client("workflow"),
+        {"action": "opened", "pull_request": copy.deepcopy(pr)},
+    )
+    assert core.state(h.issues[1]) == "pr-open" and h.issues[2] == untouched
+    assert h.comments_by_issue[2] == [] and queried == [True]
+    assert "Issue #2: not a lifecycle task; skipped" in capsys.readouterr().out
+    records = core.records(cfg, h.comments_by_issue[1], 1)
+    assert records[-1]["to"] == "pr-open" and records[-1]["gate"] == "pass"
+
+
+def test_all_managed_reviews_validated_before_any_intent_is_queued(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.issue(2, state="in-review")
+    h.comments_by_issue[2] = [dispatch_comment(cfg, 2)]
+    pr["body"] = "Closes #1 and Closes #2"
+    before = copy.deepcopy(h.issues)
+    with pytest.raises(core.Unavailable, match="no trusted successful task review"):
+        core.pr_event(
+            cfg,
+            h.client("workflow"),
+            {"action": "opened", "pull_request": copy.deepcopy(pr)},
+        )
+    assert h.issues == before and not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_unmanaged_pr_does_not_flush_preexisting_intents(tmp_path, capsys):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.comments_by_issue[1] = []
+    pending = core.queue(cfg, core.public_record(cfg, 1, "pending", 0, "needs-owner"))
+    before = core.read(pending)
+    core.pr_event(
+        cfg,
+        h.client("workflow"),
+        {"action": "opened", "pull_request": copy.deepcopy(pr)},
+    )
+    assert "not a lifecycle task; skipped" in capsys.readouterr().out
+    assert core.read(pending) == before and core.state(h.issues[1]) == "in-review"
+
+
+def test_no_closing_link_pr_is_skipped(tmp_path, capsys):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    pr["body"] = "Refs #1"
+    core.pr_event(
+        cfg,
+        h.client("workflow"),
+        {"action": "opened", "pull_request": copy.deepcopy(pr)},
+    )
+    assert capsys.readouterr().out.strip() == "not a lifecycle task; skipped"
+    assert core.state(h.issues[1]) == "in-review"
+
+
+def test_unavailable_comment_history_is_not_treated_as_unmanaged(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.fail_read = True
+    with pytest.raises(core.Unavailable):
+        core.pr_event(
+            cfg,
+            h.client("workflow"),
+            {"action": "opened", "pull_request": copy.deepcopy(pr)},
+        )
+    assert core.state(h.issues[1]) == "in-review"
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
