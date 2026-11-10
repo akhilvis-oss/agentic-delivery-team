@@ -390,7 +390,7 @@ def jobs(cfg):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["run-once", "serve", "reconcile"])
+    parser.add_argument("action", choices=["run-once", "serve", "reconcile", "enqueue-only"])
     args = parser.parse_args(argv)
     cfg = core.load_config(args.config)
     cfg["config_path"] = str(args.config.resolve())
@@ -401,15 +401,15 @@ def main(argv=None):
         print(json.dumps(core.reconcile(cfg, jobs(cfg), client)))
     else:
         while True:
-            poll(cfg, client)
-            if cfg.get("digest_config"):
+            poll(cfg, client, run_jobs=args.action != "enqueue-only")
+            if args.action != "enqueue-only" and cfg.get("digest_config"):
                 from digest import standup
 
                 digest_cfg = standup.load_config(cfg["digest_config"])
                 standup.run_once(
                     digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
                 )
-            if args.action == "run-once":
+            if args.action in {"run-once", "enqueue-only"}:
                 break
             time.sleep(cfg["poll_seconds"])
     return 0

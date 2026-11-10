@@ -423,6 +423,10 @@ def runner_commit(config, job_path, job, expected_head):
                 data=b"".join(os.fsencode("./" + p) + b"\0" for p in sorted(paths)),
                 allowed=(0, 1)).decode().split("\0") if name}
         selected = sorted(paths - ignored - set(profile["coordination_files"]))
+        if config.get("pool_expected_files") and any(not any(
+                fnmatch.fnmatch(name, pattern) or name.startswith(pattern.rstrip("/") + "/")
+                for pattern in config["pool_expected_files"]) for name in selected):
+            raise CommitRefused("outside_declared_pool_scope", selected)
         if not selected:
             raise CommitRefused("no_committable_changes")
         if len(selected) > policy["max_files"]:
@@ -579,7 +583,7 @@ def check_cli(config):
     return version
 
 
-def schema(role, lifecycle=False):
+def schema(role, lifecycle=False, pool=False):
     fields = {
         "status": {"type": "string", "enum": ["ready_for_review", "blocked"] if role == "worker"
                    else ["ready_for_integration", "needs_changes", "blocked"]},
@@ -596,15 +600,27 @@ def schema(role, lifecycle=False):
         fields["disagreement"] = {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
             "reason": {"type": "string"}}, "required": ["kind", "reason"], "additionalProperties": False}]}
-    return {"type": "object", "properties": fields, "required": list(fields),
+    required = list(fields)
+    if pool:
+        fields["usage_units"] = {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
+        fields["rate_limited"] = {"type": "boolean"}
+        required += ["usage_units", "rate_limited"]
+    return {"type": "object", "properties": fields, "required": required,
             "additionalProperties": False}
 
 
 def validate_result(result, role):
     spec = schema(role)
-    optional = {"disagreement"} if role == "worker" else set()
+    if not isinstance(result, dict):
+        raise ValueError("Incomplete structured result")
+    if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
+            or "rate_limited" in result and type(result["rate_limited"]) is not bool):
+        raise ValueError("Invalid optional usage or availability report")
+    optional = {"usage_units", "rate_limited"} | ({"disagreement"} if role == "worker" else set())
     if not isinstance(result, dict) or not set(spec["required"]) <= set(result) or set(result) - set(spec["required"]) - optional:
         raise ValueError("Incomplete structured result")
+    if result.get("rate_limited") and result["status"] != "blocked":
+        raise ValueError("Rate-limited phase cannot approve work")
     if result["status"] not in spec["properties"]["status"]["enum"]:
         raise ValueError("Invalid result status")
     if not isinstance(result["summary"], str):
@@ -761,12 +777,26 @@ def stop_group(proc):
 
 
 def execute(config, state, job_path, job, role):
+    phase = config.get("phase_context")
+    if phase is not None:
+        with phase(config, job, role) as selected:
+            result = execute_phase(selected, state, job_path, job, role)
+            job["_pool_report"] = result
+            return result
+    return execute_phase(config, state, job_path, job, role)
+
+
+def execute_phase(config, state, job_path, job, role):
+    if config.get("pool_slot"):
+        job.setdefault("phase_slots", []).append({"round": job["round"], "role": role,
+                                                  "slot": config["pool_slot"], "head": git(config, "rev-parse", "HEAD")})
+        job["cli_version"] = check_cli(config)
     folder = state / "runs" / job["id"] / f"round_{job['round']}_{role}"
     if folder.exists():
         raise RuntimeError("Phase output exists; never reuse a previous result")
     private_dir(folder)
     output, output_schema = folder / "result.json", folder / "schema.json"
-    phase_schema = schema(role, bool(config.get("lifecycle_config")))
+    phase_schema = schema(role, bool(config.get("lifecycle_config")), bool(config.get("pool_slot")))
     save(output_schema, phase_schema)
     prompt_path = folder / "prompt.txt"
     fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -776,6 +806,10 @@ def execute(config, state, job_path, job, role):
                      "there, return JSON as your final message; otherwise write the file "
                      "using only authorized permissions. Do not request broader access. "
                      f"Required JSON Schema ({output_schema}):\n" + json.dumps(phase_schema) + "\n")
+    if config.get("pool_slot"):
+        with prompt_path.open("a") as handle:
+            handle.write("\nReport usage_units only when the provider reports usage in the configured owner units; otherwise null. "
+                         "Never infer balances or read session files. Set rate_limited only for an explicit quota/rate-limit error.\n")
     job.update(status="running_" + role, updated_at=now())
     save_job(config, job_path, job)
     proc = None
@@ -797,6 +831,12 @@ def execute(config, state, job_path, job, role):
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"{role} exceeded phase time limit")
                     time.sleep(0.05)
+        if proc.returncode and proc.returncode in config.get("quota_exit_codes", []):
+            result = {"status": "blocked", "summary": "Provider quota or rate limit; slot cooling down",
+                      "tests": [], "limitations": [], "rate_limited": True}
+            if role == "reviewer":
+                result["findings"] = []
+            return result
         if proc.returncode:
             raise RuntimeError("Agent process failed; inspect private phase logs")
         result = read_answer(output)
@@ -972,7 +1012,9 @@ def check_lifecycle_admission(config, job):
         raise Blocked("Lifecycle admission changed; owner reconciliation required") from exc
 
 
-def run_once(config, state=None, client=None):
+def run_once(config, state=None, client=None, *, task_id=None):
+    if task_id is not None and not ID.fullmatch(task_id):
+        raise ValueError("Invalid exact task selection")
     state = private_dir(state or config["state_dir"])
     private_dir(state / "tasks")
     with lock(state / "runner.lock") as acquired:
@@ -991,6 +1033,7 @@ def run_once(config, state=None, client=None):
         if any(j["status"] == "interrupted" and not j.get("reconciled") for _, j in jobs):
             return
         queued = [(p, j) for p, j in jobs if j["status"] == "queued"
+                  and (task_id is None or j["id"] == task_id)
                   and j.get("not_before_epoch", 0) <= time.time()]
         if not queued:
             return
