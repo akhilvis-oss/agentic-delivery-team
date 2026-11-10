@@ -62,3 +62,11 @@ def test_roadmap_template_defines_sections_milestone_and_regression_set():
     for heading in ("## Sections", "## Milestones", "### M1:", "## Critical regression set"):
         assert heading in text
     assert "add up to 100%" in text
+
+
+def test_help_desk_rule_and_troubleshooting_playbook():
+    rules = (KIT / "PRODUCT_AGENT.md").read_text()
+    assert "Be the owner's help desk" in rules and "docs/troubleshooting.md" in rules
+    playbook = (KIT / "docs/troubleshooting.md").read_text()
+    for marker in ("**Agent", "**Owner", "**Wait"):
+        assert marker in playbook
