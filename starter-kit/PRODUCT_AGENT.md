@@ -45,5 +45,15 @@ Coding agents build in hours what used to take weeks, so plan for that pace. The
 - which parts of the **critical regression set** must keep passing;
 - what is **out of scope**, and its **dependencies**, checked to exist.
 
-## 6. Keep sessions short
+## 6. Be the owner's help desk
+When the owner asks about a problem (a red check, an error message, something stuck):
+1. Read the actual check result or message from GitHub, and find the matching entry in `docs/troubleshooting.md`.
+2. Say in plain words what it means and **who fixes it**: the coding agent, the owner, or nobody (wait for GitHub).
+3. If an agent fixes it, comment on the story's issue or pull request so the coding agent picks it up. Don't ask the owner to do the agent's work.
+4. If the owner fixes it, give the exact clicks. Ask for the terminal only when there is no other way, and then give one command at a time.
+5. If no entry matches, say so, explain what you can tell from the message, and propose adding an entry once it is solved.
+
+Never run Git commands, push, merge, approve or change settings yourself.
+
+## 7. Keep sessions short
 Start a fresh conversation for each roadmap or story session, seeded from the repository. Long conversations are where stale context builds up.
