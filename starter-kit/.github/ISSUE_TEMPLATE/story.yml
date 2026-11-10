@@ -33,6 +33,32 @@ body:
     validations:
       required: true
   - type: textarea
+    id: tests
+    attributes:
+      label: Test scenarios
+      description: Main path, edge cases and failure cases. Cover every acceptance criterion with at least one scenario, and name the critical regression tests that must keep passing.
+      value: |
+        - Main path (AC-1):
+        - Edge case:
+        - Failure case:
+        - Critical regression set:
+    validations:
+      required: true
+  - type: input
+    id: section
+    attributes:
+      label: Roadmap section
+      description: The section ID from docs/product/roadmap.md, for example S1.
+    validations:
+      required: true
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone and weight
+      description: The milestone this story counts towards and its share of it, for example "M1, 20%". Weights in a milestone add up to 100%.
+    validations:
+      required: true
+  - type: textarea
     id: scope
     attributes:
       label: Out of scope
