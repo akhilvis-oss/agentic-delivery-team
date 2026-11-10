@@ -75,3 +75,18 @@ def test_branch_ruleset_template_requires_gate_and_blocks_bypass():
     checks = {c["context"] for c in rules["required_status_checks"]["required_status_checks"]}
     assert {"checks", "review-gate"} <= checks
     assert rules["required_status_checks"]["strict_required_status_checks_policy"] is True
+
+
+def test_actions_policy_allows_pull_request_target_only_for_trusted_workflows():
+    import json
+    policy = json.loads((ROOT / "templates/actions-policy-pull-request-target.json").read_text())
+    assert policy["target"] == "actions" and policy["enforcement"] == "active"
+    assert policy["bypass_actors"] == []
+    assert sorted(policy["conditions"]["workflow_path"]["include"]) == [
+        ".github/workflows/review-gate.yml",
+        ".github/workflows/task-lifecycle.yml",
+    ]
+    assert policy["conditions"]["workflow_path"]["exclude"] == []
+    (rule,) = policy["rules"]
+    assert rule["type"] == "restrict_action_events"
+    assert sorted(rule["parameters"]["allowed_events"]) == ["issues", "pull_request_target"]
