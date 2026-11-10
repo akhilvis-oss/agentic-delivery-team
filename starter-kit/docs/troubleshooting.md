@@ -33,6 +33,9 @@ The owner should never need to run Git commands. If a step needs the terminal, r
 
 To re-trigger, the agent makes a small edit to the pull request description, or re-runs the workflow from the **Actions** tab.
 
+### A check shows ✕ "cancelled" next to a green run of the same name
+**Nobody.** Two events started the same check a few seconds apart (for example a push and a description edit), and GitHub cancelled the older run when the newer one started. The newer run is the one that counts. If GitHub still won't merge, open the cancelled run and choose **Re-run all jobs**.
+
 ### `lifecycle` check fails: "PR head has no trusted successful task review"
 **Agent.** The pull request closes a story that the runner manages, but the runner's review of this exact head is missing. The story goes back through review. Pull requests that don't close a runner-managed story skip this check.
 
