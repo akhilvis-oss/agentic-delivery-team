@@ -62,3 +62,16 @@ def test_roadmap_template_defines_sections_milestone_and_regression_set():
     for heading in ("## Sections", "## Milestones", "### M1:", "## Critical regression set"):
         assert heading in text
     assert "add up to 100%" in text
+
+
+def test_branch_ruleset_template_requires_gate_and_blocks_bypass():
+    import json
+    ruleset = json.loads((ROOT / "templates/branch-ruleset.json").read_text())
+    assert ruleset["target"] == "branch" and ruleset["enforcement"] == "active"
+    assert ruleset["conditions"]["ref_name"]["include"] == ["~DEFAULT_BRANCH"]
+    assert ruleset["bypass_actors"] == []
+    rules = {r["type"]: r.get("parameters", {}) for r in ruleset["rules"]}
+    assert {"deletion", "non_fast_forward", "pull_request", "required_status_checks"} <= set(rules)
+    checks = {c["context"] for c in rules["required_status_checks"]["required_status_checks"]}
+    assert {"checks", "review-gate"} <= checks
+    assert rules["required_status_checks"]["strict_required_status_checks_policy"] is True
