@@ -37,13 +37,14 @@ def test_agents_template_keeps_core_rules():
 def test_session_rules_cover_read_state_win_handoff():
     text = (KIT / "PRODUCT_AGENT.md").read_text()
     for heading in ("Read the repository first", "State what you read", "The repository wins",
-                    "Nothing agreed lives only in chat"):
+                    "Nothing agreed lives only in chat", "Shape delivery, not just features",
+                    "critical regression set", "weight", "test scenarios"):
         assert heading in text
 
 
 def test_story_template_requires_context_and_criteria():
     text = (KIT / ".github/ISSUE_TEMPLATE/story.yml").read_text()
-    for field in ("id: story", "id: context", "id: criteria"):
+    for field in ("id: story", "id: context", "id: criteria", "id: tests", "id: section", "id: milestone"):
         block = text.split(field, 1)[1].split("- type:", 1)[0]
         assert "required: true" in block, field
     assert "AC-1" in text
@@ -54,3 +55,10 @@ def test_placeholders_are_explicit():
     agents = (KIT / "AGENTS.md").read_text()
     for placeholder in ("<PROJECT_NAME>", "<OWNER>/<REPOSITORY>", "<BUILD_COMMAND>", "<TEST_COMMAND>"):
         assert placeholder in agents
+
+
+def test_roadmap_template_defines_sections_milestone_and_regression_set():
+    text = (KIT / "docs/product/roadmap.md").read_text()
+    for heading in ("## Sections", "## Milestones", "### M1:", "## Critical regression set"):
+        assert heading in text
+    assert "add up to 100%" in text
