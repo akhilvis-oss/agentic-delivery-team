@@ -27,7 +27,8 @@ You get one working agreement for every agent, and pull requests reviewed in pro
 3. Copy [`templates/pull_request_template.md`](../templates/pull_request_template.md) to `.github/pull_request_template.md`.
 4. Copy [`templates/review-gate.yml`](../templates/review-gate.yml) to `.github/workflows/review-gate.yml`.
 5. Commit all of this in one pull request and merge it yourself. The gate only enforces once it is on the default branch; it never runs code from a pull request.
-6. Open a small test pull request and check that the **`review-gate`** check runs. Then make it a required check in your branch rules.
+6. **Public repository?** From 2 December 2026 GitHub blocks `pull_request_target` workflows by default. In **Settings → Actions**, add an event policy that allows `pull_request_target` for `.github/workflows/review-gate.yml` only (and `task-lifecycle.yml` if you use level 3). Don't allow it repository-wide. This is safe for these workflows because they run only your default branch's code and never check out or run pull-request code.
+7. Open a small test pull request and check that the **`review-gate`** check runs. Then make it a required check in your branch rules.
    - **Private repository on GitHub Free?** Required checks aren't available, so the gate warns but can't block a merge. Never merge a PR whose `review-gate` check failed.
 
 ### Use it
@@ -56,4 +57,4 @@ This level needs separate GitHub identities for the automation, never your own t
 
 Follow [the lifecycle and digest guide](v04-lifecycle-digest.md). It covers labels, the guard workflow, identities, local polling and limits.
 
-> **Status:** the lifecycle and stand-up are merged but their combined live trial is still pending. Treat this level as a preview until it is released.
+> **Status:** released in [v0.4.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.4.0) after a combined live trial. Bot tokens currently use the macOS Keychain.
