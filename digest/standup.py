@@ -78,6 +78,9 @@ def load_config(path):
     for location in cfg["runner_state_dirs"]:
         if not Path(location).is_absolute():
             raise ValueError("Absolute runner state paths required")
+    for location in cfg.get("pool_configs", []):
+        if not Path(location).is_absolute():
+            raise ValueError("Absolute private pool config paths required")
     model = cfg.get("model", {})
     if type(model.get("enabled", False)) is not bool:
         raise ValueError("Model enabled must be boolean")
@@ -178,6 +181,16 @@ def collect(cfg, client, since, at):
         (i for i in client.pages("/issues?state=all") if "pull_request" not in i),
         key=lambda i: i["number"],
     )
+    pool_snapshots = []
+    pool_ready = {}
+    for pool_config in cfg.get("pool_configs", []):
+        from runner import pool
+
+        coordinator = pool.Pool(pool.load_config(pool_config))
+        snapshot = coordinator.snapshot()
+        pool_snapshots.append((coordinator, snapshot))
+        for name, entry in snapshot["stories"].items():
+            pool_ready[name] = entry["head"] if entry.get("status") == "ready_for_integration" else None
     demo_jobs = {}
     for issue in issues:
         if core.is_report(policy, issue):
@@ -286,6 +299,7 @@ def collect(cfg, client, since, at):
         url = task_link(cfg, number)
         if (
             job["status"] == "ready_for_integration"
+            and (job["id"] not in pool_ready or pool_ready[job["id"]] == job.get("head_commit"))
             and demo_jobs.get(number) == job["id"]
             and number not in demos
             and core.SHA.fullmatch(job.get("head_commit", ""))
@@ -399,6 +413,19 @@ def collect(cfg, client, since, at):
             f"https://github.com/{policy['repository']}/issues",
         )
     )
+    # Pool status is fixed local scheduling data; never publish config paths,
+    # commands, homes or raw provider replies. Reading it launches no model.
+    for coordinator, snapshot in pool_snapshots:
+        issue_list = f"https://github.com/{policy['repository']}/issues"
+        for slot, entry in snapshot["slots"].items():
+            active_phase = entry.get("active")
+            status = "busy" if active_phase else "cooldown" if entry["cooldown_until"] > coordinator.clock() else "idle"
+            current = active_phase["story"] if active_phase else "none"
+            sections[5].append(linked(
+                f"Pool slot {slot}: {status}; current story {current}; budget used {entry['used']}/{coordinator.slots[slot]['budget']} owner units; usage unavailable for {entry['unknown_phases']} phases (reserved estimates retained)", issue_list))
+        for name, entry in snapshot["stories"].items():
+            if entry.get("waiting"):
+                sections[4].append(linked(f"Pool story {name}: {entry['waiting']}", issue_list))
     return [sorted(set(items)) for items in sections]
 
 

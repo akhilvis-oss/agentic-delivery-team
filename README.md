@@ -27,6 +27,7 @@ GitHub is the record throughout: issues, labels, pull requests and reviews hold 
 | **Review gate** | Four review categories (light, standard, domain-critical, control-critical) derived from changed files and enforced in CI | [v0.2.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.2.0) | [Review categories](docs/review-categories.md) |
 | **Task runner** | Delegates one approved task to a coding agent, gets an independent review, and makes the commit itself after checking the changed paths | [v0.3.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.3.0) | [Task runner](docs/task-runner.md) |
 | **Task lifecycle and stand-up** | One status label per issue, guarded transitions, owner-only approval, bot identities, and a factual stand-up digest | [v0.4.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.4.0) | [Lifecycle and digest](docs/v04-lifecycle-digest.md) |
+| Agent pool | parallel stories with cross-slot review and budgets | v0.5 (pending release) | [docs/agent-pool.md](docs/agent-pool.md) |
 | **Private-content check** | Catches personal paths and private names before they reach a public repository | Released with v0.2.0 | [`scripts/`](scripts/check_private_content.py) |
 
 The kit works with any coding agent you can run from the command line: agents are defined as commands in configuration, with no per-agent code. Tested with Codex.
@@ -61,7 +62,7 @@ Read these before relying on the kit:
 - **Public repositories need one setting from 2 December 2026.** GitHub will block `pull_request_target` workflows by default. Allow it with an Actions policy that targets only the gate and lifecycle workflows; both run trusted code from your default branch and never run pull-request code. See the [quickstart](docs/quickstart.md).
 - **Private repositories on GitHub Free can't block merges.** Required checks need a public repository or a paid plan; there the gate warns but can't stop a merge.
 - **Experimental.** Version 0 may change behaviour between releases. The task runner is tested with Codex; other agents need a configuration entry and a test run.
-- **One story at a time per project.** Each story runs in its own isolated worktree, but stories in the same project run one after another for now; an agent pool for parallel stories is in progress ([#56](https://github.com/akhilvis-oss/agentic-delivery-team/issues/56)).
+- Parallel stories need the opt-in agent pool (v0.5); without it, stories in a project run one after another.
 - **You remain responsible.** The kit reduces the review burden; it doesn't remove the need for the owner's judgement on what ships.
 
 ## Contributing and security

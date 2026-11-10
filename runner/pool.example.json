@@ -1,0 +1,132 @@
+{
+  "repository_root": "<ABSOLUTE_SOURCE_REPOSITORY>",
+  "worktree_root": "<ABSOLUTE_OWNED_WORKTREE_ROOT_OUTSIDE_REPOSITORY>",
+  "state_dir": "<ABSOLUTE_PRIVATE_POOL_STATE_OUTSIDE_REPOSITORY>",
+  "base_branch": "main",
+  "mode": "pool",
+  "lead": "slot-a",
+  "max_concurrency": 2,
+  "paused": false,
+  "slots": [
+    {
+      "id": "slot-a",
+      "agent_home": "<ABSOLUTE_ISOLATED_AGENT_HOME_A>",
+      "agent": {
+        "command": [
+          "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+          "{role_flags}",
+          "exec",
+          "--ignore-user-config",
+          "--cd",
+          "{worktree}",
+          "--model",
+          "{model}",
+          "--color",
+          "never",
+          "--output-schema",
+          "{schema_file}",
+          "--output-last-message",
+          "{output_file}",
+          "-"
+        ],
+        "version_command": [
+          "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+          "--version"
+        ],
+        "version_pattern": "codex-cli 0\\.164\\.0-alpha\\.11\\.1",
+        "worker_flags": [
+          "--approve-for-me"
+        ],
+        "reviewer_flags": [
+          "--ask-for-approval",
+          "never",
+          "--sandbox",
+          "read-only"
+        ],
+        "environment": {
+          "CODEX_HOME": "{agent_home}"
+        }
+      },
+      "worker_model": "<WORKER_MODEL>",
+      "reviewer_model": "<REVIEWER_MODEL>",
+      "budget": 1000,
+      "phase_reserve": 50,
+      "small_threshold": 200,
+      "small_max_ac": 2,
+      "cooldown_seconds": 900,
+      "quota_exit_codes": []
+    },
+    {
+      "id": "slot-b",
+      "agent_home": "<ABSOLUTE_ISOLATED_AGENT_HOME_B>",
+      "agent": {
+        "command": [
+          "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+          "{role_flags}",
+          "exec",
+          "--ignore-user-config",
+          "--cd",
+          "{worktree}",
+          "--model",
+          "{model}",
+          "--color",
+          "never",
+          "--output-schema",
+          "{schema_file}",
+          "--output-last-message",
+          "{output_file}",
+          "-"
+        ],
+        "version_command": [
+          "<ABSOLUTE_CODEX_CLI_EXECUTABLE>",
+          "--version"
+        ],
+        "version_pattern": "codex-cli 0\\.164\\.0-alpha\\.11\\.1",
+        "worker_flags": [
+          "--approve-for-me"
+        ],
+        "reviewer_flags": [
+          "--ask-for-approval",
+          "never",
+          "--sandbox",
+          "read-only"
+        ],
+        "environment": {
+          "CODEX_HOME": "{agent_home}"
+        }
+      },
+      "worker_model": "<WORKER_MODEL>",
+      "reviewer_model": "<REVIEWER_MODEL>",
+      "budget": 1000,
+      "phase_reserve": 50,
+      "small_threshold": 200,
+      "small_max_ac": 2,
+      "cooldown_seconds": 900,
+      "quota_exit_codes": []
+    }
+  ],
+  "test_commands": [
+    [
+      "<ABSOLUTE_PYTHON_EXECUTABLE>",
+      "-m",
+      "pytest",
+      "-q"
+    ]
+  ],
+  "stories": [
+    {
+      "id": "example-story",
+      "approved": false,
+      "priority": 1,
+      "ac_count": 2,
+      "roadmap_section": "example-section",
+      "expected_files": [
+        "src/example.py",
+        "tests/test_example.py"
+      ],
+      "depends_on": [],
+      "force_slot": null,
+      "runner_config": "<ABSOLUTE_PRIVATE_ENQUEUED_RUNNER_CONFIG>"
+    }
+  ]
+}
