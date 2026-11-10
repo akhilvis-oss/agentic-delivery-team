@@ -246,6 +246,11 @@ def load_config(path, *, local=True):
         raise ValueError("P0/P1 must block; at most two correction rounds")
     if type(cfg.get("poll_seconds")) is not int or cfg["poll_seconds"] < 10:
         raise ValueError("Polling interval must be at least ten seconds")
+    if "heartbeat_alert_seconds" in cfg and (
+        type(cfg["heartbeat_alert_seconds"]) is not int
+        or cfg["heartbeat_alert_seconds"] < cfg["poll_seconds"]
+    ):
+        raise ValueError("Heartbeat alert threshold must be at least one poll interval")
     if local:
         if not Path(cfg.get("state_dir", "")).is_absolute():
             raise ValueError("Private absolute lifecycle state required")
@@ -257,6 +262,9 @@ def load_config(path, *, local=True):
 def is_report(cfg, issue):
     labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
     return (
+        issue.get("user", {}).get("login") == cfg["actors"]["product"]
+        and "<!-- agentic-service-alert-v1:" in (issue.get("body") or "")
+    ) or (
         has_role(cfg, issue.get("user", {}).get("login"), "product")
         and "report:standup" in labels
         and "<!-- agentic-digest-v1:" in (issue.get("body") or "")
@@ -641,13 +649,26 @@ class GitHub:
         )
 
 
-def bind_state(cfg):
-    root = private(cfg["state_dir"])
-    identity = {
+def state_identity(cfg):
+    return {
         "repository": cfg["repository"],
         "actors": cfg["actors"],
         "identity_roles": cfg["identity_roles"],
     }
+
+
+def validate_state(cfg):
+    """Check an existing ownership binding without initializing or modifying state."""
+    path = Path(cfg["state_dir"]) / "identity.json"
+    if path.exists() and read(path) != state_identity(cfg):
+        raise ValueError(
+            "Private state belongs to another repository or actor configuration"
+        )
+
+
+def bind_state(cfg):
+    root = private(cfg["state_dir"])
+    identity = state_identity(cfg)
     path = root / "identity.json"
     create(path, identity)
     if read(path) != identity:

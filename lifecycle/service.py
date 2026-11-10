@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import fcntl
 import importlib.util
+import json
 from pathlib import Path
 import time
 
@@ -377,6 +380,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     claim.update(stage="finished", head=job.get("head_commit"))
                 core.save(path, claim)
             processed.append(claim["job"])
+        completed = clock()
+        core.save(cursor, {"next_poll": completed + cfg["poll_seconds"]})
+        core.save(root / "heartbeat.json", {"last_poll": completed})
         return processed
 
 
@@ -387,31 +393,224 @@ def jobs(cfg):
     ]
 
 
+def heartbeat(cfg):
+    """Read only; missing state must remain missing."""
+    core.validate_state(cfg)
+    path = Path(cfg["state_dir"]) / "heartbeat.json"
+    return core.read(path).get("last_poll") if path.exists() else None
+
+
+def timestamp(value):
+    return dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
+
+
+def serving(root):
+    """Probe the lifetime lock without creating or modifying any file."""
+    try:
+        with (root / "serve.lock").open("rb") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def status(cfg, *, clock=time.time):
+    root = Path(cfg["state_dir"])
+    last = heartbeat(cfg)
+    lines = ["Service: " + ("running" if serving(root) else "not running")]
+    lines.append(
+        "Last poll: never (state uninitialized)"
+        if last is None
+        else f"Last poll: {timestamp(last)}; {max(0, int(clock() - last))} seconds ago"
+    )
+    cursor = root / "poll.json"
+    lines.append(
+        "Next poll: "
+        + (timestamp(core.read(cursor)["next_poll"]) if cursor.exists() else "unknown")
+        + " (scheduled only while running)"
+    )
+    claims = [core.read(p) for p in sorted((root / "claims").glob("*.json"))]
+    local_jobs = jobs(cfg)
+    lines.append("Active claims:")
+    active = [
+        f"  Issue #{c['issue']}: {c['job']} ({c['stage']})"
+        for c in claims
+        if c["stage"] != "finished"
+    ]
+    lines.extend(active or ["  none"])
+    lines.append("Jobs:")
+
+    def issue_number(job):
+        return (
+            job.get("assignment", {})
+            .get("lifecycle", {})
+            .get("issue", job.get("github_number", "unknown"))
+        )
+
+    lines.extend(
+        [f"  Issue #{issue_number(j)}: {j['id']} ({j['status']})" for j in local_jobs]
+        or ["  none"]
+    )
+    lines.append("Waiting for reconciliation:")
+    pending = []
+    for c in claims:
+        if c.get("error") or c.get("cleanup_pending") or c["stage"] == "suspended":
+            pending.append(
+                f"  Issue #{c['issue']}: {c['job']} (claim or cleanup needs attention)"
+            )
+    for j in local_jobs:
+        if (
+            j.get("lifecycle_unsynced")
+            or j["status"]
+            in {
+                "blocked",
+                "failed",
+                "interrupted",
+                "needs_owner",
+                "needs_primary_review",
+            }
+            or any(c.get("state") == "prepared" for c in j.get("runner_commits", []))
+        ):
+            pending.append(
+                f"  Issue #{issue_number(j)}: {j['id']} (job needs attention)"
+            )
+    for folder, done, issue_field in (
+        ("outbox", {"synced", "superseded"}, "issue"),
+        ("followups", {"posted"}, "parent_issue"),
+    ):
+        for path in sorted((root / folder).glob("*.json")):
+            item = core.read(path)
+            if item["status"] not in done:
+                number = item.get("record", item).get(issue_field, "unknown")
+                pending.append(
+                    f"  Issue #{number}: {folder} publication {item['status']}"
+                )
+    alert_path = root / "watchdog.json"
+    if alert_path.exists() and core.read(alert_path).get("attempted"):
+        pending.append("  Service outage alert awaiting publication reconciliation")
+    lines.extend(pending or ["  none recorded locally"])
+    return "\n".join(lines)
+
+
+def watchdog(cfg, client, *, clock=time.time):
+    """Owner-scheduled independently of serve and digest; never dispatches jobs."""
+    threshold = cfg.get("heartbeat_alert_seconds")
+    if threshold is None:
+        return {"status": "disabled"}
+    core.bind_state(cfg)
+    root = Path(cfg["state_dir"])
+    with core.lock(root / "watchdog.lock") as acquired:
+        if not acquired:
+            return {"status": "locked"}
+        path = root / "watchdog.json"
+        journal = core.read(path) if path.exists() else {}
+        last = heartbeat(cfg)
+        if last is not None and clock() - last <= threshold:
+            core.save(path, {})
+            return {"status": "healthy"}
+        if journal.get("heartbeat", "missing") != last:
+            journal = {"heartbeat": last}
+        marker = (
+            "<!-- agentic-service-alert-v1:"
+            + core.key([cfg["repository"], last])
+            + " -->"
+        )
+        if journal.get("issue"):
+            return {"status": "already_alerted", "issue": journal["issue"]}
+        existing = [
+            i
+            for i in client.pages("/issues?state=all")
+            if i.get("user", {}).get("login") == cfg["actors"]["product"]
+            and marker in (i.get("body") or "")
+        ]
+        if existing:
+            journal.update(issue=existing[0]["number"], attempted=False)
+            core.save(path, journal)
+            return {"status": "already_alerted", "issue": journal["issue"]}
+        if journal.get("attempted"):
+            return {"status": "uncertain_requires_reconciliation"}
+        journal["attempted"] = True
+        core.save(path, journal)
+        try:
+            created = client.request(
+                "POST",
+                "/issues",
+                {
+                    "title": "[Urgent] Lifecycle service has stopped polling",
+                    "body": "The lifecycle service has no recent successful poll. "
+                    "The owner should inspect service status and reconcile before restarting.\n\n"
+                    + marker,
+                    "assignees": [cfg["actors"]["owner"]],
+                },
+            )
+        except core.Unavailable as exc:
+            if not isinstance(exc, core.Uncertain):
+                journal["attempted"] = False
+            core.save(path, journal)
+            return {"status": "unsynced"}
+        journal.update(issue=created["number"], attempted=False)
+        core.save(path, journal)
+        return {"status": "alerted", "issue": journal["issue"]}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["run-once", "serve", "reconcile", "enqueue-only"])
+    parser.add_argument(
+        "action",
+        choices=[
+            "run-once",
+            "serve",
+            "reconcile",
+            "enqueue-only",
+            "status",
+            "watchdog",
+        ],
+    )
     args = parser.parse_args(argv)
     cfg = core.load_config(args.config)
     cfg["config_path"] = str(args.config.resolve())
+    if args.action == "status":
+        print(status(cfg))
+        return 0
+    if args.action == "watchdog":
+        client = (
+            core.GitHub(cfg, "product") if "heartbeat_alert_seconds" in cfg else None
+        )
+        print(json.dumps(watchdog(cfg, client)))
+        return 0
     client = core.GitHub(cfg)
     if args.action == "reconcile":
-        import json
-
         print(json.dumps(core.reconcile(cfg, jobs(cfg), client)))
+    elif args.action == "serve":
+        validate_local(cfg)
+        core.bind_state(cfg)
+        with core.lock(Path(cfg["state_dir"]) / "serve.lock") as acquired:
+            if not acquired:
+                raise core.Unavailable("Service is already running")
+            run_loop(cfg, client, args.action)
     else:
-        while True:
-            poll(cfg, client, run_jobs=args.action != "enqueue-only")
-            if args.action != "enqueue-only" and cfg.get("digest_config"):
-                from digest import standup
+        run_loop(cfg, client, args.action)
+    return 0
 
-                digest_cfg = standup.load_config(cfg["digest_config"])
-                standup.run_once(
-                    digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
-                )
-            if args.action in {"run-once", "enqueue-only"}:
-                break
-            time.sleep(cfg["poll_seconds"])
+
+def run_loop(cfg, client, action):
+    while True:
+        poll(cfg, client, run_jobs=action != "enqueue-only")
+        if action != "enqueue-only" and cfg.get("digest_config"):
+            from digest import standup
+
+            digest_cfg = standup.load_config(cfg["digest_config"])
+            standup.run_once(
+                digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
+            )
+        if action in {"run-once", "enqueue-only"}:
+            break
+        time.sleep(cfg["poll_seconds"])
     return 0
 
 

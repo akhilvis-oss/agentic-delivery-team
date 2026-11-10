@@ -146,3 +146,102 @@ Sources: [GitHub issue events](https://docs.github.com/en/rest/issues/events), [
 Tests use fake GitHub/model clients and synthetic actors, timestamps, scopes and temporary Git repositories. They cover repeated polling, re-approval, crash boundaries, outages, uncertain writes, actor/scope guard failures, fixed-field privacy, budget/skip behavior, push-back and disagreement. Run the repository's scanner, Ruff and full pytest suite before publishing a PR. No test uses real tokens, model accounts or other projects/services.
 
 The owner chose **implementation and tests now; combined live trial pending separate runner/Product identities**. After identities and the owner-merged default-branch workflow are ready, run one combined trial using disposable local worktrees/state and clearly marked throwaway issues in the authorized repository. Verify owner approval and guard rejection; owner/App Product role mapping, a cited repository clarification, and owner escalation for scope/AC/story-approval requests; repeated polling without duplicate jobs; runner commit, one correction/disagreement path and fresh review; PR open/close/merge lifecycle as authorized; stale/unsynced risk; one Product-authored digest; model/budget fallback; skip without approval; and urgent notification independent of cadence. Capture exact source/head, transition keys, sanitized receipts, budget and digest evidence. Close/delete throwaway issues/branches as authorized and remove local worktrees/state/auth copies. Never substitute synthetic evidence for this live acceptance or use the owner's token as an automated identity. No release tag is authorized by this package.
+
+## Service status and independent outage alerts
+
+```sh
+python -m lifecycle.service --config '<PRIVATE_LIFECYCLE_JSON>' status
+python -m lifecycle.service --config '<PRIVATE_LIFECYCLE_JSON>' watchdog
+```
+
+`status` reads local files only: it does not initialize state, change file permissions,
+load credentials or contact GitHub. It reports whether a coordinator holds the lifetime
+lock, the last successful poll and its age, the scheduled next poll, claims and jobs
+with their issues, and locally recorded reconciliation work. With no state it reports
+not running, never polled, and unknown next poll. Running means the local coordinator
+lock is held; it does not prove GitHub is reachable. Remote discrepancies still require
+the existing read-only `reconcile` command. A stopped service's next poll is only a
+schedule, not a promise that work will run.
+
+Each completed successful poll writes `heartbeat.json` in private lifecycle state.
+Skipped polls (interval not reached or another poll holding the lock) and failed polls
+do not refresh it. The factual stand-up includes “Service last polled N minutes ago”,
+or “never” before its first successful poll. Polls execute jobs synchronously, so a
+long-running job can delay the next heartbeat; choose the threshold to include the
+expected job duration as well as the poll interval.
+
+Alerts are **opt-in**. Add `"heartbeat_alert_seconds": 600` to your private combined
+lifecycle JSON (or the policy JSON referenced by `policy_file`), choosing an integer
+at least as large as `poll_seconds`. Existing configs without this key keep alerts
+disabled. This example is a starting point; use a longer threshold for long jobs.
+Do not edit the kit's existing public policy to try the feature.
+
+The owner must schedule `watchdog` independently of `serve`, for example every minute
+using the separate optional launchd template below. It runs even when `serve` has
+stopped, never dispatches work, and does not depend on digest cadence, pauses, or a
+model. It uses the configured **Product** identity to create an urgent issue assigned
+to the owner. The first watchdog check alerts immediately if no successful poll exists.
+These report issues cannot dispatch stories. One private journal and lock per state
+root suppress repeated alerts for the same outage; a fresh heartbeat clears the active
+outage on the next watchdog check. Later outages can raise a new issue. Recovery does
+not close the earlier issue automatically.
+
+Known rejected writes can retry. A lost create response is reconciled using the
+trusted Product author and deterministic marker before another write is considered.
+An attempted alert absent from GitHub remains uncertain, visible in `status`, and
+requires owner reconciliation; do not delete journals to force a retry. Watchdog
+errors and JSON results go to the owner's logs. Keep this state durable and shared
+with `serve`. Neither command can send alerts while the host is asleep/offline, the
+watchdog itself is stopped, credentials are unavailable, or GitHub is unavailable.
+
+## Optional owner-run macOS login setup
+
+The kit supplies `templates/lifecycle-serve.plist.example` and
+`templates/lifecycle-watchdog.plist.example`; it never installs or loads them.
+The owner may copy them into private files named `org.example.agentic-lifecycle.plist`
+and `org.example.agentic-lifecycle-watchdog.plist` under `$HOME/Library/LaunchAgents`.
+Use a distinct pair of labels and filenames for each private state root.
+
+Before loading either file:
+
+1. Replace every `__PLACEHOLDER__` with an absolute local value, XML-escaping values
+   such as `&`. Use the Python executable from your existing environment and the kit
+   directory containing `lifecycle/`. Argument array entries preserve spaces.
+2. Set private lifecycle config and separate stdout/stderr log files for each agent.
+   Create their parent directories with owner-only permissions and protect both
+   config and logs. Keep rendered plists and local paths out of source control.
+3. Use the existing App/Keychain authentication setup for Runner and Product. Login
+   agents do not inherit an interactive shell's environment; never place tokens or
+   private keys in a plist. Confirm the configured identities can authenticate in
+   that login context. No new dependencies or OS settings are required by the kit.
+4. Opt into the heartbeat threshold described above and inspect `status`. Run a
+   deliberate watchdog check only when ready for it to assign a real outage issue.
+
+Owner-run installation, after preparing and inspecting those private files:
+
+```sh
+plutil -lint "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle.plist"
+plutil -lint "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle-watchdog.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle-watchdog.plist"
+```
+
+The serve template uses `RunAtLoad` and `KeepAlive` to start at login and restart after
+exit, with throttling to avoid a tight crash loop. The watchdog is a separate short
+command with `RunAtLoad` and `StartInterval` (60 seconds). Both are login agents,
+so they require a logged-in owner; neither is a system daemon. Inspect their private
+logs and use `status` to verify polling. Do not run another coordinator on the same
+state root; the lifetime lock rejects a concurrent `serve` command.
+
+Owner-run uninstall (unload the watchdog first to avoid alerts for an intentional stop):
+
+```sh
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle-watchdog.plist"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle.plist"
+rm "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle-watchdog.plist"
+rm "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle.plist"
+```
+
+Retain private state and logs for reconciliation. On other platforms, owners can
+schedule the same `serve` and separate `watchdog` commands with their own service
+manager; non-macOS templates and installation automation are outside this story.
