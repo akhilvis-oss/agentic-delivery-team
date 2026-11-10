@@ -45,12 +45,14 @@ If GitHub refuses to enable auto-merge because the PR is already mergeable ("cle
 | --- | --- | --- |
 | Light | Required checks (`checks`, `review-gate`) pass | Auto-merge |
 | Standard | Required checks pass; independent Checker PASS on the current head | Auto-merge |
-| Domain-critical | Required checks pass; independent Checker PASS and an independent Claude review PASS, both on the current head | Auto-merge |
+| Domain-critical | Required checks pass; independent Checker PASS on the current head; and, **only if a second reviewer from a different model provider is configured**, its PASS on the same head | Auto-merge |
 | Control-critical | Everything above | **Owner only**; never enable auto-merge |
 | Release tags and release notes | Owner approved the notes | **Owner only** |
 
 - The category is the one the trusted `review-gate` check reports, never a lower one declared or assumed by the Maker.
-- Record each review as a GitHub review or PR comment that starts with `Checker: PASS` or `Claude review: PASS`, names the exact head SHA, and is written by a session separate from the Maker.
+- Record each review as a GitHub review or PR comment that starts with `Checker: PASS` or `Second review: PASS`, names the exact head SHA, and is written by a session separate from the Maker.
+- **Independence means a fresh session that didn't build the work.** The Checker may use the same model as the Maker. A second reviewer from a different provider is optional: when one is configured its PASS is required, and when none is configured nothing waits for it. One model reviewing its own kind of work shares that model's blind spots; a second provider reduces that risk but isn't required.
+- Reviews recorded as `Claude review: PASS` before 11 November 2026 count as a second review.
 - If any condition is missing, unclear or contradicted (a CHANGES REQUIRED or BLOCKED review, a failing or pending check, an unanswered must-ask item), do not enable auto-merge; leave the PR for the owner.
 - Never merge a control-critical PR or a PR that misses any condition, and never bypass checks, dismiss reviews, or change branch rules to get a PR merged.
 - **Limit:** agents currently act through the owner's GitHub account, so GitHub cannot tell an agent's action from the owner's. This policy is therefore enforced by agents following it; required checks and the trusted gate remain the technical controls.

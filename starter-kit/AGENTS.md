@@ -36,7 +36,8 @@ Every coding agent working in this repository follows this agreement. The **owne
 - CI workflows, the review gate or its config, and this file.
 
 ## Review
-- The author never reviews their own work. An independent reviewer checks the work against the original issue and the exact head commit.
+- The author never reviews their own work. An independent reviewer, a fresh session that didn't build it, checks the work against the original issue and the exact head commit. It may use the same model as the author.
+- A second reviewer from a different model provider is optional. If you configure one, its PASS is required for domain-critical and control-critical work; if you don't, nothing waits for it. One model reviewing its own kind of work shares its blind spots; a second provider reduces that.
 - Findings are graded **P0/P1** (wrong behaviour, missed criterion, safety: must be fixed) or **P2** (improvement: becomes a follow-up issue, doesn't block).
 - At most two correction rounds; then escalate. One disagreement exchange, then technical questions go to the lead engineer and product questions to the owner.
 
@@ -47,7 +48,7 @@ The owner's advance permission, by the category the trusted `review-gate` check 
 | --- | --- | --- |
 | Light | Required checks pass | Auto-merge |
 | Standard | + independent review PASS | Auto-merge |
-| Domain-critical | + a second independent review PASS | Auto-merge |
+| Domain-critical | + a second review from a different model provider, **only if one is configured** | Auto-merge |
 | Control-critical | Everything above | **Owner only** |
 | Releases | Owner approved the notes | **Owner only** |
 
