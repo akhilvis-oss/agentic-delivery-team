@@ -507,3 +507,156 @@ def test_enqueue_only_never_runs_optional_digest_model(tmp_path, monkeypatch):
     monkeypatch.setattr(standup, 'load_config', lambda _: pytest.fail('queue-only must not call digest/model'))
     assert service.main(['--config', str(tmp_path / 'unused.json'), 'enqueue-only']) == 0
     assert calls == [False]
+
+
+def lifecycle_story(setup, tmp_path, monkeypatch):
+    """Real admission/outbox/record policy with an in-memory GitHub transport."""
+    from lifecycle import core
+    from test_lifecycle import Hub, policy
+
+    cfg, path = setup
+    cfg['stories'] = cfg['stories'][:1]
+    runner.save(path, cfg)
+    story = cfg['stories'][0]
+    config_path = Path(story['runner_config'])
+    config = runner.read(config_path)
+    task_path = Path(config['state_dir']) / 'tasks/alpha.json'
+    task_text = runner.read(task_path)['assignment']['task_text']
+    policy_cfg = policy(tmp_path / 'lifecycle-fixture')
+    hub = Hub(policy_cfg)
+    hub.issue(body=task_text)
+    approval = hub.approve()
+    monkeypatch.setattr(runner, '_LIFECYCLE', core)
+    monkeypatch.setattr(core, 'GitHub', lambda cfg, role='runner': hub.client(role))
+    dispatch = core.public_record(policy_cfg, 1, 'alpha', 0, 'dispatched', event=approval['id'])
+    core.queue(policy_cfg, dispatch)
+    core.flush(policy_cfg, hub.client())
+    assert core.state(hub.issues[1]) == 'dispatched'
+    config['lifecycle_config'] = policy_cfg['config_path']
+    runner.save(config_path, config)
+    task_path.unlink()
+    runner.enqueue(runner.load_config(config_path), 'alpha', task_text, github_number=1,
+                   lifecycle={'issue': 1, 'event': approval['id'], 'primary': False})
+    phases = []
+
+    def execute(config, state, job_path, job, role):
+        phases.append((role, config['pool_slot']))
+        # Match the production phase boundary so the actual policy/outbox sees
+        # worker -> committed -> reviewer instead of bypassing lifecycle writes.
+        job.update(status='running_' + role, updated_at=runner.now())
+        runner.save_job(config, job_path, job)
+        return delivery(config, state, job_path, job, role)
+
+    monkeypatch.setattr(runner, 'execute_phase', execute)
+    return cfg, path, policy_cfg, hub, phases
+
+
+def test_lifecycle_queued_refresh_preserves_admission_and_publishes_review(setup, tmp_path, monkeypatch):
+    from lifecycle import core
+
+    cfg, path, policy_cfg, hub, phases = lifecycle_story(setup, tmp_path, monkeypatch)
+    advance_main(cfg, 'main-update.txt')
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    record = engine.data['stories']['alpha']
+    assert record['status'] == 'ready_for_integration'
+    assert [r for r, _ in phases] == ['worker', 'reviewer']
+    assert phases[0][1] != phases[1][1]
+    assert core.state(hub.issues[1]) == 'in-review'
+    history = core.records(policy_cfg, hub.client().comments(1), 1)
+    assert any(r['kind'] == 'review' and r['outcome'] == 'ready_for_integration'
+               and r['commit'] == record['head'] for r in history)
+    assert not any(call == ('label', 1, 'blocked') for call in hub.calls)
+    original = runner.read(Path(runner.read(cfg['stories'][0]['runner_config'])['state_dir']) / 'tasks/alpha.json')
+    assert original['status'] == 'blocked'  # private superseded assignment only
+
+
+@pytest.mark.parametrize('revocation', ['blocked', 'closed', 'scope', 'dispatch'])
+def test_lifecycle_queued_refresh_cannot_override_revocation(setup, tmp_path, monkeypatch, revocation):
+    from lifecycle import core
+
+    cfg, path, policy_cfg, hub, phases = lifecycle_story(setup, tmp_path, monkeypatch)
+    if revocation == 'blocked':
+        hub.event(1, 'blocked', 'runner')
+    elif revocation == 'closed':
+        hub.issues[1]['state'] = 'closed'
+    elif revocation == 'scope':
+        hub.issues[1]['body'] = 'Owner changed the scope'
+    else:
+        other = core.public_record(policy_cfg, 1, 'other-task', 0, 'dispatched', event=101)
+        other.update({'from': 'approved', 'actor': policy_cfg['actors']['runner']})
+        hub.comments_by_issue[1].append({'user': {'login': policy_cfg['actors']['runner']},
+                                       'body': core.record_body(other)})
+    advance_main(cfg, 'main-update.txt')
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    assert not phases
+    assert engine.data['stories']['alpha']['status'] == 'blocked'
+    assert not any(r['kind'] == 'review' for r in core.records(policy_cfg, hub.client().comments(1), 1))
+
+
+def test_lifecycle_completed_refresh_publishes_new_head_for_each_merge(setup, tmp_path, monkeypatch):
+    from lifecycle import core
+
+    cfg, path, policy_cfg, hub, phases = lifecycle_story(setup, tmp_path, monkeypatch)
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    builder = phases[0][1]
+    for name in ('main-one.txt', 'main-two.txt'):
+        advance_main(cfg, name)
+        engine.run_once()
+        record = engine.data['stories']['alpha']
+        assert record['status'] == 'ready_for_integration'
+        assert core.state(hub.issues[1]) == 'in-review'
+        history = core.records(policy_cfg, hub.client().comments(1), 1)
+        assert history[-1]['kind'] == 'review'
+        assert history[-1]['commit'] == record['head']
+        assert history[-1]['outcome'] == 'ready_for_integration'
+        assert phases[-1] == ('reviewer', 'slot-1' if builder == 'slot-0' else 'slot-0')
+    assert not any(call == ('label', 1, 'blocked') for call in hub.calls)
+
+
+def test_completed_refresh_checks_revocation_before_and_after_review(setup, tmp_path, monkeypatch):
+    from lifecycle import core
+
+    cfg, path, policy_cfg, hub, phases = lifecycle_story(setup, tmp_path, monkeypatch)
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    old_head = engine.data['stories']['alpha']['head']
+    advance_main(cfg, 'main-one.txt')
+    execute = runner.execute_phase
+
+    def revoke_during_review(config, state, job_path, job, role):
+        result = execute(config, state, job_path, job, role)
+        hub.issues[1]['body'] = 'Revoked during review'
+        return result
+
+    monkeypatch.setattr(runner, 'execute_phase', revoke_during_review)
+    engine.run_once()
+    assert engine.data['stories']['alpha']['status'] == 'blocked'
+    history = core.records(policy_cfg, hub.client().comments(1), 1)
+    assert all(r['commit'] == old_head for r in history if r['kind'] == 'review')
+    # A later attempt with admission already revoked cannot launch a model.
+    assert len(phases) == 3
+
+
+@pytest.mark.parametrize('revocation', ['blocked', 'closed', 'scope'])
+def test_completed_refresh_stops_before_model_on_revocation(setup, tmp_path, monkeypatch, revocation):
+    from lifecycle import core
+
+    cfg, path, policy_cfg, hub, phases = lifecycle_story(setup, tmp_path, monkeypatch)
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    if revocation == 'blocked':
+        hub.event(1, 'blocked', 'runner')
+    elif revocation == 'closed':
+        hub.issues[1]['state'] = 'closed'
+    else:
+        hub.issues[1]['body'] = 'Owner changed the scope'
+    old_comments = hub.client().comments(1)
+    advance_main(cfg, 'main-one.txt')
+    engine.run_once()
+    assert len(phases) == 2
+    assert engine.data['stories']['alpha']['status'] == 'blocked'
+    assert hub.client().comments(1) == old_comments
+    assert core.records(policy_cfg, old_comments, 1)[-1]['kind'] == 'review'

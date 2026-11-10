@@ -177,7 +177,7 @@ class Pool:
         return cfg
 
     @contextmanager
-    def phase(self, story, config, job, role):
+    def phase(self, story, config, job, role, admission=None):
         name = story['id']
         if job['id'] != name:
             raise runner.Blocked('Phase job is not the approved pool story')
@@ -217,6 +217,8 @@ class Pool:
                 try:
                     if role == 'reviewer' and record.get('queued_refresh'):
                         self.tests(story, phase_cfg)
+                    if admission is not None:
+                        runner.check_lifecycle_admission(*admission)
                     yield phase_cfg
                     result = None
                 finally:
@@ -290,12 +292,21 @@ class Pool:
                            'rebase', '--no-autosquash', '--no-rebase-merges', main, extra_env={
             'GIT_COMMITTER_NAME': identity['name'], 'GIT_COMMITTER_EMAIL': identity['email']})
 
+    def invalidate(self, cfg, path, job):
+        # A main update invalidates local integration evidence, not owner
+        # admission. Publishing an execution failure here revokes our own job.
+        local = dict(cfg)
+        local.pop('lifecycle_config', None)
+        job.update(status='blocked', reviewed_head=None, updated_at=runner.now())
+        runner.save_job(local, path, job)
+
     def refresh_queued(self, story, cfg, path, job):
         runner.verify_assignment(cfg, job)
+        if cfg.get('lifecycle_config'):
+            runner.check_lifecycle_admission(cfg, job)
         if runner.dirty_paths(cfg) or self.git('rev-parse', 'HEAD', config=cfg) != job['base_commit']:
             raise runner.Blocked('Queued branch changed; owner reconciliation required')
-        job.update(status='blocked', updated_at=runner.now())
-        runner.save_job(cfg, path, job)
+        self.invalidate(cfg, path, job)
         self.rebase(cfg, self.main)
         folder = self.root / 'rebased' / story['id'] / self.main
         config_path = folder / 'config.json'
@@ -335,10 +346,11 @@ class Pool:
                 record['validated_main'] = current
                 self.save()
             return
+        if cfg.get('lifecycle_config'):
+            runner.check_lifecycle_admission(cfg, job)
         # Persist invalidation before any Git/test operation. Never let an old
         # exact-head approval survive an integration-base change or crash.
-        job.update(status='blocked', reviewed_head=None, updated_at=runner.now())
-        runner.save_job(cfg, path, job)
+        self.invalidate(cfg, path, job)
         with self.condition:
             record.update(status='refreshing', waiting='main_changed_tests_and_review_required')
             self.save()
@@ -360,7 +372,8 @@ class Pool:
         fresh_cfg = {**cfg, 'state_dir': str(self.root / 'refresh' / name / current)}
         fresh_cfg.pop('lifecycle_config', None)
         fresh_cfg['github_receipts'] = {'enabled': False}
-        fresh_cfg['phase_context'] = lambda c, j, r: self.phase(story, c, j, r)
+        admission = (cfg, job) if cfg.get('lifecycle_config') else None
+        fresh_cfg['phase_context'] = lambda c, j, r: self.phase(story, c, j, r, admission)
         review_path = runner.enqueue(fresh_cfg, name, job['assignment']['task_text'], kind='review', base=current, head=new_head)
         runner.run_once(fresh_cfg, task_id=name)
         review = runner.read(review_path)
@@ -368,6 +381,15 @@ class Pool:
             raise runner.Blocked('Post-merge independent review did not pass')
         if self.git('rev-parse', self.cfg.get('base_branch', 'main')).strip() != current:
             raise runner.Blocked('Main changed during refresh; owner reconciliation required')
+        if admission is not None:
+            runner.check_lifecycle_admission(*admission)
+        # Project only the actual new-head review, retaining the original
+        # frozen assignment. Queued/intermediate refresh state stays private.
+        job.update(status='ready_for_integration', head_commit=new_head, reviewed_head=new_head,
+                   review=review['review'], updated_at=runner.now())
+        job.setdefault('review_history', []).append({
+            'round': job['round'], 'head': new_head, 'result': review['review']})
+        runner.save_job(cfg, path, job)
         with self.condition:
             record.update(status='ready_for_integration', head=new_head, validated_main=current,
                           refreshed_review=str(review_path), waiting=None)

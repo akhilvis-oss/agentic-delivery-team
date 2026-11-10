@@ -56,7 +56,7 @@ The [combined setup guide](docs/v04-lifecycle-digest.md) describes separate bot 
 
 ## Optional v0.5 agent pool
 
-The [agent pool](docs/agent-pool.md) runs approved, non-conflicting stories concurrently in isolated worktrees, with cross-slot fresh review, owner-set budgets and post-merge revalidation. Pool mode accepts any command-line agent satisfying the runner contract; pool and lead-and-team modes are [live-tested with two Codex slots](docs/agent-pool-live-trial.md). Setup stays private and opt-in. Lifecycle-managed post-merge refresh has a [known pre-launch blocker](docs/agent-pool.md).
+The [agent pool](docs/agent-pool.md) runs approved, non-conflicting stories concurrently in isolated worktrees, with cross-slot fresh review, owner-set budgets and post-merge revalidation. Pool mode accepts any command-line agent satisfying the runner contract; pool and lead-and-team modes are [live-tested with two Codex slots](docs/agent-pool-live-trial.md). Setup stays private and opt-in. Lifecycle-managed refresh is covered by real-policy integration regressions; see the [setup and limits](docs/agent-pool.md).
 
 ## Using this repository
 

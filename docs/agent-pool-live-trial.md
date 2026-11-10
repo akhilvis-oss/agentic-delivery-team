@@ -1,6 +1,6 @@
 # Agent-pool live trial: 10 November 2026
 
-PASS on the issue #56 working source, based on main `99d43080a6dbb208ea121837523f70f52a988d27` (includes #51). The runtime source fingerprints below bind the evidence to the implementation; the source was not changed during this trial. Lifecycle enqueue-only and digest integration are covered by synthetic tests, not this local CLI trial.
+PASS on the historical issue #56 trial source (runtime corresponding to PR #58 head `98f8cd9fc223dc92adb7404cac2aab2d4903c60d`), based on main `99d43080a6dbb208ea121837523f70f52a988d27` (includes #51). The runtime source fingerprints below bind the evidence to the implementation; the source was not changed during this trial. Lifecycle enqueue-only and digest integration are covered by synthetic tests, not this local CLI trial.
 
 A new local-only Git repository, four trivial approved tasks and two isolated Codex homes were used. No GitHub repository, issue, PR or service was created for the trial. All phases started fresh with Codex CLI `0.164.0-alpha.11.1`; reviewers used the configured read-only flags. Authentication-only copies were opaque; no session files were read.
 
@@ -24,7 +24,7 @@ Retained sanitized evidence includes job JSON, fixed receipts, phase times, budg
 
 ## Usage and limits
 
-Independent review subsequently reproduced a queued lifecycle-admission blocker after a clean main update: invalidation publishes `blocked` and prevents the refreshed job from starting. This standalone trial does not cover that path or establish full AC-6 completion. Deployment remains blocked pending the owner decision.
+Independent review subsequently reproduced a queued lifecycle-admission blocker after a clean main update. The owner authorized one additional correction round: invalidation is now local-only, normal admission is retained, and an actual new-head review is published only after tests, fresh review and renewed admission pass. Ten additional real-policy integration regressions cover queued and completed refresh plus revocations. That correction is synthetic-test evidence, not a rerun of this historical CLI trial. The original runtime fingerprints below are deliberately retained and do not describe the later corrected pool source.
 
 All nine phases reported unavailable usage; reservations were retained rather than reporting zero cost. Budget used was slot-0: 25/100 owner units (5 unknown phases), slot-1: 20/100 owner units (4 unknown phases). This is an owner-set allowance estimate, not provider-credit or billing evidence. Live quota exhaustion, conflicts and outages were not induced; their failure/recovery paths are covered by synthetic tests. This local trial does not establish other-vendor compatibility or a required GitHub integration gate.
 

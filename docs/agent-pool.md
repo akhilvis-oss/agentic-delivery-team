@@ -8,7 +8,7 @@ some stories, delegates others, reviews delegated work, and receives independent
 review from another slot for its own work. Pool and lead-and-team were [live-tested with two Codex slots](agent-pool-live-trial.md);
 other vendors are supported by configuration, not a compatibility claim.
 
-**Known pre-launch blocker:** independent review found that a queued lifecycle-managed job refreshed after main advances publishes `blocked`, which prevents fresh admission. Standalone pool trials pass, but the lifecycle refresh path is not ready to deploy. The owner decision is pending under the two-round correction policy.
+**Lifecycle refresh:** after an owner-authorized correction round, main changes invalidate integration evidence locally without publishing a false execution failure. The existing lifecycle admission guard still runs before rebasing queued work, immediately before refreshed review and before publishing its result. Real-policy integration tests cover queued replacements, repeated completed refreshes and revoked admission. This conditional path was tested with a synthetic GitHub transport, not live App credentials.
 
 ## Private setup
 
@@ -116,8 +116,7 @@ and blocks for the owner: no resolution, reset, abort, force-push or dirty-workt
 discard is automatic. Test failure, branch drift, unavailable reviewers, quota and
 another main change during refresh also block readiness. Integration detection uses Git ancestry; squashed or cherry-picked work needs owner reconciliation. Check main again immediately
 before integration. This is procedural evidence; it does not add a new required
-GitHub check or grant merge authority. Lifecycle receipts for the original job do not
-attest refreshed review; the operator must record the new evidence before integration.
+GitHub check or grant merge authority. After tests and a fresh review pass, the coordinator re-checks admission and current main, then updates the original job/receipt and publishes the trusted exact-head review through the existing lifecycle outbox. Intermediate invalidation stays local. A revocation prevents that publication. Check the resulting evidence before integration.
 
 ## Stand-up and recovery
 
