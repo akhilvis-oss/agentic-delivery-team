@@ -12,6 +12,26 @@ other vendors are supported by configuration, not a compatibility claim.
 
 ## Private setup
 
+**Supported setup: a dedicated OS user for the pool.** Limit that user's access to
+the project and the tool, agent, state and scratch files it needs. It must have no
+Keychain items and no GitHub credentials (including `gh` login, tokens, SSH keys or
+credential-helper entries). Keep the lifecycle service and its App private keys
+under a **different OS user**; the pool user must not be able to read that user's
+files or Keychain. Configure filesystem permissions accordingly. Separate agent
+homes and bot identities do not provide this OS-user separation. Account creation
+and permission changes are owner-operated; the pool does not provision them.
+
+Required tests execute **builder-written code**, including tests, `conftest.py` and
+imported modules, **outside the agent sandbox**, with the runner OS user's full
+access and network connectivity. This is the same trust as running an AI-written
+pull request's tests on your own machine. Approving a command such as `pytest`
+does not approve or constrain all the code it loads. A filtered environment and a
+disposable copy do not prevent access to files, credentials or Keychain items that
+the runner user can read, including through `/usr/bin/security`, or network use.
+Source-integrity checks detect changes after execution; they cannot undo disclosure
+or other host/network effects. An optional test sandbox is tracked in [#73](https://github.com/akhilvis-oss/agentic-delivery-team/issues/73)
+and is not provided by this change. See also [Security](../SECURITY.md#using-the-kit-safely).
+
 Copy `runner/pool.example.json` outside every repository and worktree. Keep its
 directory 0700 and files 0600. Fill in placeholders locally. It contains commands,
 agent homes and budgets and must never be committed. Existing standalone runner
@@ -118,7 +138,8 @@ include the exact head, argv, exit status, timestamps, output hash/tail and repo
 counts. Unrecognized counts remain unavailable. Failed required tests cannot become
 integration readiness through a reviewer PASS.
 
-Tests run under a filtered environment without agent credentials or user Git config.
+Tests receive a filtered environment that omits agent credentials and user Git
+configuration variables; this does not restrict filesystem, Keychain or network access.
 The timeout defaults to the job phase timeout (1,800 seconds); optional pool keys
 `verification_timeout_seconds` (1–3,600) and `verification_scratch_dir` configure it.
 By default scratch is created under each private runner state directory. An explicit
@@ -126,8 +147,9 @@ scratch directory must already exist, be owned by the current user, have mode 07
 and be outside every registered worktree and agent home. Unavailable scratch, inability
 to launch tests, cancellation, timeout or failed cleanup returns `blocked`, without
 launching the reviewer. See [runner verification and recovery](task-runner.md#runner-owned-required-tests).
-These owner-approved commands execute trusted project code on the host; a disposable
-copy is not an OS sandbox. Never give test commands credentials. A rebase conflict is left intact
+These commands execute builder-written code with the runner user's access outside
+the agent sandbox. Use the dedicated OS-user setup above; the copy is not an OS
+sandbox. Never give test commands credentials. A rebase conflict is left intact
 and blocks for the owner: no resolution, reset, abort, force-push or dirty-worktree
 discard is automatic. Test failure, branch drift, unavailable reviewers, quota and
 another main change during refresh also block readiness. Integration detection uses Git ancestry; squashed or cherry-picked work needs owner reconciliation. Check main again immediately

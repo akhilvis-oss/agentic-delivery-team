@@ -199,12 +199,21 @@ seconds per command) and cleanup failure yield `blocked`. The runner stops its o
 process group and cleans scratch after each attempt. Interrupted attempts remain
 recorded and require owner reconciliation; they are never silently replayed.
 
-These are owner-approved tests running on the host, **not an OS security sandbox**.
-Test code can use absolute paths or other host resources; review commands before
-authorizing them. The runner snapshots actual source bytes/types/modes and relevant Git index, HEAD
+Required tests execute **builder-written code**, including tests, `conftest.py` and
+imported modules, **outside the agent sandbox**, with the runner OS user's full
+access and network. This is the same trust as running an AI-written pull request's
+tests on your own machine. Approving `pytest` does not constrain the code it loads.
+Environment filtering and disposable copies do not prevent access to files or
+Keychain items readable by that user (including through `/usr/bin/security`), or
+network use. The supported pool setup uses a dedicated OS user with no Keychain
+items or GitHub credentials; the lifecycle service's App keys stay under a different
+user inaccessible to the pool user. See [pool setup](agent-pool.md#private-setup).
+An optional test sandbox is [follow-up #73](https://github.com/akhilvis-oss/agentic-delivery-team/issues/73), not part of this change.
+The runner snapshots actual source bytes/types/modes and relevant Git index, HEAD
 and configuration before and after tests, without trusting index flags or Git diff.
 Unrelated branch refs can advance concurrently. A change blocks without resetting or hiding it. This protects normal fixture/cache
 writes by isolation and detects checkout drift, rather than containing hostile code.
+It cannot undo disclosure or other host/network effects.
 
 Private job JSON and local receipts contain `verification_runs`: head, round, command
 set hash, timestamps, per-command argv, status/exit code, output hash and bounded output
