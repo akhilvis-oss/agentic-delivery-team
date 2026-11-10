@@ -10,7 +10,7 @@ import pytest
 
 from digest import standup
 from lifecycle import core, service
-from test_lifecycle import Hub, ROOT, policy
+from test_lifecycle import Client, Hub, ROOT, policy
 
 
 class Alerts:
@@ -199,6 +199,81 @@ def test_digest_heartbeat_fact(tmp_path):
         dt.datetime.fromtimestamp(280, dt.timezone.utc),
     )
     assert any("Service last polled 3 minutes ago" in line for line in sections[4])
+
+
+def observe(cfg, reader):
+    if reader == "status":
+        return service.status(cfg, clock=lambda: 280)
+    if reader == "heartbeat":
+        return service.heartbeat(cfg)
+    return standup.collect(
+        dict(lifecycle=cfg, runner_state_dirs=[]),
+        Hub(cfg).client(),
+        dt.datetime.fromtimestamp(0, dt.timezone.utc),
+        dt.datetime.fromtimestamp(280, dt.timezone.utc),
+    )
+
+
+@pytest.mark.parametrize("reader", ["status", "heartbeat", "digest"])
+@pytest.mark.parametrize("mismatch", ["repository", "actors", "identity_roles"])
+def test_observation_rejects_foreign_state_without_reading_it_or_writing(
+    tmp_path, monkeypatch, reader, mismatch
+):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    root = Path(cfg["state_dir"])
+    beat(cfg, 100)
+    core.save(root / "claims/a.json", dict(issue=7, job="a", stage="suspended"))
+    core.save(
+        root / "jobs/a/runner-state/tasks/a.json",
+        dict(id="a", status="interrupted", github_number=7),
+    )
+    foreign = dict(cfg)
+    if mismatch == "repository":
+        foreign["repository"] = "example/other"
+    elif mismatch == "actors":
+        foreign["actors"] = cfg["actors"] | {"runner": "other-runner-fixture"}
+        foreign["identity_roles"] = dict(cfg["identity_roles"])
+        foreign["identity_roles"]["other-runner-fixture"] = foreign[
+            "identity_roles"
+        ].pop(cfg["actors"]["runner"])
+    else:
+        foreign["identity_roles"] = cfg["identity_roles"] | {
+            "other-runner-fixture": ["runner"]
+        }
+    before = {
+        p: (p.read_bytes() if p.is_file() else None, p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in [root, *root.rglob("*")]
+    }
+    read = core.read
+
+    def identity_only(path):
+        assert Path(path) == root / "identity.json"
+        return read(path)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("foreign state was consumed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core, "read", identity_only)
+        patch.setattr(service, "serving", forbidden)
+        patch.setattr(service, "jobs", forbidden)
+        patch.setattr(Client, "pages", forbidden)
+        with pytest.raises(ValueError, match="another repository or actor configuration"):
+            observe(foreign, reader)
+    assert before == {
+        p: (p.read_bytes() if p.is_file() else None, p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in [root, *root.rglob("*")]
+    }
+    # Correcting the configuration restores observation without rebinding state.
+    assert observe(cfg, reader) is not None
+
+
+@pytest.mark.parametrize("reader", ["status", "heartbeat", "digest"])
+def test_observation_without_state_does_not_initialize_it(tmp_path, reader):
+    cfg = policy(tmp_path)
+    observe(cfg, reader)
+    assert not Path(cfg["state_dir"]).exists()
 
 
 @pytest.mark.parametrize("threshold", [True, 0, -1, 59, "120"])

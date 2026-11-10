@@ -395,6 +395,7 @@ def jobs(cfg):
 
 def heartbeat(cfg):
     """Read only; missing state must remain missing."""
+    core.validate_state(cfg)
     path = Path(cfg["state_dir"]) / "heartbeat.json"
     return core.read(path).get("last_poll") if path.exists() else None
 

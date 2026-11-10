@@ -649,13 +649,26 @@ class GitHub:
         )
 
 
-def bind_state(cfg):
-    root = private(cfg["state_dir"])
-    identity = {
+def state_identity(cfg):
+    return {
         "repository": cfg["repository"],
         "actors": cfg["actors"],
         "identity_roles": cfg["identity_roles"],
     }
+
+
+def validate_state(cfg):
+    """Check an existing ownership binding without initializing or modifying state."""
+    path = Path(cfg["state_dir"]) / "identity.json"
+    if path.exists() and read(path) != state_identity(cfg):
+        raise ValueError(
+            "Private state belongs to another repository or actor configuration"
+        )
+
+
+def bind_state(cfg):
+    root = private(cfg["state_dir"])
+    identity = state_identity(cfg)
     path = root / "identity.json"
     create(path, identity)
     if read(path) != identity:
