@@ -34,6 +34,7 @@ Read `README.md` and `docs/review-categories.md` before starting a task.
 ## Review
 - The Maker never reviews their own work. An independent Checker (a separate agent or session) reviews control-critical and domain-critical PRs against the original issue and the exact head commit, and records PASS, CHANGES REQUIRED or BLOCKED.
 - At most two correction rounds; then escalate unresolved findings to the owner. Continue other independent work meanwhile.
+- **Every review finding becomes a test.** A fix for a P0 or P1 finding includes a test that fails without the fix and passes with it, so the runner checks that lesson on every later story. If a test isn't possible, say why in the PR.
 - A passing gate or an AI review is evidence, not approval on its own. The owner's approval is either their merge or the advance permission in **Merge policy**.
 
 ## Merge policy (owner's advance permission, 2026-11-09)

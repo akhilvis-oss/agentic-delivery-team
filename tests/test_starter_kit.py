@@ -118,3 +118,8 @@ def test_review_policy_works_with_a_single_model():
         assert "only if one is configured" in text or "only if a second reviewer" in text, path
         assert "Claude review PASS" not in text, path
         assert "same model" in text, path
+
+
+def test_review_findings_become_tests():
+    for path in (ROOT / "AGENTS.md", KIT / "AGENTS.md"):
+        assert "Every review finding becomes a test" in path.read_text(), path
