@@ -131,6 +131,14 @@ def reviewed(runner, config, job):
     head = job.get("head_commit")
     history = job.get("review_history", [])
     tests = job.get("verification_runs", [])
+    recorded_review = dict(history[-1]["result"]) if history else None
+    # Lifecycle policy promotes P2-only rework to acceptance. Compare the
+    # effective verdict without changing the original independent review record;
+    # every other field must still match the reviewed evidence exactly.
+    if (recorded_review and recorded_review.get("status") == "needs_changes"
+            and recorded_review.get("findings")
+            and all(f["severity"] == "P2" for f in recorded_review["findings"])):
+        recorded_review["status"] = "ready_for_integration"
     if (job["assignment"]["kind"] != "work" or not runner.SHA.fullmatch(head or "")
             or not job["assignment"].get("lifecycle")
             or job["assignment"]["lifecycle"]["issue"] != job.get("github_number")
@@ -138,7 +146,7 @@ def reviewed(runner, config, job):
             or history[-1].get("head") != head
             or history[-1].get("session") != job.get("review_session")
             or not job.get("review_session")
-            or history[-1]["result"] != job.get("review")
+            or recorded_review != job.get("review")
             or job["review"]["status"] != "ready_for_integration"
             or any(f["severity"] in {"P0", "P1"} for f in job["review"]["findings"])
             or not tests or tests[-1]["head"] != head or tests[-1]["status"] != "passed"

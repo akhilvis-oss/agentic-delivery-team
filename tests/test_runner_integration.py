@@ -162,6 +162,55 @@ def test_create_pr_and_checker_bound_to_exact_head(delivery):
     assert runner.read(path)["integration"]["stage"] == "auto_merge_enabled"
 
 
+def test_p2_only_promoted_review_publishes_with_original_history(delivery):
+    _, path, job, client = delivery
+    job["review"]["findings"] = [
+        {"severity": "P2", "path": "delivery.txt", "detail": "Minor follow-up."}]
+    recorded = deepcopy(job["review"])
+    recorded["status"] = "needs_changes"
+    job["review_history"][-1]["result"] = recorded
+    history = deepcopy(job["review_history"])
+
+    advance(delivery)
+
+    assert job["integration"]["stage"] == "auto_merge_enabled"
+    assert client.pushed == [job["head_commit"]]
+    assert client.reviews[0]["body"].startswith("Checker: PASS\n")
+    assert client.reviews[0]["commit_id"] == history[-1]["head"]
+    assert job["review_history"] == history
+    assert runner.read(path)["review_history"] == history
+
+
+@pytest.mark.parametrize("change", ["P0", "P1", "empty", "blocked", "detail", "head", "session"])
+def test_review_promotion_rejects_blockers_and_mismatched_evidence(delivery, change):
+    _, _, job, client = delivery
+    job["review"]["findings"] = [
+        {"severity": "P2", "path": "delivery.txt", "detail": "Minor follow-up."}]
+    recorded = deepcopy(job["review"])
+    recorded["status"] = "needs_changes"
+    job["review_history"][-1]["result"] = recorded
+    if change in {"P0", "P1"}:
+        recorded["findings"].append(
+            {"severity": change, "path": "delivery.txt", "detail": "Requires rework."})
+        job["review"]["findings"] = deepcopy(recorded["findings"])
+    elif change == "empty":
+        recorded["findings"] = []
+        job["review"]["findings"] = []
+    elif change == "blocked":
+        recorded["status"] = "blocked"
+    elif change == "detail":
+        job["review"]["findings"][0]["detail"] = "Changed after review."
+    elif change == "head":
+        job["review_history"][-1]["head"] = "a" * 40
+    else:
+        job["review_history"][-1]["session"] = "other-session"
+
+    advance(delivery)
+
+    assert job["status"] == "needs_owner"
+    assert not client.pushed and not client.reviews
+
+
 @pytest.mark.parametrize("tier", integration.TIERS)
 def test_merge_categories(delivery, tier):
     cfg, _, job, client = delivery
