@@ -118,3 +118,15 @@ def test_review_policy_works_with_a_single_model():
         assert "only if one is configured" in text or "only if a second reviewer" in text, path
         assert "Claude review PASS" not in text, path
         assert "same model" in text, path
+
+
+def test_kit_manifest_template_lists_known_features():
+    import json
+    manifest = json.loads((ROOT / "templates/agentic-kit.example.json").read_text())
+    assert manifest["kit"] == "agentic-delivery-team"
+    assert manifest["version"].startswith("v")
+    assert set(manifest["features"]) == {"review_gate", "product_files", "runner", "pool", "lifecycle", "standup"}
+    assert all(isinstance(v, bool) for v in manifest["features"].values())
+    doc = (ROOT / "docs/versions-and-features.md").read_text()
+    for feature in manifest["features"]:
+        assert f"`{feature}`" in doc
