@@ -246,6 +246,10 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             if not issue:
                 continue
             if claim["stage"] == "finished":
+                if run_jobs and claim.get("config"):
+                    completed_config = runner.load_config(claim["config"])
+                    if runner.integration_api().options(completed_config):
+                        runner.run_once(completed_config, task_id=claim["job"])
                 canonical, _ = core.canonical_state(cfg, client.events(claim["issue"]))
                 if canonical == core.state(issue):
                     cleanup(cfg, claim, issue)

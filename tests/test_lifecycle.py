@@ -196,6 +196,15 @@ class Client:
 
     def request(self, method, path, data=None):
         self.hub.calls.append((method, path, copy.deepcopy(data)))
+        if method == "DELETE" and path.endswith("/labels/status%3Adraft"):
+            if self.hub.fail_write:
+                raise core.Unavailable("label removal failed")
+            number = int(path.split("/")[2])
+            self.hub.issues[number]["labels"] = [
+                x for x in self.hub.issues[number]["labels"]
+                if x["name"] != "status:draft"
+            ]
+            return None
         if method == "GET" and path.startswith("/pulls/"):
             return copy.deepcopy(self.hub.prs[int(path.split("/")[2])])
         if method == "GET" and "/check-runs" in path:
@@ -361,6 +370,180 @@ def test_approval_attestation_uses_owner_event_and_scope_snapshot(tmp_path):
     h.event(1, "approved", "owner")  # same-second ambiguity is never guessed
     with pytest.raises(core.Unavailable, match="ambiguous"):
         core.attest_approval(cfg, client, event)
+
+
+def approval_picker_event(cfg, h, *, actor="owner", extra="draft"):
+    issue = h.issue(state="draft")
+    h.event(1, "approved", actor)
+    issue["labels"] += [{"name": "status:" + extra}, {"name": "story"}]
+    return dict(
+        action="labeled",
+        label={"name": "status:approved"},
+        sender={"login": cfg["actors"].get(actor, actor)},
+        issue=copy.deepcopy(issue),
+    )
+
+
+def test_owner_picker_approval_removes_draft_and_binds_event_body(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    # An edit after the event cannot become approved through label cleanup.
+    h.issues[1]["body"] = "Changed after the owner approved."
+    client = h.client("workflow")
+    core.attest_approval(cfg, client, event)
+    proof, = core.records(cfg, client.comments(1), 1)
+    assert proof["event"] == h.events_by_issue[1][0]["id"]
+    assert proof["approved_by"] == cfg["actors"]["owner"]
+    assert proof["scope_sha256"] == hashlib.sha256(event["issue"]["body"].encode()).hexdigest()
+    assert proof["scope_sha256"] != hashlib.sha256(h.issues[1]["body"].encode()).hexdigest()
+    assert client.issue(1)["labels"] == [{"name": "status:approved"}, {"name": "story"}]
+    core.attest_approval(cfg, client, event)  # retry after normalization is idempotent
+    assert len(client.comments(1)) == 1
+    assert sum(call[0] == "DELETE" for call in h.calls) == 1
+    assert not core.guard_issue(cfg, client, 1)
+
+
+@pytest.mark.parametrize("guard_between_events", [False, True])
+def test_failed_draft_cleanup_recovers_with_fresh_owner_approval(tmp_path, guard_between_events):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    failed_event = approval_picker_event(cfg, h)
+    client = h.client("workflow")
+    h.fail_write = "before"
+    with pytest.raises(core.Unavailable, match="label removal failed"):
+        core.attest_approval(cfg, client, failed_event)
+    assert core.records(cfg, client.comments(1), 1) == []
+    assert core.canonical_state(cfg, client.events(1))[0] == "approved"
+    assert {"name": "status:draft"} in client.issue(1)["labels"]
+
+    h.fail_write = None
+    # Follow the recovery guidance: remove other statuses first, then approved.
+    # Unlabeling does not reset canonical history; record those events explicitly.
+    for target in ("draft", "approved"):
+        h.issues[1]["labels"] = [
+            x for x in h.issues[1]["labels"] if x["name"] != "status:" + target
+        ]
+        h.counter += 1
+        h.events_by_issue[1].append(dict(
+            id=h.counter,
+            event="unlabeled",
+            label={"name": "status:" + target},
+            actor={"login": cfg["actors"]["owner"]},
+            created_at=WHEN,
+        ))
+        if guard_between_events:
+            core.guard_issue(cfg, client, 1)
+
+    issue = h.issues[1]
+    issue["body"] = "Revised scope for fresh owner approval."
+    issue["updated_at"] = "2026-01-02T10:01:00+00:00"
+    fresh = h.event(1, "approved")
+    fresh["created_at"] = issue["updated_at"]
+    event = dict(
+        action="labeled",
+        label={"name": "status:approved"},
+        sender={"login": cfg["actors"]["owner"]},
+        issue=copy.deepcopy(issue),
+    )
+    issue["body"] = "Unapproved edit after the fresh event."
+    core.attest_approval(cfg, client, event)
+    proof, = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert proof["event"] == fresh["id"] != h.events_by_issue[1][0]["id"]
+    assert proof["approved_by"] == cfg["actors"]["owner"]
+    assert proof["scope_sha256"] == hashlib.sha256(event["issue"]["body"].encode()).hexdigest()
+    assert proof["scope_sha256"] != hashlib.sha256(issue["body"].encode()).hexdigest()
+    assert core.state(client.issue(1)) == "approved"
+    assert sum(call[0] == "DELETE" for call in h.calls) == 1
+
+
+def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
+    cfg = policy(tmp_path)
+    client = core.GitHub(cfg, "workflow", token="fake")
+    client.identity_verified = True
+    requests = []
+
+    def opened(req, timeout):
+        requests.append(req)
+        return io.BytesIO(b'[{"name":"status:approved"}]')
+
+    client.opener = SimpleNamespace(open=opened)
+    client.request("DELETE", "/issues/1/labels/status%3Adraft")
+    assert requests[0].method == "DELETE"
+    assert requests[0].full_url == (
+        "https://api.github.com/repos/example/project/issues/1/labels/status%3Adraft"
+    )
+    for path in ("/issues/1/labels/status%3Aapproved", "/issues/1", "/labels"):
+        with pytest.raises(ValueError, match="Only repository issue/label writes"):
+            client.request("DELETE", path)
+    assert len(requests) == 1
+
+
+def test_picker_cleanup_preserves_concurrent_status_and_does_not_attest(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    client = h.client("workflow")
+    request = client.request
+
+    def concurrent_request(method, path, data=None):
+        if method == "DELETE":
+            h.issues[1]["labels"].append({"name": "status:blocked"})
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", concurrent_request)
+    with pytest.raises(core.Unavailable, match="valid status labels"):
+        core.attest_approval(cfg, client, event)
+    assert {"name": "status:blocked"} in client.issue(1)["labels"]
+    assert core.records(cfg, client.comments(1), 1) == []
+
+
+@pytest.mark.parametrize("actor,extra", [
+    ("attacker-fixture", "draft"),
+    ("runner", "draft"),
+    ("owner", "blocked"),
+    ("owner", "unknown"),
+])
+def test_picker_invalid_approval_fails_closed_with_recovery_comment(tmp_path, actor, extra):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h, actor=actor, extra=extra)
+    client = h.client("workflow")
+    with pytest.raises(core.Unavailable, match="valid status labels"):
+        core.attest_approval(cfg, client, event)
+    assert core.records(cfg, client.comments(1), 1) == []
+    assert "Only the configured owner" in client.comments(1)[0]["body"]
+    assert "remove status:approved" in client.comments(1)[0]["body"]
+    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
+
+
+def test_picker_approval_rejects_live_label_drift(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    h.issues[1]["labels"].append({"name": "status:blocked"})
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, h.client("workflow"), event)
+    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert core.records(cfg, h.comments_by_issue[1], 1) == []
+
+
+@pytest.mark.parametrize("failure", ["removal", "ambiguous", "forbidden"])
+def test_picker_cleanup_prerequisites_fail_before_attestation(tmp_path, failure):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    if failure == "removal":
+        h.fail_write = "before"
+    elif failure == "ambiguous":
+        h.events_by_issue[1].append(copy.deepcopy(h.events_by_issue[1][0]))
+    else:
+        cfg["transitions"]["draft"].pop("approved")
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, h.client("workflow"), event)
+    assert core.records(cfg, h.comments_by_issue[1], 1) == []
+    assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
 
 
 def configured_service(tmp_path, monkeypatch):
@@ -707,7 +890,7 @@ def pr_fixture(cfg, h):
         merged=False,
         body="Closes #1",
         head={"sha": sha, "repo": {"full_name": cfg["repository"]}},
-        base={"ref": "main"},
+        base={"ref": "main", "sha": "b" * 40},
         user={"login": cfg["actors"]["owner"]},
     )
     h.prs[7] = pr
@@ -833,7 +1016,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
             id=1,
             name="review-gate",
             app={"slug": "github-actions"},
-            head_sha=pr["head"]["sha"],
+            head_sha=pr["base"]["sha"],
             details_url="https://github.com/example/project/actions/runs/90/job/91",
             status="completed",
             conclusion="success",
@@ -849,7 +1032,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
                 workflow_id=7,
                 path=".github/workflows/pr-review-gate.yml",
                 event="pull_request",
-                head_sha=pr["head"]["sha"],
+                head_sha=pr["base"]["sha"],
                 pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
             )
         return original(method, path, data)
@@ -866,7 +1049,8 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
     assert core.trusted_gate(cfg, client, pr) == "unavailable"
 
 
-def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
+@pytest.fixture
+def gate_evidence(tmp_path):
     cfg = policy(tmp_path)
     h = Hub(cfg)
     pr = pr_fixture(cfg, h)
@@ -875,7 +1059,7 @@ def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
         id=1,
         name="review-gate",
         app={"slug": "github-actions"},
-        head_sha=pr["head"]["sha"],
+        head_sha=pr["base"]["sha"],
         details_url="https://github.com/example/project/actions/runs/90/job/91",
         status="completed",
         conclusion="success",
@@ -884,23 +1068,105 @@ def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
         workflow_id=7,
         path=".github/workflows/pr-review-gate.yml",
         event="pull_request_target",
-        head_sha=pr["head"]["sha"],
+        head_sha=pr["base"]["sha"],
         pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
     )
+    checks = [check]
+    runs = {"90": run}
 
     def request(method, path, data=None):
         if "/check-runs" in path:
-            return {"total_count": 1, "check_runs": [check]}
+            assert path == f"/commits/{pr['base']['sha']}/check-runs?filter=all&per_page=100&page=1"
+            return {"total_count": len(checks), "check_runs": checks}
         if path == "/actions/workflows/pr-review-gate.yml":
             return {"id": 7, "path": run["path"]}
-        if path == "/actions/runs/90":
-            return run
+        if path.startswith("/actions/runs/"):
+            return runs[path.rsplit("/", 1)[-1]]
         raise core.Unavailable("unknown metadata")
 
     client.request = request
+    return cfg, client, pr, check, run, checks, runs
+
+
+def test_trusted_gate_binds_workflow_and_exact_head(gate_evidence):
+    cfg, client, pr, check, run, _, _ = gate_evidence
     assert core.trusted_gate(cfg, client, pr) == "pass"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "pass"
+    run["pull_requests"][0]["base"]["sha"] = "c" * 40
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
     run["head_sha"] = "c" * 40
     assert core.trusted_gate(cfg, client, pr) == "unavailable"
+
+
+@pytest.mark.parametrize("mutation", ["head", "number", "base", "check_sha", "run_sha", "event", "workflow", "app"])
+def test_base_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutation):
+    cfg, client, pr, check, run, _, _ = gate_evidence
+    binding = run["pull_requests"][0]
+    binding["base"] = {"sha": pr["base"]["sha"]}
+    if mutation in {"head", "base"}:
+        binding[mutation]["sha"] = "c" * 40
+    elif mutation == "number":
+        binding["number"] = 8
+    elif mutation == "check_sha":
+        check["head_sha"] = pr["head"]["sha"]
+    elif mutation == "run_sha":
+        run["head_sha"] = pr["head"]["sha"]
+    elif mutation == "event":
+        run["event"] = "pull_request"
+    elif mutation == "workflow":
+        run["workflow_id"] = 8
+    else:
+        check["app"]["slug"] = "other-app"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
+
+
+@pytest.mark.parametrize("status,conclusion,expected", [
+    ("completed", "success", "pass"),
+    ("completed", "failure", "fail"),
+    ("completed", "cancelled", "fail"),
+    ("in_progress", None, "pending"),
+])
+def test_base_gate_selects_latest_matching_pr_run(gate_evidence, status, conclusion, expected):
+    cfg, client, pr, check, run, checks, runs = gate_evidence
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    checks.append({**check, "id": 2, "status": status, "conclusion": conclusion,
+                   "details_url": "https://github.com/example/project/actions/runs/92/job/93"})
+    runs["92"] = copy.deepcopy(run)
+    # A newer check on the same base for a different PR must not mask this PR.
+    checks.append({**check, "id": 3,
+                   "details_url": "https://github.com/example/project/actions/runs/94/job/95"})
+    runs["94"] = copy.deepcopy(run)
+    runs["94"]["pull_requests"][0]["number"] = 8
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == expected
+
+
+@pytest.mark.parametrize("collection", ["complete", "partial", "duplicate", "drift"])
+def test_base_gate_collection_is_complete_across_pages(gate_evidence, collection):
+    cfg, client, pr, check, run, _, _ = gate_evidence
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    original = client.request
+    seen = []
+
+    def request(method, path, data=None):
+        if "/check-runs?" not in path:
+            return original(method, path, data)
+        assert path.startswith(f"/commits/{pr['base']['sha']}/check-runs?filter=all&")
+        page = int(path.rsplit("=", 1)[-1])
+        seen.append(page)
+        if page == 1:
+            # Other checks sharing the base precede this PR's gate.
+            return {"total_count": 101, "check_runs": [
+                {"id": n, "name": "unrelated"} for n in range(1, 101)]}
+        row = {**check, "id": 1 if collection == "duplicate" else 101}
+        return {"total_count": 102 if collection == "drift" else 101,
+                "check_runs": [] if collection == "partial" else [row]}
+
+    client.request = request
+    expected = "pass" if collection == "complete" else "unavailable"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == expected
+    assert seen == [1, 2]
 
 
 def test_new_owner_approval_supersedes_stale_phase_without_replaying_it(tmp_path):
@@ -1129,3 +1395,96 @@ def test_unavailable_comment_history_is_not_treated_as_unmanaged(tmp_path):
         )
     assert core.state(h.issues[1]) == "in-review"
     assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_finished_claim_polls_opted_in_delivery_without_worker_replay(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    settings = core.read(claim["config"])
+    settings["integration"] = {"enabled": True, "declared_tier": "standard"}
+    core.save(claim["config"], settings)
+    job_path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(job_path)
+    job["status"] = "ready_for_integration"
+    core.save(job_path, job)
+    calls = []
+    monkeypatch.setattr(runner.integration_api(), "advance", lambda *args: calls.append(args[3]["id"]))
+    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("must not replay agents"))
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    assert calls == [claim["job"], claim["job"]]
+
+
+def test_published_job_leaves_pr_states_to_trusted_workflow(tmp_path):
+    cfg = policy(tmp_path)
+    job = {"status": "ready_for_integration", "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "checking"}}
+    assert core.job_records(cfg, job) == []
+
+
+@pytest.mark.parametrize("stage,expected", [
+    ("created", "pr-open"), ("checking", "pr-open"),
+    ("auto_merge_enabled", "pr-open"), ("merged", "merged"),
+])
+@pytest.mark.parametrize("matched", [True, False])
+def test_reconcile_published_job_reports_workflow_state_without_writes(tmp_path, stage, expected, matched):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue(state=expected if matched else "in-review")
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": stage}}
+    before = copy.deepcopy(job)
+    assert core.reconcile(cfg, [job], h.client()) == (
+        [] if matched else [dict(issue=1, job="job", local=expected, remote="in-review")])
+    assert job == before
+    assert h.calls == []
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_reconcile_published_job_reports_unavailable_remote(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.fail_read = True
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "merged"}}
+    assert core.reconcile(cfg, [job], h.client()) == [
+        dict(issue=1, job="job", error="remote_unavailable")]
+    assert h.calls == []
+
+
+@pytest.mark.parametrize("ordering", ["event_after_handoff", "queued_before_handoff"])
+@pytest.mark.parametrize("reason", ["owner_merge_required", "gate_category_higher"])
+def test_delayed_pr_open_preserves_owner_handoff(tmp_path, ordering, reason):
+    cfg = policy(tmp_path)
+    # Exercise the installed policy, including its otherwise permitted edge.
+    cfg["transitions"] = core.read(ROOT / ".github/task-lifecycle.json")["transitions"]
+    assert core.permitted(cfg, "needs-owner", "pr-open", cfg["actors"]["workflow"])
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    workflow_cfg = {**cfg, "state_dir": str(tmp_path / "workflow-state")}
+    if ordering == "queued_before_handoff":
+        record = core.public_record(cfg, 1, "pr-7", 0, "pr-open", pr=7,
+                                    commit=pr["head"]["sha"], gate="pass")
+        core.queue(workflow_cfg, record, role="workflow")
+    job = {"id": "job", "round": 2, "status": "needs_owner",
+           "assignment": {"lifecycle": {"issue": 1, "event": 101}},
+           "integration": {"pr": 7, "stage": "owner", "reason": reason}}
+    for handoff in core.job_records(cfg, job):
+        core.queue(cfg, handoff)
+    # The workflow's separate outbox can be delayed while the runner completes
+    # the real needs-owner transition, then recovered by a fresh workflow poll.
+    core.flush(cfg, h.client())
+    assert core.state(h.issues[1]) == "needs-owner"
+    if ordering == "queued_before_handoff":
+        core.flush(workflow_cfg, h.client("workflow"))
+    for _ in range(2):
+        core.pr_event(workflow_cfg, h.client("workflow"), {"action": "opened", "pull_request": copy.deepcopy(pr)})
+        core.flush(workflow_cfg, h.client("workflow"))
+        assert core.state(h.issues[1]) == "needs-owner"
+    assert not any(call == ("label", 1, "pr-open") for call in h.calls)
