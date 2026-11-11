@@ -130,3 +130,13 @@ def test_kit_manifest_template_lists_known_features():
     doc = (ROOT / "docs/versions-and-features.md").read_text()
     for feature in manifest["features"]:
         assert f"`{feature}`" in doc
+
+
+def test_feature_table_lists_dependencies():
+    # A feature that needs another must say so, and the example must respect it (#87 review).
+    text = (ROOT / "docs/versions-and-features.md").read_text()
+    rows = {line.split("|")[1].strip(" `"): line.split("|")[4] for line in text.splitlines()
+            if line.startswith("| `")}
+    assert "`runner`" in rows["pool"] and "`runner`" in rows["lifecycle"]
+    assert "`lifecycle`" in rows["standup"]
+    assert "except the lifecycle and stand-up" in text

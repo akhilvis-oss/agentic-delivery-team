@@ -17,7 +17,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 }
 ```
 
-"Where is this project?" then has a one-line answer, for example: *v0.5.3, everything on except the lifecycle.*
+"Where is this project?" then has a one-line answer, for example: *v0.5.3, everything on except the lifecycle and stand-up.*
 
 ## Features
 
@@ -27,7 +27,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 | `product_files` | `PRODUCT_AGENT.md`, `docs/product/`, story template, troubleshooting playbook | 1 | Copy from the starter kit |
 | `runner` | Task runner: delegated builder, fresh reviewer, runner-made commit, runner-run tests | 2 | Private runner install and config on your machine |
 | `pool` | Several agent slots in parallel with cross-review | 2 | `runner`, plus a private pool config |
-| `lifecycle` | Status labels, guard workflow, approval by label, automatic dispatch | 3 | Guard workflow, public policy file, labels, bot Apps, the service on your machine |
+| `lifecycle` | Status labels, guard workflow, approval by label, automatic dispatch | 3 | `runner`, plus the guard workflow, public policy file, labels, bot Apps and the service on your machine |
 | `standup` | Daily stand-up issue | 3 | `lifecycle`, plus a stand-up config |
 
 ## Upgrading
