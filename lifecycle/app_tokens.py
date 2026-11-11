@@ -36,6 +36,14 @@ PERMISSIONS = {
     },
 }
 
+INTEGRATION_PERMISSIONS = {
+    "issues": "write",
+    "contents": "write",
+    "pull_requests": "write",
+    "checks": "read",
+    "actions": "read",
+}
+
 
 def validate(settings, role):
     if (
@@ -177,8 +185,10 @@ def request(opener, credential, method, path, data=None):
         ) from None
 
 
-def mint(cfg, role, *, comments_only=False, at=None, opener=None):
+def mint(cfg, role, *, comments_only=False, integration_enabled=False, at=None, opener=None):
     """Return a token and expiry; never a printable credential receipt/cache."""
+    if type(integration_enabled) is not bool or (integration_enabled and role != "runner"):
+        raise AuthenticationError("Invalid integration authentication opt-in")
     at = time.time() if at is None else at
     settings = cfg["app_auth"][role]
     validate(settings, role)
@@ -203,7 +213,10 @@ def mint(cfg, role, *, comments_only=False, at=None, opener=None):
             or installation.get("suspended_at") is not None
         ):
             raise AuthenticationError("Wrong or suspended repository installation")
-        permissions = {"issues": "write"} if comments_only else PERMISSIONS[role]
+        permissions = (
+            {"issues": "write"} if comments_only else
+            dict(INTEGRATION_PERMISSIONS) if integration_enabled else dict(PERMISSIONS[role])
+        )
         value = request(
             opener,
             credential,

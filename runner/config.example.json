@@ -11,6 +11,9 @@
     "enabled": false,
     "repository": "<OWNER>/<REPOSITORY>"
   },
+  "integration": {
+    "enabled": false
+  },
   "commit_identity": {
     "name": "<RUNNER_AUTHOR_NAME>",
     "email": "<RUNNER_EMAIL>"
