@@ -10,7 +10,7 @@ You get one working agreement for every agent, and pull requests reviewed in pro
 
 ### Add the rules (5 minutes)
 
-1. Copy the files listed in the [starter kit](../starter-kit/README.md) into your repository.
+1. Copy the files listed in the [starter kit](../starter-kit/README.md) into your repository, and copy [`templates/agentic-kit.example.json`](../templates/agentic-kit.example.json) to `.github/agentic-kit.json`. It records your kit version and which features are on; see [versions and feature switches](versions-and-features.md).
 2. In `AGENTS.md`, replace every `<PLACEHOLDER>`: project name, repository, build and test commands, and the must-ask items for your domain.
 3. Paste the rules from `PRODUCT_AGENT.md` into the instructions of the chat you use to plan the product. To plan with Claude Code instead, see [Claude Code as the product agent](product-agent-claude-code.md).
 4. Write a first version of `docs/product/vision.md`. A few lines is enough; you will refine it with the product agent.
