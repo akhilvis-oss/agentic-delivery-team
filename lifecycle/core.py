@@ -1081,11 +1081,15 @@ def guard_issue(cfg, client, number):
 def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
     """Unknown/partial/stale/name-colliding checks are never a passing gate."""
     try:
+        # pull_request_target executes on the base commit, not the PR head.
+        # Several PRs share that commit: collect all checks, then bind each run
+        # separately to the PR number and reviewed head (and base for delivery).
+        execution_sha = pr["base"]["sha"]
         runs, total, ids = [], None, set()
         for page in range(1, 1001):
             result = client.request(
                 "GET",
-                f"/commits/{pr['head']['sha']}/check-runs?per_page=100&page={page}",
+                f"/commits/{execution_sha}/check-runs?filter=all&per_page=100&page={page}",
             )
             if total is None:
                 total = result["total_count"]
@@ -1112,7 +1116,7 @@ def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
             if (
                 check["name"] != "review-gate"
                 or check.get("app", {}).get("slug") != "github-actions"
-                or check.get("head_sha") != pr["head"]["sha"]
+                or check.get("head_sha") != execution_sha
             ):
                 continue
             details = check.get("details_url", "")
@@ -1127,7 +1131,7 @@ def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
                 run["workflow_id"] != workflow["id"]
                 or run["event"] != "pull_request_target"
                 or run.get("path") != path
-                or run["head_sha"] != pr["head"]["sha"]
+                or run["head_sha"] != execution_sha
                 or not any(
                     p["number"] == pr["number"]
                     and p["head"]["sha"] == pr["head"]["sha"]

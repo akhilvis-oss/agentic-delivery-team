@@ -95,6 +95,21 @@ class Client:
             return {"content": base64.b64encode(json.dumps(rules).encode()).decode()}
         if path.startswith("/pulls/9/files"):
             return [{"id": 1, "filename": "delivery.txt", "status": "added"}]
+        if path.startswith(f"/commits/{self.job['base_commit']}/check-runs?"):
+            assert "filter=all" in path
+            checks = [] if self.gate_state == "unavailable" else [{
+                "id": 11, "name": "review-gate", "head_sha": self.job["base_commit"],
+                "status": "in_progress" if self.gate_state == "pending" else "completed",
+                "conclusion": "success" if self.gate_state == "pass" else "failure",
+                "app": {"slug": "github-actions"},
+                "details_url": "https://github.com/example/kit/actions/runs/7/job/8"}]
+            return {"total_count": len(checks), "check_runs": checks}
+        if path == "/actions/workflows/pr-review-gate.yml":
+            return {"id": 7, "path": ".github/workflows/pr-review-gate.yml"}
+        if path == "/actions/runs/7":
+            return {"workflow_id": 7, "path": ".github/workflows/pr-review-gate.yml",
+                    "event": "pull_request_target", "head_sha": self.job["base_commit"],
+                    "pull_requests": [deepcopy(self.pr)]}
         if "/check-runs?" in path:
             return {"total_count": 1, "check_runs": [{
                 "id": 10, "name": "checks", "head_sha": self.job["head_commit"],
@@ -132,7 +147,6 @@ def delivery(setup, monkeypatch):
     monkeypatch.setattr(core, "sync_job", lambda *args: None)
     monkeypatch.setattr(core, "admit_phase", lambda *args: True)
     client = Client(job, config)
-    monkeypatch.setattr(core, "trusted_gate", lambda *args, **kwargs: client.gate_state)
     runner.save_job(config, path, job)
     return config, path, job, client
 
@@ -265,14 +279,19 @@ def test_each_publication_failure_stops_safely(delivery, phase):
     assert len(client.writes) == writes
 
 
-def test_pending_checks_poll_without_replaying_agents_or_writes(delivery):
+@pytest.mark.parametrize("which", ["gate", "checks"])
+def test_pending_checks_poll_without_replaying_agents_or_writes(delivery, which):
     _, _, job, client = delivery
-    client.check_state = "pending"
+    if which == "gate":
+        client.gate_state = "pending"
+    else:
+        client.check_state = "pending"
     advance(delivery)
     assert job["integration"]["stage"] == "checking"
     assert job["status"] == "ready_for_integration"
     writes = len(client.writes)
     client.check_state = "success"
+    client.gate_state = "pass"
     advance(delivery)
     assert len(client.writes) == writes + 1
     assert job["integration"]["stage"] == "auto_merge_enabled"
@@ -406,14 +425,16 @@ def test_active_approved_checker_pass_can_authorize_merge(delivery):
     assert job["integration"]["stage"] == "auto_merge_enabled"
 
 
-@pytest.mark.parametrize("change", ["negative_verdict", "dismissed_pass"])
+@pytest.mark.parametrize("change", ["negative_verdict", "dismissed_pass", "gate_failure"])
 def test_direct_merge_rechecks_review_validity_after_clean_status_rejection(delivery, monkeypatch, change):
     _, _, job, client = delivery
     def reject_auto_merge(pr):
         if change == "negative_verdict":
             client.reviews.append({"state": "COMMENTED", "body": "Checker: BLOCKED"})
-        else:
+        elif change == "dismissed_pass":
             client.reviews[0]["state"] = "DISMISSED"
+        else:
+            client.gate_state = "fail"
         return False
     monkeypatch.setattr(client, "enable_auto_merge", reject_auto_merge)
     advance(delivery)
