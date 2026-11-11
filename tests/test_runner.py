@@ -886,3 +886,18 @@ print('anything, including unknown records and malformed JSON: {')
     assert len(final['runner_commits']) == 2
     assert 'worker_thread_id' not in final
     assert not any(key.startswith('CODEX') for key in runner.environment(cfg))
+
+
+@pytest.mark.parametrize('key', ['command', 'version_command'])
+@pytest.mark.parametrize('mode', ['missing', 'nonexecutable'])
+def test_agent_programs_preflight_before_version_probe(setup, monkeypatch, tmp_path, key, mode):
+    cfg, _, _, _ = setup
+    cfg['agent'] = agent_config(sys.executable)
+    tool = tmp_path / 'unavailable tool'
+    if mode == 'nonexecutable':
+        tool.write_text('not executable')
+        tool.chmod(0o600)
+    cfg['agent'][key][0] = str(tool)
+    monkeypatch.setattr(runner.subprocess, 'run', lambda *a, **kw: pytest.fail('no version probe'))
+    with pytest.raises(runner.Blocked, match=key + ' program missing or not executable'):
+        REAL_CHECK_CLI(cfg)

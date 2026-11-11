@@ -535,3 +535,22 @@ def test_disabled_model_never_calls_or_reserves_budget(tmp_path, model_setting):
     assert model.calls == 0
     assert "Model disabled; factual sections follow." in posted(h)[0]["body"]
     assert not (Path(cfg["state_dir"]) / "budget.json").exists()
+
+
+@pytest.mark.parametrize('tampered', [False, True])
+def test_blocked_reason_rendering_is_path_free(tmp_path, tampered):
+    from runner.task_runner import block_reason
+    cfg = configuration(tmp_path)
+    h = Hub(cfg['lifecycle'])
+    h.issue()
+    reason = block_reason('worker_reported_blocked')
+    if tampered:
+        reason['reason'] = '/private/secret/tool failed; arbitrary worker text'
+    job = dict(id='blocked-job', status='blocked', updated_at=AT.isoformat(),
+               base_commit='b' * 40, github_number=1, assignment={}, blocked_reason=reason)
+    core.save(Path(cfg['runner_state_dirs'][0]) / 'tasks/blocked-job.json', job)
+    sections = standup.collect(cfg, h.client('product'), AT - dt.timedelta(days=1), AT)
+    body = '\n'.join(line for section in sections for line in section)
+    assert 'local job needs attention' in body
+    assert ('prerequisite_failed' if tampered else 'worker_reported_blocked') in body
+    assert '/private/secret' not in body and 'arbitrary worker text' not in body

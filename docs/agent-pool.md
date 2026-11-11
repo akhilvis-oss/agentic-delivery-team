@@ -158,6 +158,15 @@ GitHub check or grant merge authority. After tests and a fresh review pass, the 
 
 ## Stand-up and recovery
 
+Before worker dispatch, the runner preflights each configured verification
+program without executing its tests. Pool `test_commands` are private JSON argv
+arrays supplied to workers as trusted verification configuration, including the
+exact executable; a program path containing a space stays a single argument.
+See [command preflight and blocked-worker recovery](task-runner.md#safety-recovery-and-limits).
+The stand-up shows safe blocked reason codes and fixed explanations, never worker
+prose or configured paths. A blocked worker's dirty files and receipts are
+preserved; further work needs explicit owner authorization and a new assignment.
+
 Add absolute private pool config paths to the digest's optional `pool_configs` list.
 The factual stand-up includes each safe slot ID, busy/idle/cooldown state, current
 story, budget used and unknown usage count, plus fixed waiting reasons for blocked

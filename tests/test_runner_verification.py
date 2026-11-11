@@ -303,3 +303,89 @@ def test_unrelated_branch_advance_does_not_invalidate_source_boundary(setup):
               ",'update-ref','refs/heads/peer'," + repr(job['head_commit']) + "], check=True)")
     assert runner.verify_required_tests(cfg, state, path, job)['status'] == 'passed'
     assert runner.git(cfg, 'rev-parse', 'peer') == job['head_commit']
+
+
+@pytest.mark.parametrize('mode', ['missing', 'nonexecutable', 'shell_string'])
+def test_command_preflight_blocks_before_worker(setup, monkeypatch, tmp_path, mode):
+    cfg, state, path, _ = setup
+    tool = tmp_path / 'private tool'
+    if mode == 'nonexecutable':
+        tool.write_text('not executable')
+        tool.chmod(0o600)
+    cfg['verification'] = {'commands': [[str(tool)]]}
+    if mode == 'shell_string':
+        cfg['verification']['commands'] = [str(tool) + ' --check']
+    monkeypatch.setattr(runner, 'execute', lambda *a: pytest.fail('no worker dispatch'))
+    runner.run_once(cfg)
+    job = runner.read(path)
+    assert job['status'] in {'blocked', 'failed'}
+    if mode != 'shell_string':
+        assert job['status'] == 'blocked'
+        receipt = runner.public_receipt(runner.read(state / 'receipts/task.json'))
+        assert receipt['blocked_reason'] == {
+            'reason_code': 'prerequisite_failed',
+            'reason': 'Configured required check 1 program missing or not executable'}
+        assert str(tmp_path) not in str(receipt)
+    assert not job.get('runner_commits')
+
+
+def test_private_argv_space_path_preflight_does_not_execute(setup, tmp_path, monkeypatch):
+    cfg, _, _, job = setup
+    tool = tmp_path / 'tool directory' / 'python'
+    tool.parent.mkdir()
+    tool.symlink_to(sys.executable)
+    marker = tmp_path / 'must-not-exist'
+    args = [str(tool), '-c', 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()']
+    cfg['verification'] = {'commands': [args]}
+    monkeypatch.setenv('PATH', '/unavailable-path')
+    assert runner.verification_commands(cfg) == [args]
+    prompt = runner.prompt_for(cfg, job, 'worker')
+    assert 'TRUSTED VERIFICATION CONFIGURATION' in prompt
+    assert runner.json.dumps([args]) in prompt
+    assert not marker.exists()
+    assert 'Exploratory commands' in prompt and 'recover and continue' in prompt
+    assert 'Required checks (preflight, build, story tests and runner checks)' in prompt
+
+
+def test_worker_block_preserves_dirty_work_and_receipt_without_replay(setup, monkeypatch):
+    cfg, state, path, _ = setup
+    calls = []
+    def blocked(config, state, path, job, role):
+        calls.append(role)
+        fixtures.deliver(config)
+        value = fixtures.result('blocked')
+        value['summary'] = '/private/secret/check failed with credentials'
+        return value
+    monkeypatch.setattr(runner, 'execute', blocked)
+    runner.run_once(cfg)
+    receipt_path = state / 'receipts/task.json'
+    receipt = receipt_path.read_bytes()
+    public = runner.public_receipt(runner.read(receipt_path))
+    assert public['blocked_reason'] == runner.block_reason('worker_reported_blocked')
+    assert '/private/secret' not in str(public)
+    assert 'delivery.txt' in runner.dirty_paths(cfg)
+    runner.run_once(cfg)
+    assert receipt_path.read_bytes() == receipt
+    assert calls == ['worker']
+    assert not runner.read(path).get('runner_commits')
+
+
+def test_bare_program_resolved_using_path(setup, tmp_path, monkeypatch):
+    cfg, _, _, job = setup
+    tool = tmp_path / 'synthetic-python'
+    tool.symlink_to(sys.executable)
+    monkeypatch.setenv('PATH', str(tmp_path))
+    cfg['verification'] = {'commands': [['synthetic-python', '-m', 'pytest']]}
+    assert runner.verification_commands(cfg) == [[str(tool), '-m', 'pytest']]
+    assert str(tool) in runner.prompt_for(cfg, job, 'worker')
+
+
+def test_program_access_error_blocks_safely(setup, monkeypatch):
+    cfg, _, _, _ = setup
+    cfg['verification'] = {'commands': [[sys.executable, '-m', 'pytest']]}
+    def unavailable(*args):
+        raise PermissionError('synthetic private access detail')
+    monkeypatch.setattr(runner.os, 'access', unavailable)
+    with pytest.raises(runner.CommandUnavailable, match='required check 1') as error:
+        runner.verification_commands(cfg)
+    assert 'synthetic private access detail' not in str(error.value.blocked_reason)

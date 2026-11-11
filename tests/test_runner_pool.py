@@ -664,3 +664,37 @@ def test_completed_refresh_stops_before_model_on_revocation(setup, tmp_path, mon
     assert engine.data['stories']['alpha']['status'] == 'blocked'
     assert hub.client().comments(1) == old_comments
     assert core.records(policy_cfg, old_comments, 1)[-1]['kind'] == 'review'
+
+
+def test_pool_hands_off_private_interpreter_outside_path(setup, monkeypatch, tmp_path):
+    cfg, path = setup
+    tool = tmp_path / 'private tools' / 'python'
+    tool.parent.mkdir()
+    tool.symlink_to(sys.executable)
+    assert str(tool.parent) not in runner.os.environ.get('PATH', '').split(runner.os.pathsep)
+    argv = [str(tool), '-c', 'print("1 passed in 0.01s")']
+    cfg['test_commands'] = [argv]
+    runner.save(path, cfg)
+    calls = []
+    def execute(config, state, job_path, job, role):
+        if role == 'worker':
+            prompt = runner.prompt_for(config, job, role)
+            assert 'TRUSTED VERIFICATION CONFIGURATION' in prompt
+            assert runner.json.dumps([argv]) in prompt
+            calls.append(job['id'])
+        return delivery(config, state, job_path, job, role)
+    monkeypatch.setattr(runner, 'execute_phase', execute)
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    assert sorted(calls) == ['alpha', 'beta']
+    assert all(s['status'] == 'ready_for_integration' for s in engine.data['stories'].values())
+
+
+def test_pool_missing_check_blocks_without_dispatch(setup, monkeypatch, tmp_path):
+    cfg, path = setup
+    cfg['test_commands'] = [[str(tmp_path / 'missing-interpreter'), '-m', 'pytest']]
+    runner.save(path, cfg)
+    monkeypatch.setattr(runner, 'execute_phase', lambda *a: pytest.fail('no dispatch'))
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    assert all(s['status'] == 'blocked' for s in engine.data['stories'].values())
