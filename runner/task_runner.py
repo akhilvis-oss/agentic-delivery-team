@@ -1,4 +1,4 @@
-"""Explicit, bounded local agent delegation. No automatic integration or replay."""
+"""Bounded delegation with opt-in lifecycle PR delivery; no phase replay."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import string
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 
 PROTOCOL = "agent-file-v1"
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
@@ -29,7 +30,7 @@ SUMMARIES = {
     "queued": "Assignment queued; no approval implied.",
     "running_worker": "Worker executing bounded assignment.",
     "running_reviewer": "Independent read-only review in progress.",
-    "ready_for_integration": "Independent review accepted the committed range; owner approval required.",
+    "ready_for_integration": "Independent review accepted the committed range; integration follows repository policy.",
     "needs_primary_review": "Correction limit reached; primary review required.",
     "needs_owner": "Scope or criteria require an owner decision.",
     "changes_requested": "Independent review requires correction on a new exact head.",
@@ -72,6 +73,7 @@ def block_reason(key):
 
 
 def public_block_reason(value):
+    integration_api()  # The stand-up can read delivery reasons in a fresh process.
     if isinstance(value, dict):
         for key in BLOCK_REASONS:
             safe = block_reason(key)
@@ -237,6 +239,7 @@ def load_config(path):
             raise ValueError("Absolute lifecycle config required")
         lifecycle_api().load_config(config["lifecycle_config"])
     verification_options(config)
+    integration_api().options(config)
     return config
 
 
@@ -1227,6 +1230,23 @@ class GitHubClient:
 
 
 _LIFECYCLE = None
+_INTEGRATION = None
+
+
+def integration_api():
+    global _INTEGRATION
+    if _INTEGRATION is None:
+        spec = importlib.util.spec_from_file_location(
+            "agentic_runner_integration", Path(__file__).with_name("integration.py"))
+        _INTEGRATION = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_INTEGRATION)
+        for key, reason in _INTEGRATION.REASONS.items():
+            BLOCK_REASONS[key] = (key, reason)
+    return _INTEGRATION
+
+
+def self_module():
+    return SimpleNamespace(**globals())
 
 
 def lifecycle_api():
@@ -1386,6 +1406,12 @@ def run_once(config, state=None, client=None, *, task_id=None):
             return
         if any(j["status"] == "interrupted" and not j.get("reconciled") for _, j in jobs):
             return
+        for pending_path, pending in jobs:
+            if (pending["status"] == "ready_for_integration"
+                    and (task_id is None or pending["id"] == task_id)
+                    and integration_api().options(config)):
+                integration_api().advance(self_module(), config, pending_path, pending)
+                return
         queued = [(p, j) for p, j in jobs if j["status"] == "queued"
                   and (task_id is None or j["id"] == task_id)
                   and j.get("not_before_epoch", 0) <= time.time()]
@@ -1475,6 +1501,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 before = fingerprint(config)
                 check_dispatch_head(config, job["head_commit"])
                 try:
+                    job["review_session"] = f"{job['id']}-round-{attempt}-reviewer"
                     job["review"] = execute(config, state, path, job, "reviewer")
                 finally:
                     if fingerprint(config) != before:
@@ -1487,6 +1514,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     raise Blocked("Review approval contradicts failed required tests")
                 job["reviewed_head"] = job["head_commit"]
                 job.setdefault("review_history", []).append({"round": attempt, "head": job["head_commit"],
+                                                            "session": job["review_session"],
                                                             "result": json.loads(json.dumps(job["review"]))})
                 if lifecycle_cfg:
                     if verdict == "blocked":
@@ -1527,6 +1555,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
             job.update(status="failed", error="Execution or integrity check failed; inspect private logs",
                        updated_at=now())
         save_job(config, path, job)
+        integration_api().advance(self_module(), config, path, job)
         publish_receipt(config, path, job, client)
 
 

@@ -552,15 +552,17 @@ class GitHub:
             raise Unavailable("Wrong automation identity; no write made: " + str(actor))
         self.identity_verified = True
 
+    def write_allowed(self, method, path):
+        return bool(re.fullmatch(
+            r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)", path
+        ))
+
     def request(self, method, path, data=None):
         if not path.startswith("/") or ".." in path or "#" in path or "\\" in path:
             raise ValueError("Invalid repository API path")
         self.ensure_actor()
         if method != "GET":
-            if not re.fullmatch(
-                r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)",
-                path,
-            ):
+            if not self.write_allowed(method, path):
                 raise ValueError("Only repository issue/label writes are permitted")
             self.ensure_actor()
         url = "https://api.github.com/repos/" + self.cfg["repository"] + path
@@ -727,6 +729,14 @@ def flush(cfg, client):
                 else:
                     remote_issue = client.issue(record["issue"])
                     current = state(remote_issue)
+                    # A PR-open event may arrive after the runner handed the
+                    # story to the owner. Guard transport too, so queued intents
+                    # and workflow retries cannot undo that escalation.
+                    if (expected_role == "workflow" and record["pr"] is not None
+                            and record["to"] == "pr-open" and current == "needs-owner"):
+                        entry.update(status="superseded", error="owner_handoff_preserved")
+                        save(path, entry)
+                        continue
                     canonical, latest = canonical_state(
                         cfg, client.events(record["issue"])
                     )
@@ -875,6 +885,12 @@ def job_records(cfg, job):
         "ready_for_integration": "in-review",
     }
     target = mapping[status]
+    integration = job.get("integration", {})
+    if status == "ready_for_integration" and integration.get("pr"):
+        # PR-open/merged transitions belong to the trusted workflow identity.
+        # The exact-head review was synced before publication. Polling delivery
+        # must not try to move that workflow-owned state back to in-review.
+        return []
     committed = [c for c in job.get("runner_commits", []) if c["state"] == "committed"]
     head = job.get("head_commit")
     if (
@@ -911,7 +927,8 @@ def job_records(cfg, job):
             kind="review" if outcome else "transition",
             outcome=outcome,
             severities=counts if outcome else {},
-            reason="execution_failed" if status in {"failed", "interrupted"} else None,
+            reason=integration.get("reason") or (
+                "execution_failed" if status in {"failed", "interrupted"} else None),
         )
     ]
 
@@ -950,7 +967,15 @@ def reconcile(cfg, jobs, client):
             continue
         try:
             remote = state(client.issue(binding["issue"]))
-            expected = job_records(cfg, job)[-1]["to"]
+            local_records = job_records(cfg, job)
+            if local_records:
+                expected = local_records[-1]["to"]
+            elif job["status"] == "ready_for_integration" and job.get("integration", {}).get("pr"):
+                # Publication hands transitions to the workflow. Report drift
+                # without queuing a runner transition or changing remote state.
+                expected = "merged" if job["integration"].get("stage") == "merged" else "pr-open"
+            else:
+                continue
             if expected != remote:
                 result.append(
                     dict(
@@ -1061,14 +1086,18 @@ def guard_issue(cfg, client, number):
     return True
 
 
-def trusted_gate(cfg, client, pr):
+def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
     """Unknown/partial/stale/name-colliding checks are never a passing gate."""
     try:
+        # pull_request_target executes on the base commit, not the PR head.
+        # Several PRs share that commit: collect all checks, then bind each run
+        # separately to the PR number and reviewed head (and base for delivery).
+        execution_sha = pr["base"]["sha"]
         runs, total, ids = [], None, set()
         for page in range(1, 1001):
             result = client.request(
                 "GET",
-                f"/commits/{pr['head']['sha']}/check-runs?per_page=100&page={page}",
+                f"/commits/{execution_sha}/check-runs?filter=all&per_page=100&page={page}",
             )
             if total is None:
                 total = result["total_count"]
@@ -1095,7 +1124,7 @@ def trusted_gate(cfg, client, pr):
             if (
                 check["name"] != "review-gate"
                 or check.get("app", {}).get("slug") != "github-actions"
-                or check.get("head_sha") != pr["head"]["sha"]
+                or check.get("head_sha") != execution_sha
             ):
                 continue
             details = check.get("details_url", "")
@@ -1110,12 +1139,19 @@ def trusted_gate(cfg, client, pr):
                 run["workflow_id"] != workflow["id"]
                 or run["event"] != "pull_request_target"
                 or run.get("path") != path
-                or run["head_sha"] != pr["head"]["sha"]
+                or run["head_sha"] != execution_sha
                 or not any(
                     p["number"] == pr["number"]
                     and p["head"]["sha"] == pr["head"]["sha"]
                     for p in bindings
                 )
+            ):
+                continue
+            if strict_snapshot and not any(
+                p["number"] == pr["number"]
+                and p["head"]["sha"] == pr["head"]["sha"]
+                and p.get("base", {}).get("sha") == pr["base"]["sha"]
+                for p in bindings
             ):
                 continue
             candidates.append(check)
@@ -1368,17 +1404,20 @@ def admit_phase(config_path, job):
         client = GitHub(cfg)
         issue = client.issue(binding["issue"])
         current = state(issue)
+        published = job.get("integration", {}).get("pr") and job["integration"].get("stage") in {
+            "created", "checking", "auto_merge_enabled", "direct_merge_recheck",
+        }
         if (
             issue["state"] != "open"
             or (issue.get("body") or "") != job["assignment"]["task_text"]
             or current
-            not in {
+            not in ({
                 "dispatched",
                 "in-progress",
                 "committed",
                 "in-review",
                 "changes-requested",
-            }
+            } | ({"pr-open"} if published else set()))
         ):
             raise ValueError("Admission changed; owner reconciliation required")
         dispatches = [

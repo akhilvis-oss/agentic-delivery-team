@@ -707,7 +707,7 @@ def pr_fixture(cfg, h):
         merged=False,
         body="Closes #1",
         head={"sha": sha, "repo": {"full_name": cfg["repository"]}},
-        base={"ref": "main"},
+        base={"ref": "main", "sha": "b" * 40},
         user={"login": cfg["actors"]["owner"]},
     )
     h.prs[7] = pr
@@ -833,7 +833,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
             id=1,
             name="review-gate",
             app={"slug": "github-actions"},
-            head_sha=pr["head"]["sha"],
+            head_sha=pr["base"]["sha"],
             details_url="https://github.com/example/project/actions/runs/90/job/91",
             status="completed",
             conclusion="success",
@@ -849,7 +849,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
                 workflow_id=7,
                 path=".github/workflows/pr-review-gate.yml",
                 event="pull_request",
-                head_sha=pr["head"]["sha"],
+                head_sha=pr["base"]["sha"],
                 pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
             )
         return original(method, path, data)
@@ -866,7 +866,8 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
     assert core.trusted_gate(cfg, client, pr) == "unavailable"
 
 
-def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
+@pytest.fixture
+def gate_evidence(tmp_path):
     cfg = policy(tmp_path)
     h = Hub(cfg)
     pr = pr_fixture(cfg, h)
@@ -875,7 +876,7 @@ def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
         id=1,
         name="review-gate",
         app={"slug": "github-actions"},
-        head_sha=pr["head"]["sha"],
+        head_sha=pr["base"]["sha"],
         details_url="https://github.com/example/project/actions/runs/90/job/91",
         status="completed",
         conclusion="success",
@@ -884,23 +885,105 @@ def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
         workflow_id=7,
         path=".github/workflows/pr-review-gate.yml",
         event="pull_request_target",
-        head_sha=pr["head"]["sha"],
+        head_sha=pr["base"]["sha"],
         pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
     )
+    checks = [check]
+    runs = {"90": run}
 
     def request(method, path, data=None):
         if "/check-runs" in path:
-            return {"total_count": 1, "check_runs": [check]}
+            assert path == f"/commits/{pr['base']['sha']}/check-runs?filter=all&per_page=100&page=1"
+            return {"total_count": len(checks), "check_runs": checks}
         if path == "/actions/workflows/pr-review-gate.yml":
             return {"id": 7, "path": run["path"]}
-        if path == "/actions/runs/90":
-            return run
+        if path.startswith("/actions/runs/"):
+            return runs[path.rsplit("/", 1)[-1]]
         raise core.Unavailable("unknown metadata")
 
     client.request = request
+    return cfg, client, pr, check, run, checks, runs
+
+
+def test_trusted_gate_binds_workflow_and_exact_head(gate_evidence):
+    cfg, client, pr, check, run, _, _ = gate_evidence
     assert core.trusted_gate(cfg, client, pr) == "pass"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "pass"
+    run["pull_requests"][0]["base"]["sha"] = "c" * 40
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
     run["head_sha"] = "c" * 40
     assert core.trusted_gate(cfg, client, pr) == "unavailable"
+
+
+@pytest.mark.parametrize("mutation", ["head", "number", "base", "check_sha", "run_sha", "event", "workflow", "app"])
+def test_base_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutation):
+    cfg, client, pr, check, run, _, _ = gate_evidence
+    binding = run["pull_requests"][0]
+    binding["base"] = {"sha": pr["base"]["sha"]}
+    if mutation in {"head", "base"}:
+        binding[mutation]["sha"] = "c" * 40
+    elif mutation == "number":
+        binding["number"] = 8
+    elif mutation == "check_sha":
+        check["head_sha"] = pr["head"]["sha"]
+    elif mutation == "run_sha":
+        run["head_sha"] = pr["head"]["sha"]
+    elif mutation == "event":
+        run["event"] = "pull_request"
+    elif mutation == "workflow":
+        run["workflow_id"] = 8
+    else:
+        check["app"]["slug"] = "other-app"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
+
+
+@pytest.mark.parametrize("status,conclusion,expected", [
+    ("completed", "success", "pass"),
+    ("completed", "failure", "fail"),
+    ("completed", "cancelled", "fail"),
+    ("in_progress", None, "pending"),
+])
+def test_base_gate_selects_latest_matching_pr_run(gate_evidence, status, conclusion, expected):
+    cfg, client, pr, check, run, checks, runs = gate_evidence
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    checks.append({**check, "id": 2, "status": status, "conclusion": conclusion,
+                   "details_url": "https://github.com/example/project/actions/runs/92/job/93"})
+    runs["92"] = copy.deepcopy(run)
+    # A newer check on the same base for a different PR must not mask this PR.
+    checks.append({**check, "id": 3,
+                   "details_url": "https://github.com/example/project/actions/runs/94/job/95"})
+    runs["94"] = copy.deepcopy(run)
+    runs["94"]["pull_requests"][0]["number"] = 8
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == expected
+
+
+@pytest.mark.parametrize("collection", ["complete", "partial", "duplicate", "drift"])
+def test_base_gate_collection_is_complete_across_pages(gate_evidence, collection):
+    cfg, client, pr, check, run, _, _ = gate_evidence
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    original = client.request
+    seen = []
+
+    def request(method, path, data=None):
+        if "/check-runs?" not in path:
+            return original(method, path, data)
+        assert path.startswith(f"/commits/{pr['base']['sha']}/check-runs?filter=all&")
+        page = int(path.rsplit("=", 1)[-1])
+        seen.append(page)
+        if page == 1:
+            # Other checks sharing the base precede this PR's gate.
+            return {"total_count": 101, "check_runs": [
+                {"id": n, "name": "unrelated"} for n in range(1, 101)]}
+        row = {**check, "id": 1 if collection == "duplicate" else 101}
+        return {"total_count": 102 if collection == "drift" else 101,
+                "check_runs": [] if collection == "partial" else [row]}
+
+    client.request = request
+    expected = "pass" if collection == "complete" else "unavailable"
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == expected
+    assert seen == [1, 2]
 
 
 def test_new_owner_approval_supersedes_stale_phase_without_replaying_it(tmp_path):
@@ -1129,3 +1212,96 @@ def test_unavailable_comment_history_is_not_treated_as_unmanaged(tmp_path):
         )
     assert core.state(h.issues[1]) == "in-review"
     assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_finished_claim_polls_opted_in_delivery_without_worker_replay(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    settings = core.read(claim["config"])
+    settings["integration"] = {"enabled": True, "declared_tier": "standard"}
+    core.save(claim["config"], settings)
+    job_path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(job_path)
+    job["status"] = "ready_for_integration"
+    core.save(job_path, job)
+    calls = []
+    monkeypatch.setattr(runner.integration_api(), "advance", lambda *args: calls.append(args[3]["id"]))
+    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("must not replay agents"))
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    assert calls == [claim["job"], claim["job"]]
+
+
+def test_published_job_leaves_pr_states_to_trusted_workflow(tmp_path):
+    cfg = policy(tmp_path)
+    job = {"status": "ready_for_integration", "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "checking"}}
+    assert core.job_records(cfg, job) == []
+
+
+@pytest.mark.parametrize("stage,expected", [
+    ("created", "pr-open"), ("checking", "pr-open"),
+    ("auto_merge_enabled", "pr-open"), ("merged", "merged"),
+])
+@pytest.mark.parametrize("matched", [True, False])
+def test_reconcile_published_job_reports_workflow_state_without_writes(tmp_path, stage, expected, matched):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue(state=expected if matched else "in-review")
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": stage}}
+    before = copy.deepcopy(job)
+    assert core.reconcile(cfg, [job], h.client()) == (
+        [] if matched else [dict(issue=1, job="job", local=expected, remote="in-review")])
+    assert job == before
+    assert h.calls == []
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_reconcile_published_job_reports_unavailable_remote(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.fail_read = True
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "merged"}}
+    assert core.reconcile(cfg, [job], h.client()) == [
+        dict(issue=1, job="job", error="remote_unavailable")]
+    assert h.calls == []
+
+
+@pytest.mark.parametrize("ordering", ["event_after_handoff", "queued_before_handoff"])
+@pytest.mark.parametrize("reason", ["owner_merge_required", "gate_category_higher"])
+def test_delayed_pr_open_preserves_owner_handoff(tmp_path, ordering, reason):
+    cfg = policy(tmp_path)
+    # Exercise the installed policy, including its otherwise permitted edge.
+    cfg["transitions"] = core.read(ROOT / ".github/task-lifecycle.json")["transitions"]
+    assert core.permitted(cfg, "needs-owner", "pr-open", cfg["actors"]["workflow"])
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    workflow_cfg = {**cfg, "state_dir": str(tmp_path / "workflow-state")}
+    if ordering == "queued_before_handoff":
+        record = core.public_record(cfg, 1, "pr-7", 0, "pr-open", pr=7,
+                                    commit=pr["head"]["sha"], gate="pass")
+        core.queue(workflow_cfg, record, role="workflow")
+    job = {"id": "job", "round": 2, "status": "needs_owner",
+           "assignment": {"lifecycle": {"issue": 1, "event": 101}},
+           "integration": {"pr": 7, "stage": "owner", "reason": reason}}
+    for handoff in core.job_records(cfg, job):
+        core.queue(cfg, handoff)
+    # The workflow's separate outbox can be delayed while the runner completes
+    # the real needs-owner transition, then recovered by a fresh workflow poll.
+    core.flush(cfg, h.client())
+    assert core.state(h.issues[1]) == "needs-owner"
+    if ordering == "queued_before_handoff":
+        core.flush(workflow_cfg, h.client("workflow"))
+    for _ in range(2):
+        core.pr_event(workflow_cfg, h.client("workflow"), {"action": "opened", "pull_request": copy.deepcopy(pr)})
+        core.flush(workflow_cfg, h.client("workflow"))
+        assert core.state(h.issues[1]) == "needs-owner"
+    assert not any(call == ("label", 1, "pr-open") for call in h.calls)
