@@ -44,6 +44,11 @@ To re-trigger, the agent makes a small edit to the pull request description, or 
 ### An issue was labelled `status:draft` automatically
 Expected. Every issue carries one status label, and a new issue starts as a draft. It means "not yet approved for work".
 
+### Approval failed or the story did not start
+**Owner.** To approve a draft, sign in as the configured owner, open the issue's **Labels** picker and add `status:approved`. You can leave `status:draft` selected: the guard removes it for a permitted draft → approved transition and records approval of the body at that event. Another identity cannot approve, and other combinations of status labels fail closed.
+
+If approval failed, read the guard comment and the lifecycle run in **Actions**. In **Labels**, remove `status:approved` and leave only the correct current status label. Then, as the configured owner, add `status:approved` again from a state that allows approval. Leave `status:draft` selected if the issue is a draft. Wait for the guard to record approval before expecting work to start. Conflicting labels, a missing or ambiguous event, or an edit after approval require a fresh owner approval event; re-running an old workflow does not approve the edited body.
+
 ### A status label changed back on its own
 Expected. The guard workflow reverts status changes made by anyone who isn't allowed to make them. Only the owner can approve or accept work. If the owner's own change was reverted, report it as a bug.
 

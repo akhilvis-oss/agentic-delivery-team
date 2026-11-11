@@ -196,6 +196,15 @@ class Client:
 
     def request(self, method, path, data=None):
         self.hub.calls.append((method, path, copy.deepcopy(data)))
+        if method == "DELETE" and path.endswith("/labels/status%3Adraft"):
+            if self.hub.fail_write:
+                raise core.Unavailable("label removal failed")
+            number = int(path.split("/")[2])
+            self.hub.issues[number]["labels"] = [
+                x for x in self.hub.issues[number]["labels"]
+                if x["name"] != "status:draft"
+            ]
+            return None
         if method == "GET" and path.startswith("/pulls/"):
             return copy.deepcopy(self.hub.prs[int(path.split("/")[2])])
         if method == "GET" and "/check-runs" in path:
@@ -361,6 +370,127 @@ def test_approval_attestation_uses_owner_event_and_scope_snapshot(tmp_path):
     h.event(1, "approved", "owner")  # same-second ambiguity is never guessed
     with pytest.raises(core.Unavailable, match="ambiguous"):
         core.attest_approval(cfg, client, event)
+
+
+def approval_picker_event(cfg, h, *, actor="owner", extra="draft"):
+    issue = h.issue(state="draft")
+    h.event(1, "approved", actor)
+    issue["labels"] += [{"name": "status:" + extra}, {"name": "story"}]
+    return dict(
+        action="labeled",
+        label={"name": "status:approved"},
+        sender={"login": cfg["actors"].get(actor, actor)},
+        issue=copy.deepcopy(issue),
+    )
+
+
+def test_owner_picker_approval_removes_draft_and_binds_event_body(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    # An edit after the event cannot become approved through label cleanup.
+    h.issues[1]["body"] = "Changed after the owner approved."
+    client = h.client("workflow")
+    core.attest_approval(cfg, client, event)
+    proof, = core.records(cfg, client.comments(1), 1)
+    assert proof["event"] == h.events_by_issue[1][0]["id"]
+    assert proof["approved_by"] == cfg["actors"]["owner"]
+    assert proof["scope_sha256"] == hashlib.sha256(event["issue"]["body"].encode()).hexdigest()
+    assert proof["scope_sha256"] != hashlib.sha256(h.issues[1]["body"].encode()).hexdigest()
+    assert client.issue(1)["labels"] == [{"name": "status:approved"}, {"name": "story"}]
+    core.attest_approval(cfg, client, event)  # retry after normalization is idempotent
+    assert len(client.comments(1)) == 1
+    assert sum(call[0] == "DELETE" for call in h.calls) == 1
+    assert not core.guard_issue(cfg, client, 1)
+
+
+def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
+    cfg = policy(tmp_path)
+    client = core.GitHub(cfg, "workflow", token="fake")
+    client.identity_verified = True
+    requests = []
+
+    def opened(req, timeout):
+        requests.append(req)
+        return io.BytesIO(b'[{"name":"status:approved"}]')
+
+    client.opener = SimpleNamespace(open=opened)
+    client.request("DELETE", "/issues/1/labels/status%3Adraft")
+    assert requests[0].method == "DELETE"
+    assert requests[0].full_url == (
+        "https://api.github.com/repos/example/project/issues/1/labels/status%3Adraft"
+    )
+    for path in ("/issues/1/labels/status%3Aapproved", "/issues/1", "/labels"):
+        with pytest.raises(ValueError, match="Only repository issue/label writes"):
+            client.request("DELETE", path)
+    assert len(requests) == 1
+
+
+def test_picker_cleanup_preserves_concurrent_status_and_does_not_attest(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    client = h.client("workflow")
+    request = client.request
+
+    def concurrent_request(method, path, data=None):
+        if method == "DELETE":
+            h.issues[1]["labels"].append({"name": "status:blocked"})
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", concurrent_request)
+    with pytest.raises(core.Unavailable, match="valid status labels"):
+        core.attest_approval(cfg, client, event)
+    assert {"name": "status:blocked"} in client.issue(1)["labels"]
+    assert core.records(cfg, client.comments(1), 1) == []
+
+
+@pytest.mark.parametrize("actor,extra", [
+    ("attacker-fixture", "draft"),
+    ("runner", "draft"),
+    ("owner", "blocked"),
+    ("owner", "unknown"),
+])
+def test_picker_invalid_approval_fails_closed_with_recovery_comment(tmp_path, actor, extra):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h, actor=actor, extra=extra)
+    client = h.client("workflow")
+    with pytest.raises(core.Unavailable, match="valid status labels"):
+        core.attest_approval(cfg, client, event)
+    assert core.records(cfg, client.comments(1), 1) == []
+    assert "Only the configured owner" in client.comments(1)[0]["body"]
+    assert "remove status:approved" in client.comments(1)[0]["body"]
+    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
+
+
+def test_picker_approval_rejects_live_label_drift(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    h.issues[1]["labels"].append({"name": "status:blocked"})
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, h.client("workflow"), event)
+    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert core.records(cfg, h.comments_by_issue[1], 1) == []
+
+
+@pytest.mark.parametrize("failure", ["removal", "ambiguous", "forbidden"])
+def test_picker_cleanup_prerequisites_fail_before_attestation(tmp_path, failure):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    event = approval_picker_event(cfg, h)
+    if failure == "removal":
+        h.fail_write = "before"
+    elif failure == "ambiguous":
+        h.events_by_issue[1].append(copy.deepcopy(h.events_by_issue[1][0]))
+    else:
+        cfg["transitions"]["draft"].pop("approved")
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, h.client("workflow"), event)
+    assert core.records(cfg, h.comments_by_issue[1], 1) == []
+    assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
 
 
 def configured_service(tmp_path, monkeypatch):
