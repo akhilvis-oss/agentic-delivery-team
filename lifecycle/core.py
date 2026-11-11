@@ -1030,10 +1030,11 @@ def attest_approval(cfg, client, event):
             f"/issues/{issue['number']}/comments",
             {"body": (
                 "Approval was not recorded. Only the configured owner can approve. "
-                "In the issue's Labels picker, remove status:approved and leave only "
-                "the correct current status label. Then, as the owner, add "
-                "status:approved again when that transition is allowed. For a draft, "
-                "you can leave status:draft selected; the guard removes it."
+                "To retry, first remove every other status label, including "
+                "status:draft, in the issue's Labels picker. Then, as the owner, "
+                "remove status:approved if present and add it again, leaving it "
+                "as the only status label. The transition must still be allowed "
+                "from the last permitted status in the issue history."
             )},
         )
         raise Unavailable("Approval needs valid status labels and an owner label event")
@@ -1126,9 +1127,10 @@ def guard_issue(cfg, client, number):
     queue(cfg, record, role="workflow", public_body=(
         "The guard restored the last permitted status. Keep only one status label. "
         "To approve, the configured owner must add status:approved from a permitted "
-        "state. If approval failed, remove status:approved, leave the correct current "
-        "status, then add status:approved again as the owner. A draft label can stay "
-        "selected when the owner approves; the guard removes it.\n"
+        "state. If approval failed, first remove every other status label, including "
+        "status:draft. Then, as the owner, remove status:approved if present and add "
+        "it again, leaving it as the only status label. The transition must still "
+        "be allowed from the last permitted status in the issue history.\n"
         + record_body(record)
     ))
     flush(cfg, client)

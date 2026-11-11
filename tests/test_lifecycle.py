@@ -404,6 +404,59 @@ def test_owner_picker_approval_removes_draft_and_binds_event_body(tmp_path):
     assert not core.guard_issue(cfg, client, 1)
 
 
+@pytest.mark.parametrize("guard_between_events", [False, True])
+def test_failed_draft_cleanup_recovers_with_fresh_owner_approval(tmp_path, guard_between_events):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    failed_event = approval_picker_event(cfg, h)
+    client = h.client("workflow")
+    h.fail_write = "before"
+    with pytest.raises(core.Unavailable, match="label removal failed"):
+        core.attest_approval(cfg, client, failed_event)
+    assert core.records(cfg, client.comments(1), 1) == []
+    assert core.canonical_state(cfg, client.events(1))[0] == "approved"
+    assert {"name": "status:draft"} in client.issue(1)["labels"]
+
+    h.fail_write = None
+    # Follow the recovery guidance: remove other statuses first, then approved.
+    # Unlabeling does not reset canonical history; record those events explicitly.
+    for target in ("draft", "approved"):
+        h.issues[1]["labels"] = [
+            x for x in h.issues[1]["labels"] if x["name"] != "status:" + target
+        ]
+        h.counter += 1
+        h.events_by_issue[1].append(dict(
+            id=h.counter,
+            event="unlabeled",
+            label={"name": "status:" + target},
+            actor={"login": cfg["actors"]["owner"]},
+            created_at=WHEN,
+        ))
+        if guard_between_events:
+            core.guard_issue(cfg, client, 1)
+
+    issue = h.issues[1]
+    issue["body"] = "Revised scope for fresh owner approval."
+    issue["updated_at"] = "2026-01-02T10:01:00+00:00"
+    fresh = h.event(1, "approved")
+    fresh["created_at"] = issue["updated_at"]
+    event = dict(
+        action="labeled",
+        label={"name": "status:approved"},
+        sender={"login": cfg["actors"]["owner"]},
+        issue=copy.deepcopy(issue),
+    )
+    issue["body"] = "Unapproved edit after the fresh event."
+    core.attest_approval(cfg, client, event)
+    proof, = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert proof["event"] == fresh["id"] != h.events_by_issue[1][0]["id"]
+    assert proof["approved_by"] == cfg["actors"]["owner"]
+    assert proof["scope_sha256"] == hashlib.sha256(event["issue"]["body"].encode()).hexdigest()
+    assert proof["scope_sha256"] != hashlib.sha256(issue["body"].encode()).hexdigest()
+    assert core.state(client.issue(1)) == "approved"
+    assert sum(call[0] == "DELETE" for call in h.calls) == 1
+
+
 def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
     cfg = policy(tmp_path)
     client = core.GitHub(cfg, "workflow", token="fake")
