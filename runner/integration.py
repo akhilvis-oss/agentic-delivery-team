@@ -68,7 +68,9 @@ def load_gate():
     return gate
 
 
-def client_for(core, cfg):
+def client_for(core, cfg, config=None):
+    integration_enabled = options({} if config is None else config) is not None
+
     class DeliveryGitHub(core.GitHub):
         def write_allowed(self, method, path):
             return super().write_allowed(method, path) or (
@@ -124,7 +126,8 @@ def client_for(core, cfg):
                      head + ":refs/heads/" + config["branch"]],
                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
 
-    return DeliveryGitHub(cfg)
+    return (DeliveryGitHub(cfg, integration_enabled=True) if integration_enabled
+            else DeliveryGitHub(cfg))
 
 
 def reviewed(runner, config, job):
@@ -322,7 +325,7 @@ def advance(runner, config, path, job, client=None):
     core = runner.lifecycle_api()
     try:
         cfg = core.load_config(config["lifecycle_config"])
-        client = client or client_for(core, cfg)
+        client = client or client_for(core, cfg, config)
     except Exception:
         delivery.update(stage="blocked", reason="publication_failed")
         job.update(status="blocked", updated_at=runner.now(), blocked_reason={
