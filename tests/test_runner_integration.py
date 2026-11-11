@@ -15,6 +15,124 @@ setup = fixtures.setup
 integration = runner.integration_api()
 REAL_ADMIT = runner.lifecycle_api().admit_phase
 
+DELIVERY_PERMISSIONS = {
+    "issues": "write", "contents": "write", "pull_requests": "write",
+    "checks": "read", "actions": "read",
+}
+
+
+@pytest.fixture
+def app_transport(tmp_path, monkeypatch):
+    import datetime as dt
+    import io
+    import subprocess
+    from types import SimpleNamespace
+    from test_lifecycle_app_tokens import AT, API, configured
+
+    core = runner.lifecycle_api()
+    cfg = configured(tmp_path)
+    apis = []
+    clock = [AT]
+    run_command = subprocess.run
+
+    def opened(req, timeout):
+        if req.full_url.endswith("/graphql"):
+            return io.BytesIO(json.dumps({"data": {"viewer": {
+                "login": cfg["actors"]["runner"]}}}).encode())
+        return apis[-1].open(req, timeout)
+
+    def credential_command(argv, **kwargs):
+        if argv[:2] == ["/usr/bin/security", "find-generic-password"]:
+            return SimpleNamespace(stdout=base64.b64encode(
+                b"-----BEGIN PRIVATE " + b"KEY-----" + b"x" * 128))
+        if argv[:2] == ["/usr/bin/openssl", "dgst"]:
+            return SimpleNamespace(stdout=b"synthetic-signature")
+        return run_command(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", credential_command)
+    monkeypatch.setattr(core.time, "time", lambda: clock[0])
+    monkeypatch.setattr(core.urllib.request, "build_opener",
+                        lambda *args: SimpleNamespace(open=opened))
+
+    def prepare(permissions):
+        api = API(cfg, "runner")
+        api.responses[2]["permissions"] = {**permissions, "metadata": "read"}
+        api.responses[2]["expires_at"] = dt.datetime.fromtimestamp(
+            clock[0] + 3600, dt.timezone.utc).isoformat()
+        apis.append(api)
+        return api
+
+    return core, cfg, clock, prepare
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled", "absent"])
+def test_delivery_app_permissions_survive_real_refresh(app_transport, mode):
+    core, cfg, clock, prepare = app_transport
+    config = {"lifecycle_config": "synthetic"}
+    if mode != "absent":
+        config["integration"] = {"enabled": mode == "enabled", "declared_tier": "standard"}
+    permissions = DELIVERY_PERMISSIONS if mode == "enabled" else {"issues": "write"}
+    original = deepcopy(cfg)
+    api = prepare(permissions)
+    client = integration.client_for(core, cfg, config)
+    client.ensure_actor()
+    assert client.identity_verified
+    assert json.loads(api.calls[2].data) == {
+        "repositories": ["project"], "permissions": permissions}
+    clock[0] += 3550
+    refreshed = prepare(permissions)
+    client.ensure_actor()
+    assert client.identity_verified and len(refreshed.calls) == 4
+    assert json.loads(refreshed.calls[2].data)["permissions"] == permissions
+    assert cfg == original
+    normal = prepare({"issues": "write"})
+    core.GitHub(cfg)
+    assert json.loads(normal.calls[2].data)["permissions"] == {"issues": "write"}
+
+
+@pytest.mark.parametrize("mutation", [*DELIVERY_PERMISSIONS, "metadata", "extra"])
+def test_delivery_app_rejects_nonexact_returned_permissions(app_transport, mutation):
+    core, cfg, _, prepare = app_transport
+    permissions = dict(DELIVERY_PERMISSIONS)
+    if mutation == "extra":
+        permissions["administration"] = "write"
+    api = prepare(permissions)
+    if mutation != "extra":
+        api.responses[2]["permissions"].pop(mutation)
+    with pytest.raises(core.Unavailable, match="scope mismatch"):
+        integration.client_for(core, cfg, {
+            "lifecycle_config": "synthetic",
+            "integration": {"enabled": True, "declared_tier": "standard"}})
+    assert len(api.calls) == 3
+
+
+@pytest.mark.parametrize("value", [None, True, {}, {"enabled": 1}, {"enabled": "true"},
+                                        {"enabled": True}])
+def test_delivery_app_rejects_invalid_opt_in_before_mint(app_transport, value):
+    core, cfg, _, prepare = app_transport
+    api = prepare(DELIVERY_PERMISSIONS)
+    with pytest.raises(ValueError):
+        integration.client_for(core, cfg, {"integration": value})
+    assert not api.calls
+
+
+def test_advance_selects_delivery_app_permissions(delivery, app_transport, monkeypatch):
+    config, path, job, fake_client = delivery
+    core, cfg, _, prepare = app_transport
+    api = prepare(DELIVERY_PERMISSIONS)
+    original = integration.client_for
+
+    def client_for(loaded_core, loaded_cfg, runner_config=None):
+        assert loaded_core is core
+        assert loaded_cfg["repository"] == "example/kit"
+        original(core, cfg, runner_config)  # Real client -> refresh -> mint -> HTTP.
+        return fake_client
+
+    monkeypatch.setattr(integration, "client_for", client_for)
+    integration.advance(runner.self_module(), config, path, job)
+    assert json.loads(api.calls[2].data)["permissions"] == DELIVERY_PERMISSIONS
+    assert job["integration"]["stage"] == "auto_merge_enabled"
+
 STORY = "## Acceptance criteria\n- AC-1: Preserve this exact criterion.\n- AC-2: Keep continuation text\n  exactly as approved.\n\n## Out of scope\nOther work."
 PUBLIC = ("## Security review\nSecrets: synthetic fixtures only.\n"
           "External access/cost: synthetic clients only.\nData/provenance: temporary test data.\n")
