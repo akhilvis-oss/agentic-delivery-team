@@ -13,6 +13,7 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 from lifecycle import core
+from runner.task_runner import public_block_reason
 
 SECTION_NAMES = [
     "Needs your decision",
@@ -381,8 +382,12 @@ def collect(cfg, client, since, at):
             "needs_owner",
             "needs_primary_review",
         }:
+            detail = ""
+            if job.get("blocked_reason") or job["status"] == "blocked":
+                reason = public_block_reason(job.get("blocked_reason"))
+                detail = f" ({reason['reason_code']}: {reason['reason']})"
             sections[4].append(
-                linked(f"Task #{number}: local job needs attention", url)
+                linked(f"Task #{number}: local job needs attention{detail}", url)
             )
     # Outbox failures are visible even when the last job update predates them.
     for path in (Path(policy["state_dir"]) / "outbox").glob("*.json"):

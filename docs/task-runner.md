@@ -84,6 +84,32 @@ Whenever the agent CLI version changes, first review its official flags and fail
 
 ## Safety, recovery and limits
 
+Before dispatch, the runner checks that configured agent, version-probe and
+verification programs exist and are executable. Verification preflight resolves
+bare program names through the runner's PATH; absolute executable paths are
+recommended for reproducibility. Repository-relative programs are checked against
+the assigned worktree and retain their relative spelling in the disposable test
+checkout. This preflight does not execute test commands or prove that modules,
+arguments or dependencies are available. The existing CLI version probe still runs.
+
+Commands are JSON argument arrays, never shell strings. A path with spaces is one
+argument, without embedded shell quotes, for example:
+
+```json
+{"verification": {"commands": [["/opt/example tools/bin/python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]]}}
+```
+
+Workers receive clearly labelled private trusted verification argv before
+implementation, including the configured executable (or its PATH resolution).
+The runner uses the same resolution for its checks. Keep argv out of public
+evidence. Missing tools block safely; the runner never installs dependencies.
+
+The built-in worker notes require stopping on failed or unavailable required
+checks: preflight, build, story tests and runner checks. Exploratory searches,
+file lookups and listings may fail normally; recover and continue. Avoid the
+unqualified instruction **"stop on any failure"** in task text: it can cause a
+worker to stop on a harmless lookup. Required-check failure behavior is unchanged.
+
 - A nonblocking `flock` serializes the entire execution/review/correction cycle. `PAUSE` in the private state directory prevents new jobs; an existing phase continues. `CANCEL` stops the runner's current owned process group and prevents new jobs. Branch/HEAD changes block. A worker changing history, or reporting delivery without committable changes, blocks. Every successful correction gets its own runner-made commit.
 - Each phase has a configured 60–3600 second timeout. The runner creates a separate process group and terminates/reaps only that newly owned group on timeout, cancellation, failure or completion, including descendants. It never signals a PID recovered from disk. SIGTERM performs owned cleanup; SIGKILL/power loss cannot. An unclean `running_*` record becomes `interrupted`, is never replayed, and blocks further dispatch until the operator reconciles it.
 - After a crash, inspect private task/phase records, reconcile the worktree, and verify that the old agent and descendants have stopped. Do not use a stale recorded PID as proof of ownership. Only then run `acknowledge-interruption --id <TASK_ID>` with the same `--config`. This records manual reconciliation; it neither kills anything nor requeues the task. Queue a **new ID** if further work is authorized. Never delete records to force a retry.
@@ -96,7 +122,34 @@ Whenever the agent CLI version changes, first review its official flags and fail
 
 Every enqueue/state update writes `receipts/<task-id>.json`, including queued, deferred, blocked, interrupted and failed outcomes. Version 2 contains status, base/head commits (head may be null until delivery), a fixed runner-owned summary, a UTC timestamp and the private commit/refusal records described below. Full task and agent results remain private in `tasks/` and `runs/`.
 
-GitHub receipt comments default **off**. Enabling `github_receipts.enabled` and explicitly setting `github_receipts.repository` opts into posting a terminal receipt only for a job enqueued with `--github-number <ISSUE_OR_PR_NUMBER>`. Authenticate the separate `gh` CLI locally. Its client sends an argument-vector API request, never a shell command. Only the original five public receipt fields and optional runner commit SHA/`committed_by: runner` metadata are rendered; refusal paths, task text, prompts, logs, model summaries, config and environment are never copied into comments. The public summary is a fixed runner message, not potentially sensitive agent prose.
+GitHub receipt comments default **off**. Enabling `github_receipts.enabled` and explicitly setting `github_receipts.repository` opts into posting a terminal receipt only for a job enqueued with `--github-number <ISSUE_OR_PR_NUMBER>`. Authenticate the separate `gh` CLI locally. Its client sends an argument-vector API request, never a shell command. Only the original five public receipt fields, optional runner commit SHA/`committed_by: runner` metadata and the safe blocked reason described below are rendered; refusal paths, task text, prompts, logs, model summaries, config and environment are never copied into comments. The public summary is a fixed runner message, not potentially sensitive agent prose.
+
+Blocked receipts add `blocked_reason` with a machine-readable `reason_code` and a
+short `reason`. Codes include `prerequisite_failed`, `worker_reported_blocked` and
+`reviewer_reported_blocked`. Runner-authored reasons identify command preflight
+(including the configured check's one-based index), agent compatibility,
+assignment safety or runner required checks. Workers can supply the optional
+structured `blocked_check` field: `preflight`, `build`, `story_tests`,
+`runner_checks`, or `prerequisite` (or `null` when none applies). For a blocked
+result, the runner maps this allowlisted category to a distinct fixed explanation,
+so receipts and stand-up distinguish a failed build from unavailable story tests.
+Existing clients that omit the field retain the generic worker-blocked message.
+Unknown categories are rejected; a non-null category requires blocked status.
+Reviewer reports use a fixed message. Detailed check names and explanations stay
+private and are never inferred from arbitrary worker text. Public receipts and the factual
+stand-up validate reasons against the runner's safe vocabulary, falling back to
+a generic safety-preflight reason for unknown or altered data. This change does
+not enable scheduled stand-up.
+
+If a blocked worker leaves uncommitted changes, preserve its assignment, private
+results and receipts. The owner inspects the changes and the failing prerequisite
+before authorizing any further round with a new job ID and explicit scope. Use a
+separately exported approved release as the tool. A new work job requires a clean
+worktree: the owner must explicitly decide whether to preserve reviewed changes
+on a separate branch/commit or discard them after retaining evidence. The runner
+does not adopt dirty changes, rewrite blocked results, reset jobs to queued or
+silently replay workers. Review-only recovery below applies when a preserved
+worker commit already exists; it cannot adopt an uncommitted worker diff.
 
 A failed/uncertain comment does not change the local execution result or erase its receipt. Delivery is marked attempted **before** sending and is not retried automatically, preventing duplicate comments after a crash/ambiguous response. Inspect GitHub before any manual retry. The fake-client tests verify payload boundaries, default-off behavior and failures; this PR does not post a live receipt or install launchd.
 

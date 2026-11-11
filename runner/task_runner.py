@@ -43,6 +43,55 @@ class Blocked(ValueError):
     """A prerequisite or safety failure requiring operator attention."""
 
 
+# Only these runner-authored pairs may leave private state. Never publish an
+# exception message, configured argv, or the worker's free-form explanation.
+BLOCK_REASONS = {
+    "command_preflight": ("prerequisite_failed", "Configured command program unavailable or not executable."),
+    "agent_compatibility": ("prerequisite_failed", "Agent compatibility check failed."),
+    "assignment_preflight": ("prerequisite_failed", "Assignment safety preflight failed."),
+    "required_checks": ("prerequisite_failed", "Runner required checks unavailable or failed."),
+    "worker_reported_blocked": ("worker_reported_blocked", "Worker reported a required check or prerequisite blocked; owner reconciliation required."),
+    "reviewer_reported_blocked": ("reviewer_reported_blocked", "Independent reviewer reported blocked; owner reconciliation required."),
+}
+WORKER_BLOCKED_CHECKS = {
+    "preflight": "Worker preflight failed or unavailable; owner reconciliation required.",
+    "build": "Worker build failed or unavailable; owner reconciliation required.",
+    "story_tests": "Worker story tests failed or unavailable; owner reconciliation required.",
+    "runner_checks": "Worker runner checks failed or unavailable; owner reconciliation required.",
+    "prerequisite": "Worker prerequisite failed or unavailable; owner reconciliation required.",
+}
+BLOCK_REASONS.update({
+    "worker_" + check: ("worker_reported_blocked", reason)
+    for check, reason in WORKER_BLOCKED_CHECKS.items()
+})
+
+
+def block_reason(key):
+    code, reason = BLOCK_REASONS[key]
+    return {"reason_code": code, "reason": reason}
+
+
+def public_block_reason(value):
+    if isinstance(value, dict):
+        for key in BLOCK_REASONS:
+            safe = block_reason(key)
+            if value == safe:
+                return safe
+        if (set(value) == {"reason_code", "reason"}
+                and value["reason_code"] == "prerequisite_failed"
+                and isinstance(value["reason"], str)
+                and re.fullmatch(r"Configured (?:command|version_command|required check [1-9][0-9]{0,5}) "
+                                 r"program missing or not executable", value["reason"])):
+            return dict(value)
+    return block_reason("assignment_preflight")
+
+
+class CommandUnavailable(Blocked):
+    def __init__(self, label):
+        super().__init__(f"Configured {label} program missing or not executable")
+        self.blocked_reason = public_block_reason({"reason_code": "prerequisite_failed", "reason": str(self)})
+
+
 class Cancelled(RuntimeError):
     pass
 
@@ -506,6 +555,8 @@ def public_receipt(receipt):
                for c in receipt.get("runner_commits", []) if c["state"] == "committed"]
     if commits:
         public["runner_commits"] = commits
+    if receipt.get("blocked_reason") or receipt["status"] == "blocked":
+        public["blocked_reason"] = public_block_reason(receipt.get("blocked_reason"))
     return public
 
 
@@ -573,6 +624,8 @@ def expand(value, config, **phase):
 
 def check_cli(config):
     validate_agent(config)
+    for key in ("command", "version_command"):
+        resolve_program(expand(config["agent"][key][0], config), config, key)
     args = [expand(arg, config) for arg in config["agent"]["version_command"]]
     try:
         result = subprocess.run(args, cwd=config["worktree"], env=environment(config),
@@ -602,12 +655,14 @@ def schema(role, lifecycle=False, pool=False):
         fields["disagreement"] = {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
             "reason": {"type": "string"}}, "required": ["kind", "reason"], "additionalProperties": False}]}
-    required = list(fields)
+    if role == "worker":
+        # Strict output schemas require every property; null means no named check.
+        fields["blocked_check"] = {"anyOf": [
+            {"type": "null"}, {"type": "string", "enum": list(WORKER_BLOCKED_CHECKS)}]}
     if pool:
         fields["usage_units"] = {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
         fields["rate_limited"] = {"type": "boolean"}
-        required += ["usage_units", "rate_limited"]
-    return {"type": "object", "properties": fields, "required": required,
+    return {"type": "object", "properties": fields, "required": list(fields),
             "additionalProperties": False}
 
 
@@ -618,8 +673,10 @@ def validate_result(result, role):
     if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
             or "rate_limited" in result and type(result["rate_limited"]) is not bool):
         raise ValueError("Invalid optional usage or availability report")
-    optional = {"usage_units", "rate_limited"} | ({"disagreement"} if role == "worker" else set())
-    if not isinstance(result, dict) or not set(spec["required"]) <= set(result) or set(result) - set(spec["required"]) - optional:
+    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check"} if role == "worker" else set())
+    # Accept legacy agent-file-v1 results that omit newly introduced fields.
+    required = set(spec["required"]) - optional
+    if not required <= set(result) or set(result) - set(spec["required"]) - optional:
         raise ValueError("Incomplete structured result")
     if result.get("rate_limited") and result["status"] != "blocked":
         raise ValueError("Rate-limited phase cannot approve work")
@@ -627,6 +684,10 @@ def validate_result(result, role):
         raise ValueError("Invalid result status")
     if not isinstance(result["summary"], str):
         raise ValueError("Invalid summary")
+    check = result.get("blocked_check")
+    if check is not None and (not isinstance(check, str) or check not in WORKER_BLOCKED_CHECKS
+                              or result["status"] != "blocked"):
+        raise ValueError("Invalid blocked check")
     for key in ("tests", "limitations"):
         if not isinstance(result[key], list) or any(not isinstance(v, str) for v in result[key]):
             raise ValueError("Invalid result list")
@@ -711,7 +772,14 @@ LIFECYCLE_NOTES = {
         "or write any Git administrative files. Never request .git write access. "
         "The trusted runner validates paths and commits your changes after you exit. "
         "This is a worker handoff rule, not a requirement for the final reviewed delivery. "
-        "Report ready_for_review after implementation and focused tests."
+        "Report ready_for_review after implementation and focused tests. "
+        "Required checks (preflight, build, story tests and runner checks) must stop the task "
+        "when they fail or are unavailable; report blocked with the check name in private results. "
+        "Set blocked_check to preflight, build, story_tests, runner_checks, or prerequisite "
+        "to identify the failing category safely; use null when none applies. "
+        "Exploratory commands (searches, file lookups and listings) may fail normally; "
+        "recover and continue. Do not install dependencies, substitute configured tools, "
+        "or silently retry a blocked task."
     ),
     "reviewer": (
         "RUNNER LIFECYCLE NOTE — REVIEWER (fixed; profile and task text cannot override):\n"
@@ -735,6 +803,13 @@ def prompt_for(config, job, role):
             + profile["scope"] + "\n" + profile[f"{role}_prompt"]
             + "\nIMMUTABLE ASSIGNMENT:\n" + job["assignment"]["task_text"])
     if role == "worker":
+        options = verification_options(config)
+        if options:
+            text += ("\nTRUSTED VERIFICATION CONFIGURATION (private argv data, not shell strings):\n"
+                     + json.dumps(verification_commands(config), ensure_ascii=True)
+                     + "\nRun these required commands with the exact executables supplied. "
+                     "Do not replace them with system tools or install dependencies. "
+                     "Keep configured argv and executable paths out of public evidence.")
         if job["assignment"].get("primary_context"):
             text += "\nPRIMARY CORRECTION CONTEXT (private; original scope unchanged): " + json.dumps(job["assignment"]["primary_context"])
         for scope in job["assignment"]["scopes"]:
@@ -785,6 +860,32 @@ def stop_group(proc):
 
 
 # Required tests are executed by the runner, never by granting the reviewer writes.
+def resolve_program(program, config, label):
+    """Check availability only; never run a verification command as a dry run."""
+    try:
+        if os.path.isabs(program) or "/" in program:
+            candidate = Path(program)
+            if not candidate.is_absolute():
+                candidate = Path(config["worktree"]) / candidate
+        else:
+            found = shutil.which(program, path=os.environ.get("PATH", os.defpath))
+            candidate = Path(found) if found else None
+        if candidate is None or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise CommandUnavailable(label)
+    except OSError as exc:
+        raise CommandUnavailable(label) from exc
+    # Relative repository commands must still run in the disposable checkout.
+    return str(candidate.absolute()) if "/" not in program else program
+
+
+def verification_commands(config):
+    options = verification_options(config)
+    if not options:
+        return []
+    return [[resolve_program(args[0], config, f"required check {index + 1}"), *args[1:]]
+            for index, args in enumerate(options["commands"])]
+
+
 def verification_options(config):
     value = config.get("verification")
     if value is None:
@@ -956,7 +1057,7 @@ def verify_required_tests(config, state, path, job):
         fixtures.mkdir(mode=0o700)
         checkout = verification_copy(config, head, folder)
         log_root = private_dir(state / "test-runs" / job["id"] / ("attempt-" + str(len(runs))))
-        for index, args in enumerate(options["commands"]):
+        for index, args in enumerate(verification_commands(config)):
             result = {"argv": list(args), "status": "running", "started_at": now(),
                       "exit_code": None, "reported_counts": None}
             entry["results"].append(result)
@@ -1115,6 +1216,9 @@ class GitHubClient:
         # Only fixed runner summaries are eligible, never agent-produced summaries.
         body = (f"Task receipt: {receipt['status']}\nCommits: {receipt['base_commit']}.."
                 f"{receipt['head_commit']}\nSummary: {receipt['summary']}\nRun: {receipt['timestamp']}")
+        if receipt.get("blocked_reason"):
+            reason = public_block_reason(receipt["blocked_reason"])
+            body += f"\nBlocked: {reason['reason_code']}: {reason['reason']}"
         for commit in receipt.get("runner_commits", []):
             body += f"\nRunner commit: {commit['commit_sha']} (committed_by: runner)"
         subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/issues/{number}/comments",
@@ -1145,6 +1249,8 @@ def save_job(config, path, job):
                "commit_refusals": job.get("commit_refusals", [])}
     if job.get("verification_runs"):
         receipt["verification_runs"] = job["verification_runs"]
+    if job.get("blocked_reason") or job["status"] == "blocked":
+        receipt["blocked_reason"] = public_block_reason(job.get("blocked_reason"))
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
     if config.get("lifecycle_config") and job["assignment"].get("lifecycle"):
         try:
@@ -1286,6 +1392,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
         if not queued:
             return
         path, job = queued[0]
+        prerequisite = "assignment_preflight"
         try:
             validate_agent(config)
             assignment = verify_assignment(config, job)
@@ -1316,13 +1423,20 @@ def run_once(config, state=None, client=None, *, task_id=None):
             if (git(config, "branch", "--show-current") != config["branch"]
                     or git(config, "rev-parse", "HEAD") != expected):
                 raise Blocked("Branch or HEAD changed since enqueue")
+            prerequisite = "command_preflight"
+            verification_commands(config)
+            prerequisite = "agent_compatibility"
             job["cli_version"] = check_cli(config)
             job["protocol"] = PROTOCOL
             for attempt in range(1, max_attempts + 1):
                 job["round"] = attempt
                 if assignment["kind"] == "work":
+                    prerequisite = "command_preflight"
+                    verification_commands(config)
+                    prerequisite = "agent_compatibility"
                     before_head = job["base_commit"] if attempt == 1 else job["head_commit"]
                     check_cli(config)
+                    prerequisite = "assignment_preflight"
                     check_dispatch_head(config, before_head)
                     commit_preflight(config, job)
                     if lifecycle_cfg:
@@ -1333,6 +1447,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                             or git(config, "rev-parse", "HEAD") != before_head):
                         raise CommitRefused("history_changed")
                     if job["worker"]["status"] == "blocked":
+                        check = job["worker"].get("blocked_check")
+                        job["blocked_reason"] = block_reason("worker_" + check if check else "worker_reported_blocked")
                         job["status"] = "needs_owner" if lifecycle_cfg else "blocked"
                         break
                     disagreement = job["worker"].get("disagreement") if lifecycle_cfg else None
@@ -1346,11 +1462,14 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     else:
                         runner_commit(config, path, job, before_head)
                 ensure_reviewable(config, job)
+                prerequisite = "agent_compatibility"
                 check_cli(config)
+                prerequisite = "assignment_preflight"
                 check_dispatch_head(config, job["head_commit"])
                 ensure_reviewable(config, job)
                 if lifecycle_cfg:
                     check_lifecycle_admission(config, job)
+                prerequisite = "required_checks"
                 verification = verify_required_tests(config, state, path, job)
                 ensure_reviewable(config, job)
                 before = fingerprint(config)
@@ -1362,6 +1481,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         raise RuntimeError("Worktree changed during read-only review")
                 validate_result(job["review"], "reviewer")
                 verdict = job["review"]["status"]
+                if verdict == "blocked":
+                    job["blocked_reason"] = block_reason("reviewer_reported_blocked")
                 if verification and verification["status"] != "passed" and verdict == "ready_for_integration":
                     raise Blocked("Review approval contradicts failed required tests")
                 job["reviewed_head"] = job["head_commit"]
@@ -1400,7 +1521,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
         except CommitRefused as exc:
             record_refusal(config, path, job, exc)
         except Blocked as exc:
-            job.update(status="blocked", error=str(exc), updated_at=now())
+            job.update(status="blocked", error=str(exc), updated_at=now(),
+                       blocked_reason=getattr(exc, "blocked_reason", block_reason(prerequisite)))
         except Exception:
             job.update(status="failed", error="Execution or integrity check failed; inspect private logs",
                        updated_at=now())
