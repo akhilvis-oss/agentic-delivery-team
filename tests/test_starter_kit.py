@@ -118,3 +118,14 @@ def test_review_policy_works_with_a_single_model():
         assert "only if one is configured" in text or "only if a second reviewer" in text, path
         assert "Claude review PASS" not in text, path
         assert "same model" in text, path
+
+
+def test_review_findings_become_tests():
+    # Each operative requirement is asserted, not just the heading (#85 review P1).
+    for path in (ROOT / "AGENTS.md", KIT / "AGENTS.md"):
+        rule = next((line for line in path.read_text().splitlines()
+                     if "Every review finding becomes a test" in line), None)
+        assert rule, path
+        for requirement in ("P0 or P1 finding", "includes a test", "fails without the fix",
+                            "passes with it", "If a test isn't possible, say why in the PR"):
+            assert requirement in rule, (path, requirement)
