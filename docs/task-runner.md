@@ -1,6 +1,6 @@
 # Local task runner (v0.3, experimental)
 
-The primary agent explicitly queues an approved text assignment. A separate CLI worker leaves task changes uncommitted. The trusted runner validates and commits them; a fresh independent reviewer checks the exact base..head range in the configured read-only mode. At most two worker/runner-commit/review rounds run. Results wait for the primary and owner to integrate. The runner never invents work, pushes, merges, deploys, installs dependencies or controls services.
+The primary agent explicitly queues an approved text assignment. A separate CLI worker leaves task changes uncommitted. The trusted runner validates and commits them; a fresh independent reviewer checks the exact base..head range in the configured read-only mode. At most two worker/runner-commit/review rounds run. Standalone jobs wait for the primary and owner to integrate unless [lifecycle delivery is explicitly enabled](#opt-in-standalone-pr-delivery). With that opt-in, the runner can perform authorized pushes and PR publication and enable auto-merge or merge directly when policy permits; control-critical and release merges remain owner-only. The runner never invents work, deploys, installs dependencies or controls services.
 
 A review-only assignment skips the worker and gives the primary's committed work the same independent review. `ready_for_integration` is a structural, local outcome, not authenticated human approval or permission to merge.
 

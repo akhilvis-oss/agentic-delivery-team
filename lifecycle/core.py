@@ -487,8 +487,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class GitHub:
     """Only this repository; no shell, credential discovery or arbitrary URLs."""
 
-    def __init__(self, cfg, role="runner", token=None):
+    def __init__(self, cfg, role="runner", token=None, *, integration_enabled=False):
+        if type(integration_enabled) is not bool or (integration_enabled and role != "runner"):
+            raise Unavailable("Invalid integration authentication opt-in")
         self.cfg, self.role = cfg, role
+        self.integration_enabled = integration_enabled
         self.use_app_auth = token is None and role in cfg.get("app_auth", {})
         self.token_expiry = None
         self.token = (
@@ -518,7 +521,9 @@ class GitHub:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         try:
-            self.token, self.token_expiry = module.mint(self.cfg, self.role)
+            self.token, self.token_expiry = module.mint(
+                self.cfg, self.role, integration_enabled=self.integration_enabled
+            )
         except module.AuthenticationError as error:
             raise Unavailable(str(error)) from None
         self.identity_verified = False

@@ -16,6 +16,41 @@ from test_lifecycle import policy, Hub
 AT = 1800000000
 
 
+@pytest.mark.parametrize("role,comments_only,expected", [
+    ("runner", False, {"issues": "write"}),
+    ("product", False, {"issues": "write", "contents": "read", "pull_requests": "read",
+                         "checks": "read", "actions": "read"}),
+    ("runner", True, {"issues": "write"}),
+    ("product", True, {"issues": "write"}),
+])
+def test_existing_role_scopes_remain_exact(tmp_path, monkeypatch, role, comments_only, expected):
+    cfg = configured(tmp_path)
+    api = API(cfg, role)
+    api.responses[2]["permissions"] = {**expected, "metadata": "read"}
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: b"private-fixture")
+    monkeypatch.setattr(auth, "jwt", lambda *a: "jwt-fixture")
+    auth.mint(cfg, role, comments_only=comments_only, at=AT, opener=api)
+    assert json.loads(api.calls[2].data)["permissions"] == expected
+
+
+@pytest.mark.parametrize("role,enabled", [("runner", 1), ("runner", "true"),
+                                         ("runner", {}), ("product", True)])
+def test_mint_rejects_invalid_integration_opt_in(tmp_path, monkeypatch, role, enabled):
+    cfg = configured(tmp_path)
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: pytest.fail("must reject before Keychain"))
+    with pytest.raises(auth.AuthenticationError, match="integration"):
+        auth.mint(cfg, role, integration_enabled=enabled)
+
+
+def test_comments_only_still_limits_opted_in_runner(tmp_path, monkeypatch):
+    cfg = configured(tmp_path)
+    api = API(cfg, "runner")
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: b"private-fixture")
+    monkeypatch.setattr(auth, "jwt", lambda *a: "jwt-fixture")
+    auth.mint(cfg, "runner", integration_enabled=True, comments_only=True, at=AT, opener=api)
+    assert json.loads(api.calls[2].data)["permissions"] == {"issues": "write"}
+
+
 def configured(tmp_path):
     cfg = policy(tmp_path)
     cfg["actors"].update(product="product-fixture[bot]", runner="runner-fixture[bot]")
