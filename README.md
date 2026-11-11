@@ -70,6 +70,10 @@ Read these before relying on the kit:
 - **Parallel stories need the opt-in agent pool.** Without it, stories in a project run one after another. Pool budgets rely on usage the agents report, so treat them as advisory; the fixed reservation per phase is the real safeguard.
 - **You remain responsible.** The kit reduces the review burden; it doesn't remove the need for the owner's judgement on what ships.
 
+## What's next
+
+See the [roadmap](ROADMAP.md): v0.5.3 makes approval to merged pull request fully automatic, and v0.6 adds a one-command setup wizard so owners never touch a config file.
+
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md); report vulnerabilities privately, not in public issues. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
