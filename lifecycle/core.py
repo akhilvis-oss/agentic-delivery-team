@@ -558,6 +558,8 @@ class GitHub:
         self.identity_verified = True
 
     def write_allowed(self, method, path):
+        if method == "DELETE":
+            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3Adraft", path))
         return bool(re.fullmatch(
             r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)", path
         ))
@@ -1019,10 +1021,36 @@ def attest_approval(cfg, client, event):
     if (
         event.get("action") != "labeled"
         or event.get("label", {}).get("name") != "status:approved"
-        or event.get("sender", {}).get("login") != cfg["actors"]["owner"]
     ):
         return
     issue = event["issue"]
+
+    def statuses(snapshot):
+        names = [x["name"] if isinstance(x, dict) else x for x in snapshot["labels"]]
+        return sorted(x for x in names if x.startswith("status:"))
+
+    def reject_labels():
+        client.request(
+            "POST",
+            f"/issues/{issue['number']}/comments",
+            {"body": (
+                "Approval was not recorded. Only the configured owner can approve. "
+                "To retry, first remove every other status label, including "
+                "status:draft, in the issue's Labels picker. Then, as the owner, "
+                "remove status:approved if present and add it again, leaving it "
+                "as the only status label. The transition must still be allowed "
+                "from the last permitted status in the issue history."
+            )},
+        )
+        raise Unavailable("Approval needs valid status labels and an owner label event")
+
+    owner = event.get("sender", {}).get("login") == cfg["actors"]["owner"]
+    pair = ["status:approved", "status:draft"]
+    snapshots = [statuses(issue), statuses(client.issue(issue["number"]))]
+    if any(s != ["status:approved"] and not (owner and s == pair) for s in snapshots):
+        reject_labels()
+    if not owner:
+        return
     events = client.events(issue["number"])
     # Bind the webhook snapshot to a unique owner label event. Missing or
     # ambiguous timestamp evidence fails closed, rather than guessing an event.
@@ -1036,9 +1064,24 @@ def attest_approval(cfg, client, event):
     ]
     canonical, latest = canonical_state(cfg, events)
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":
+        if pair in snapshots:
+            reject_labels()
         raise Unavailable(
             "Approval event snapshot is unavailable or ambiguous; re-approve"
         )
+    if pair in snapshots:
+        source, _ = canonical_state(
+            cfg, [e for e in events if int(e["id"]) < int(latest["id"])]
+        )
+        if source != "draft" or not permitted(
+            cfg, source, "approved", event["sender"]["login"]
+        ):
+            reject_labels()
+        if snapshots[1] == pair:
+            # Remove only draft; never overwrite a concurrent status or other label.
+            client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Adraft")
+        if statuses(client.issue(issue["number"])) != ["status:approved"]:
+            reject_labels()
     record = public_record(
         cfg,
         issue["number"],
@@ -1086,7 +1129,15 @@ def guard_issue(cfg, client, number):
         kind="guard",
         reason="invalid_status_change",
     )
-    queue(cfg, record, role="workflow")
+    queue(cfg, record, role="workflow", public_body=(
+        "The guard restored the last permitted status. Keep only one status label. "
+        "To approve, the configured owner must add status:approved from a permitted "
+        "state. If approval failed, first remove every other status label, including "
+        "status:draft. Then, as the owner, remove status:approved if present and add "
+        "it again, leaving it as the only status label. The transition must still "
+        "be allowed from the last permitted status in the issue history.\n"
+        + record_body(record)
+    ))
     flush(cfg, client)
     return True
 
