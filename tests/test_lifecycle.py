@@ -899,6 +899,12 @@ def test_trusted_gate_binds_workflow_and_exact_head(tmp_path):
 
     client.request = request
     assert core.trusted_gate(cfg, client, pr) == "pass"
+    pr["base"]["sha"] = "b" * 40
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "pass"
+    run["pull_requests"][0]["base"]["sha"] = "c" * 40
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "unavailable"
     run["head_sha"] = "c" * 40
     assert core.trusted_gate(cfg, client, pr) == "unavailable"
 
@@ -1129,3 +1135,32 @@ def test_unavailable_comment_history_is_not_treated_as_unmanaged(tmp_path):
         )
     assert core.state(h.issues[1]) == "in-review"
     assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_finished_claim_polls_opted_in_delivery_without_worker_replay(tmp_path, monkeypatch):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    settings = core.read(claim["config"])
+    settings["integration"] = {"enabled": True, "declared_tier": "standard"}
+    core.save(claim["config"], settings)
+    job_path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(job_path)
+    job["status"] = "ready_for_integration"
+    core.save(job_path, job)
+    calls = []
+    monkeypatch.setattr(runner.integration_api(), "advance", lambda *args: calls.append(args[3]["id"]))
+    monkeypatch.setattr(runner, "execute", lambda *args: pytest.fail("must not replay agents"))
+    service.poll(cfg, h.client(), clock=lambda: 200)
+    service.poll(cfg, h.client(), clock=lambda: 300)
+    assert calls == [claim["job"], claim["job"]]
+
+
+def test_published_job_leaves_pr_states_to_trusted_workflow(tmp_path):
+    cfg = policy(tmp_path)
+    job = {"status": "ready_for_integration", "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "checking"}}
+    assert core.job_records(cfg, job) == []

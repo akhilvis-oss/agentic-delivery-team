@@ -300,3 +300,101 @@ The new receipt must show zero worker phases/commits, required-test evidence at 
 preserved head and the independent verdict. After that review passes, advance the
 configured local base to current main and use normal main-refresh/review before
 integration. If the pool cannot honor these constraints, stop and report the limitation.
+
+## Opt-in standalone PR delivery
+
+A lifecycle-backed standalone runner can publish a reviewed story without a
+prompt to the primary agent. Existing configurations remain local-only. In a
+**private runner config**, opt in with:
+
+```json
+{
+  "integration": {
+    "enabled": true,
+    "declared_tier": "standard",
+    "public_evidence": "## Security review\nSecrets: no private values published.\nExternal access/cost: owner-approved repository writes.\nData/provenance: immutable approved story and sanitized runner records.\n"
+  }
+}
+```
+
+Use the separately exported trusted release as the tool, outside the worker's
+writable checkout. Keep the existing `lifecycle_config`, event-bound assignment,
+runner commit identity and runner-owned `verification.commands`. Required tests
+and a fresh independent PASS must cover the exact runner-made head. Review-only
+jobs and pool execution cannot publish through this feature. No service or
+credentials are installed. The lifecycle runner identity is verified before
+writes; its configured dedicated token/App is used for both HTTPS push and API
+calls. There is no owner-token or ambient `gh` fallback. The App needs repository
+contents and pull-request write access in addition to its existing issue access;
+provisioning that access is an owner decision outside this feature.
+
+The runner pushes only the reviewed SHA, without force, through an independent
+Git copy with no origin, user credential helpers or source hooks. It opens a PR
+with the approved criteria verbatim (including continuation lines), a criterion
+evidence table, tested SHA, reported test counts and sanitized receipt. Raw test
+argv/output, private paths and agent prose are excluded. `public_evidence` is
+operator-reviewed public text: supply portable test command/results and the
+security, domain and scope evidence your trusted gate requires. Do not put private
+paths or secrets in it. For domain-critical changes include the configured domain
+evidence labels. For control-critical changes the runner includes a six-column
+matrix and pending structural Checker section; the actual fresh review is posted
+as a separate `Checker: PASS` GitHub review, with `commit_id`, reviewer session and
+receipt link. Custom requirement-ID mappings require operator-provided evidence;
+missing or duplicate sections fail closed at the gate and require reconciliation.
+The runner does not infer domain evidence or scope acknowledgements from a PASS.
+
+The default required Actions build workflow is `.github/workflows/ci.yml`; set
+`integration.checks_workflow` for a different installed path. The trusted gate
+workflow remains the lifecycle's `trusted_gate_workflow`. The category is derived
+from the immutable PR base's gate rules and complete revision-bound file evidence,
+and must be supported by a successful trusted `review-gate` run. A declared higher
+category is honored. Matching check names from other Apps/workflows do not count.
+The runner records the Checker on the reviewed SHA and polls pending checks on
+subsequent lifecycle service ticks, without replaying worker/reviewer sessions.
+PR-open and merged issue states remain owned by the existing trusted workflow;
+delivery polling never impersonates that workflow identity.
+
+Light and standard PRs can enable merge-commit auto-merge once all evidence passes.
+Domain-critical PRs additionally wait for a second provider **only when configured**:
+
+```json
+{
+  "reviewer_provider": "provider-a",
+  "second_reviewer": {"actor": "independent-checker", "provider": "provider-b"}
+}
+```
+
+These keys go inside `integration`. The second reviewer must be distinct from the
+runner and owner, and submit a GitHub review on the same commit beginning
+`Second review: PASS` with a `Provider: provider-b` line. Configuring a second
+reviewer does not launch one. Contradictory reviews, unknown evidence, a new head
+or edited PR body prevent merging. Later polls recheck enabled auto-merge and
+cancel it when evidence changes or becomes unavailable. An uncertain cancellation
+requires owner inspection and is not replayed. Control-critical work, changes to
+changelogs/release-note paths, and assignments marked `integration.release: true`
+are assigned to the owner. Add custom release-note patterns through
+`integration.release_paths`; built-in release patterns cannot be removed. Mark
+release assignments explicitly when their notes use other names. This transport has no tag
+or release-publication operation. If GitHub specifically rejects auto-merge for
+"clean status", the runner repeats the complete evidence check, directly merges
+with `sha` and `merge_method: merge`, then records the head and reviews relied on.
+Other rejections do not invoke that fallback. Branch protection remains necessary
+because GitHub offers no atomic snapshot lock across these API calls.
+
+Delivery intents and results live in private job `integration` state. Every write
+intent is saved before transport; interrupted/ambiguous writes are never replayed.
+Ordinary service ticks resume only confirmed stages or read pending checks. The
+service and runner locks serialize concurrent polls. A failed push, API write or
+required check sets `blocked`; a higher required category, changed head/body,
+contradictory evidence, control-critical work or release sets `needs-owner`.
+A fixed plain-language reason is posted on the issue and preserved in the
+sanitized receipt/stand-up; owner assignment is attempted even if that comment
+cannot be delivered. No response payload or exception text is published.
+
+For recovery, preserve the immutable assignment, exact commits and delivery
+intents. Inspect the branch, receipt comment, PR and recorded review before any
+owner-authorized retry in new state. Do not clear an intent, reset the old job or
+silently adopt another PR/head. Failed required checks need correction and a fresh
+exact-head review. No live publication or merge is exercised by the synthetic
+suite: run `python -m pytest -q tests/test_runner_integration.py` for its creation,
+head binding, category, failure, recovery and concurrency cases.

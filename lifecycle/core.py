@@ -552,15 +552,17 @@ class GitHub:
             raise Unavailable("Wrong automation identity; no write made: " + str(actor))
         self.identity_verified = True
 
+    def write_allowed(self, method, path):
+        return bool(re.fullmatch(
+            r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)", path
+        ))
+
     def request(self, method, path, data=None):
         if not path.startswith("/") or ".." in path or "#" in path or "\\" in path:
             raise ValueError("Invalid repository API path")
         self.ensure_actor()
         if method != "GET":
-            if not re.fullmatch(
-                r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)",
-                path,
-            ):
+            if not self.write_allowed(method, path):
                 raise ValueError("Only repository issue/label writes are permitted")
             self.ensure_actor()
         url = "https://api.github.com/repos/" + self.cfg["repository"] + path
@@ -875,6 +877,12 @@ def job_records(cfg, job):
         "ready_for_integration": "in-review",
     }
     target = mapping[status]
+    integration = job.get("integration", {})
+    if status == "ready_for_integration" and integration.get("pr"):
+        # PR-open/merged transitions belong to the trusted workflow identity.
+        # The exact-head review was synced before publication. Polling delivery
+        # must not try to move that workflow-owned state back to in-review.
+        return []
     committed = [c for c in job.get("runner_commits", []) if c["state"] == "committed"]
     head = job.get("head_commit")
     if (
@@ -911,7 +919,8 @@ def job_records(cfg, job):
             kind="review" if outcome else "transition",
             outcome=outcome,
             severities=counts if outcome else {},
-            reason="execution_failed" if status in {"failed", "interrupted"} else None,
+            reason=integration.get("reason") or (
+                "execution_failed" if status in {"failed", "interrupted"} else None),
         )
     ]
 
@@ -1061,7 +1070,7 @@ def guard_issue(cfg, client, number):
     return True
 
 
-def trusted_gate(cfg, client, pr):
+def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
     """Unknown/partial/stale/name-colliding checks are never a passing gate."""
     try:
         runs, total, ids = [], None, set()
@@ -1116,6 +1125,13 @@ def trusted_gate(cfg, client, pr):
                     and p["head"]["sha"] == pr["head"]["sha"]
                     for p in bindings
                 )
+            ):
+                continue
+            if strict_snapshot and not any(
+                p["number"] == pr["number"]
+                and p["head"]["sha"] == pr["head"]["sha"]
+                and p.get("base", {}).get("sha") == pr["base"]["sha"]
+                for p in bindings
             ):
                 continue
             candidates.append(check)
