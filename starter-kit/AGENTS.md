@@ -40,6 +40,7 @@ Every coding agent working in this repository follows this agreement. The **owne
 - A second reviewer from a different model provider is optional. If you configure one, its PASS is required for domain-critical and control-critical work; if you don't, nothing waits for it. One model reviewing its own kind of work shares its blind spots; a second provider reduces that.
 - Findings are graded **P0/P1** (wrong behaviour, missed criterion, safety: must be fixed) or **P2** (improvement: becomes a follow-up issue, doesn't block).
 - At most two correction rounds; then escalate. One disagreement exchange, then technical questions go to the lead engineer and product questions to the owner.
+- **Every review finding becomes a test.** A fix for a P0 or P1 finding includes a test that fails without the fix and passes with it, so the lesson is checked on every later story. If a test isn't possible, say why in the PR.
 
 ## Merge policy
 The owner's advance permission, by the category the trusted `review-gate` check reports:
