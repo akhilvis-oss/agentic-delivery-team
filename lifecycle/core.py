@@ -729,6 +729,14 @@ def flush(cfg, client):
                 else:
                     remote_issue = client.issue(record["issue"])
                     current = state(remote_issue)
+                    # A PR-open event may arrive after the runner handed the
+                    # story to the owner. Guard transport too, so queued intents
+                    # and workflow retries cannot undo that escalation.
+                    if (expected_role == "workflow" and record["pr"] is not None
+                            and record["to"] == "pr-open" and current == "needs-owner"):
+                        entry.update(status="superseded", error="owner_handoff_preserved")
+                        save(path, entry)
+                        continue
                     canonical, latest = canonical_state(
                         cfg, client.events(record["issue"])
                     )
@@ -1396,17 +1404,20 @@ def admit_phase(config_path, job):
         client = GitHub(cfg)
         issue = client.issue(binding["issue"])
         current = state(issue)
+        published = job.get("integration", {}).get("pr") and job["integration"].get("stage") in {
+            "created", "checking", "auto_merge_enabled", "direct_merge_recheck",
+        }
         if (
             issue["state"] != "open"
             or (issue.get("body") or "") != job["assignment"]["task_text"]
             or current
-            not in {
+            not in ({
                 "dispatched",
                 "in-progress",
                 "committed",
                 "in-review",
                 "changes-requested",
-            }
+            } | ({"pr-open"} if published else set()))
         ):
             raise ValueError("Admission changed; owner reconciliation required")
         dispatches = [

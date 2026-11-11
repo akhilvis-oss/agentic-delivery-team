@@ -342,7 +342,8 @@ def advance(runner, config, path, job, client=None):
                 delivery["disable_attempted"] = True
                 persist()
                 try:
-                    client.disable_auto_merge({"node_id": delivery["node_id"]})
+                    if client.disable_auto_merge({"node_id": delivery["node_id"]}) is not True:
+                        raise core.Uncertain("Auto-merge cancellation unconfirmed")
                 except Exception:
                     reason, owner = "auto_merge_disable_uncertain", True
         delivery.update(stage="owner" if owner else "blocked", reason=reason)
@@ -366,7 +367,25 @@ def advance(runner, config, path, job, client=None):
             job["lifecycle_unsynced"] = True
             runner.save(path, job)
 
+    def authorize():
+        # Delivery cannot use the worker's offline admission allowance. Recheck
+        # on recovery, pending-check polls and immediately before each write.
+        try:
+            if (job.get("lifecycle_unsynced")
+                    or core.admit_phase(config["lifecycle_config"], job) is not True):
+                raise EvidenceMissing("Current lifecycle authorization unavailable")
+            issue = client.issue(job["github_number"])
+        except (ValueError, core.Unavailable):
+            raise EvidenceMissing("Current lifecycle authorization unavailable") from None
+        allowed = {"in-review", "pr-open"} if delivery.get("pr") else {"in-review"}
+        if (issue.get("state") != "open"
+                or issue.get("body") != job["assignment"]["task_text"]
+                or core.state(issue) not in allowed):
+            raise EvidenceMissing("Current lifecycle authorization changed")
+
     def write(label, operation):
+        if label != "merge_record":
+            authorize()
         if delivery.get("intent"):
             raise core.Uncertain("Unreconciled write intent")
         delivery["intent"] = label
@@ -394,17 +413,9 @@ def advance(runner, config, path, job, client=None):
         if delivery.get("options_sha256") != policy_hash:
             stop("merge_conditions_missing", True)
             return
+        if not delivery.get("pr"):
+            authorize()
         if delivery["stage"] == "new":
-            if job.get("lifecycle_unsynced"):
-                stop("merge_conditions_missing", True)
-                return
-            if core.admit_phase(config["lifecycle_config"], job) is not True:
-                stop("merge_conditions_missing", True)
-                return
-            issue = client.issue(job["github_number"])
-            if issue.get("body") != job["assignment"]["task_text"] or core.state(issue) != "in-review":
-                stop("merge_conditions_missing", True)
-                return
             write("push", lambda: client.push(runner, config, job["head_commit"]))
             delivery["stage"] = "pushed"
             persist()
@@ -433,6 +444,7 @@ def advance(runner, config, path, job, client=None):
         if pr["state"] != "open":
             stop("merge_conditions_missing", True)
             return
+        authorize()
         if delivery["stage"] == "created":
             write("checker", lambda: client.request("POST", f"/pulls/{pr['number']}/reviews", {
                 "commit_id": job["reviewed_head"], "event": "COMMENT",

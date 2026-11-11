@@ -1273,3 +1273,35 @@ def test_reconcile_published_job_reports_unavailable_remote(tmp_path):
     assert core.reconcile(cfg, [job], h.client()) == [
         dict(issue=1, job="job", error="remote_unavailable")]
     assert h.calls == []
+
+
+@pytest.mark.parametrize("ordering", ["event_after_handoff", "queued_before_handoff"])
+@pytest.mark.parametrize("reason", ["owner_merge_required", "gate_category_higher"])
+def test_delayed_pr_open_preserves_owner_handoff(tmp_path, ordering, reason):
+    cfg = policy(tmp_path)
+    # Exercise the installed policy, including its otherwise permitted edge.
+    cfg["transitions"] = core.read(ROOT / ".github/task-lifecycle.json")["transitions"]
+    assert core.permitted(cfg, "needs-owner", "pr-open", cfg["actors"]["workflow"])
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    workflow_cfg = {**cfg, "state_dir": str(tmp_path / "workflow-state")}
+    if ordering == "queued_before_handoff":
+        record = core.public_record(cfg, 1, "pr-7", 0, "pr-open", pr=7,
+                                    commit=pr["head"]["sha"], gate="pass")
+        core.queue(workflow_cfg, record, role="workflow")
+    job = {"id": "job", "round": 2, "status": "needs_owner",
+           "assignment": {"lifecycle": {"issue": 1, "event": 101}},
+           "integration": {"pr": 7, "stage": "owner", "reason": reason}}
+    for handoff in core.job_records(cfg, job):
+        core.queue(cfg, handoff)
+    # The workflow's separate outbox can be delayed while the runner completes
+    # the real needs-owner transition, then recovered by a fresh workflow poll.
+    core.flush(cfg, h.client())
+    assert core.state(h.issues[1]) == "needs-owner"
+    if ordering == "queued_before_handoff":
+        core.flush(workflow_cfg, h.client("workflow"))
+    for _ in range(2):
+        core.pr_event(workflow_cfg, h.client("workflow"), {"action": "opened", "pull_request": copy.deepcopy(pr)})
+        core.flush(workflow_cfg, h.client("workflow"))
+        assert core.state(h.issues[1]) == "needs-owner"
+    assert not any(call == ("label", 1, "pr-open") for call in h.calls)

@@ -13,6 +13,7 @@ import test_runner as fixtures
 runner = fixtures.runner
 setup = fixtures.setup
 integration = runner.integration_api()
+REAL_ADMIT = runner.lifecycle_api().admit_phase
 
 STORY = "## Acceptance criteria\n- AC-1: Preserve this exact criterion.\n- AC-2: Keep continuation text\n  exactly as approved.\n\n## Out of scope\nOther work."
 PUBLIC = ("## Security review\nSecrets: synthetic fixtures only.\n"
@@ -35,7 +36,7 @@ class Client:
         self.comment_rows = []
 
     def issue(self, number):
-        return {"body": STORY, "labels": [{"name": "status:in-review"}]}
+        return {"state": "open", "body": STORY, "labels": [{"name": "status:in-review"}]}
 
     def push(self, runner, config, head):
         if self.failure == "push":
@@ -62,6 +63,7 @@ class Client:
         self.writes.append(("DISABLE", pr["node_id"], None))
         if self.failure == "disable":
             raise RuntimeError("synthetic cancellation unavailable")
+        return True
 
     def request(self, method, path, data=None):
         if method != "GET":
@@ -610,3 +612,157 @@ def test_unconfirmed_lifecycle_review_never_publishes(delivery):
     advance(delivery)
     assert job["status"] == "needs_owner" and not client.pushed
     assert not any(w[1] == "/pulls" for w in client.writes)
+
+
+@pytest.fixture
+def authorized_delivery(delivery, tmp_path, monkeypatch):
+    import test_lifecycle as lifecycle_fixtures
+
+    config, _, job, client = delivery
+    core = runner.lifecycle_api()
+    cfg = lifecycle_fixtures.policy(tmp_path)
+    cfg.update(repository="example/kit", actors={**cfg["actors"], "runner": "runner-bot", "owner": "owner"})
+    cfg["identity_roles"] = {actor: [role] for role, actor in cfg["actors"].items()}
+    hub = lifecycle_fixtures.Hub(cfg)
+    hub.issue(state="in-review", body=STORY)
+    record = core.public_record(cfg, 1, job["id"], 0, "dispatched", event=2)
+    record.update({"from": "approved", "actor": cfg["actors"]["runner"]})
+    hub.comments_by_issue[1].append({"user": {"login": cfg["actors"]["runner"]},
+                                     "body": core.record_body(record)})
+    monkeypatch.setattr(core, "load_config", lambda _: cfg)
+    monkeypatch.setattr(core, "GitHub", lambda *args: hub.client())
+    monkeypatch.setattr(core, "admit_phase", REAL_ADMIT)
+    monkeypatch.setattr(client, "issue", hub.client().issue)
+    return delivery, hub
+
+
+@pytest.mark.parametrize("stage", ["checking", "auto_merge_enabled"])
+@pytest.mark.parametrize("change", ["blocked", "needs-owner", "draft", "approved", "closed", "scope", "dispatch", "offline"])
+def test_owner_changes_stop_recovered_delivery(authorized_delivery, stage, change):
+    delivery, hub = authorized_delivery
+    config, path, job, client = delivery
+    client.check_state = "pending" if stage == "checking" else "success"
+    advance(delivery)
+    assert job["integration"]["stage"] == stage
+    if change == "closed":
+        hub.issues[1]["state"] = "closed"
+    elif change == "scope":
+        hub.issues[1]["body"] += "\nChanged scope."
+    elif change == "dispatch":
+        hub.comments_by_issue[1] = []
+    elif change == "offline":
+        hub.fail_read = True
+    else:
+        hub.event(1, change, "owner")
+    client.check_state = "success"
+    before = len(client.writes)
+    recovered = runner.read(path)
+    integration.advance(runner.self_module(), config, path, recovered, client)
+    assert recovered["status"] in {"needs_owner", "blocked"}
+    assert not any(w[0] == "AUTO" or w[1].endswith("/merge") for w in client.writes[before:])
+    assert sum(w[0] == "DISABLE" for w in client.writes) == (stage == "auto_merge_enabled")
+    writes = deepcopy(client.writes)
+    integration.advance(runner.self_module(), config, path, runner.read(path), client)
+    assert client.writes == writes
+
+
+@pytest.mark.parametrize("stage", ["pushed", "receipted", "created", "direct_merge_recheck"])
+def test_recovered_publication_requires_current_authorization(authorized_delivery, stage):
+    delivery, hub = authorized_delivery
+    config, path, job, client = delivery
+    client.check_state = "pending"
+    advance(delivery)
+    job["integration"]["stage"] = stage
+    runner.save_job(config, path, job)
+    hub.event(1, "needs-owner", "owner")
+    before = len(client.writes)
+    recovered = runner.read(path)
+    integration.advance(runner.self_module(), config, path, recovered, client)
+    assert recovered["status"] == "needs_owner"
+    assert not any(w[1] == "/pulls" or w[1].endswith(("/reviews", "/merge")) or w[0] == "AUTO"
+                   for w in client.writes[before:])
+
+
+def test_workflow_pr_open_remains_authorized(authorized_delivery):
+    delivery, hub = authorized_delivery
+    _, path, _, client = delivery
+    client.check_state = "pending"
+    advance(delivery)
+    hub.event(1, "pr-open", "workflow")
+    client.check_state = "success"
+    recovered = runner.read(path)
+    integration.advance(runner.self_module(), delivery[0], path, recovered, client)
+    assert recovered["integration"]["stage"] == "auto_merge_enabled"
+
+
+@pytest.mark.parametrize("outcome", [False, None, "error"])
+def test_revocation_requires_confirmed_auto_merge_cancellation(authorized_delivery, monkeypatch, outcome):
+    delivery, hub = authorized_delivery
+    _, _, job, client = delivery
+    advance(delivery)
+    hub.event(1, "blocked", "owner")
+
+    def disable(pr):
+        client.writes.append(("DISABLE", pr["node_id"], None))
+        if outcome == "error":
+            raise RuntimeError("synthetic cancellation failure")
+        return outcome
+
+    monkeypatch.setattr(client, "disable_auto_merge", disable)
+    advance(delivery)
+    assert job["status"] == "needs_owner"
+    assert job["integration"]["reason"] == "auto_merge_disable_uncertain"
+    advance(delivery)
+    assert sum(w[0] == "DISABLE" for w in client.writes) == 1
+
+
+@pytest.mark.parametrize("phase", ["receipt", "auto_merge", "direct_merge"])
+def test_owner_handoff_between_delivery_operations_stops_next_write(authorized_delivery, monkeypatch, phase):
+    delivery, hub = authorized_delivery
+    _, _, job, client = delivery
+    if phase == "receipt":
+        original = client.push
+
+        def push(*args):
+            original(*args)
+            hub.event(1, "needs-owner", "owner")
+
+        monkeypatch.setattr(client, "push", push)
+    elif phase == "auto_merge":
+        original = integration.merge_evidence
+        calls = []
+
+        def evidence(*args):
+            result = original(*args)
+            calls.append(result)
+            if len(calls) == 2:
+                hub.event(1, "needs-owner", "owner")
+            return result
+
+        monkeypatch.setattr(integration, "merge_evidence", evidence)
+    else:
+        def enable(pr):
+            hub.event(1, "needs-owner", "owner")
+            return False
+
+        monkeypatch.setattr(client, "enable_auto_merge", enable)
+    advance(delivery)
+    assert job["status"] == "needs_owner"
+    assert job["integration"]["reason"] == "merge_conditions_missing"
+    assert not any(w[0] == "AUTO" or w[1].endswith("/merge") for w in client.writes)
+    if phase == "receipt":
+        assert not client.pr and not client.reviews
+
+
+def test_workflow_completed_merge_is_reconciled_without_more_writes(authorized_delivery):
+    delivery, hub = authorized_delivery
+    config, path, _, client = delivery
+    advance(delivery)
+    client.pr.update(state="closed", merged=True)
+    hub.event(1, "merged", "workflow")
+    hub.issues[1]["state"] = "closed"
+    writes = deepcopy(client.writes)
+    recovered = runner.read(path)
+    integration.advance(runner.self_module(), config, path, recovered, client)
+    assert recovered["integration"]["stage"] == "merged"
+    assert client.writes == writes
