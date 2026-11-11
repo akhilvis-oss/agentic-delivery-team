@@ -129,3 +129,25 @@ def test_review_findings_become_tests():
         for requirement in ("P0 or P1 finding", "includes a test", "fails without the fix",
                             "passes with it", "If a test isn't possible, say why in the PR"):
             assert requirement in rule, (path, requirement)
+
+
+def test_kit_manifest_template_lists_known_features():
+    import json
+    manifest = json.loads((ROOT / "templates/agentic-kit.example.json").read_text())
+    assert manifest["kit"] == "agentic-delivery-team"
+    assert manifest["version"].startswith("v")
+    assert set(manifest["features"]) == {"review_gate", "product_files", "runner", "pool", "lifecycle", "standup"}
+    assert all(isinstance(v, bool) for v in manifest["features"].values())
+    doc = (ROOT / "docs/versions-and-features.md").read_text()
+    for feature in manifest["features"]:
+        assert f"`{feature}`" in doc
+
+
+def test_feature_table_lists_dependencies():
+    # A feature that needs another must say so, and the example must respect it (#87 review).
+    text = (ROOT / "docs/versions-and-features.md").read_text()
+    rows = {line.split("|")[1].strip(" `"): line.split("|")[4] for line in text.splitlines()
+            if line.startswith("| `")}
+    assert "`runner`" in rows["pool"] and "`runner`" in rows["lifecycle"]
+    assert "`lifecycle`" in rows["standup"]
+    assert "except the lifecycle and stand-up" in text

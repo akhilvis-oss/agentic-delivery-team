@@ -42,6 +42,10 @@ The kit was built by using it. Its first outside proof was a real story in a pri
 
 The task lifecycle was proven separately in a live trial on this repository, including a bot that tried to approve its own work and was reverted by the guard ([evidence](https://github.com/akhilvis-oss/agentic-delivery-team/issues/38#issuecomment-6745339854)).
 
+## One version, feature switches
+
+A project uses one kit version for everything and turns features on as it needs them: the review gate and product files first, then the runner and pool, then the lifecycle and stand-up. One small file in your repository records the version and the switches. See [versions and feature switches](docs/versions-and-features.md).
+
 ## Get started
 
 Start small and add pieces as you need them. **[Quickstart](docs/quickstart.md)** walks through each level.
