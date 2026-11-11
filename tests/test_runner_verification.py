@@ -347,7 +347,8 @@ def test_private_argv_space_path_preflight_does_not_execute(setup, tmp_path, mon
     assert 'Required checks (preflight, build, story tests and runner checks)' in prompt
 
 
-def test_worker_block_preserves_dirty_work_and_receipt_without_replay(setup, monkeypatch):
+@pytest.mark.parametrize('check', [None, *runner.WORKER_BLOCKED_CHECKS])
+def test_worker_block_preserves_dirty_work_and_receipt_without_replay(setup, monkeypatch, check):
     cfg, state, path, _ = setup
     calls = []
     def blocked(config, state, path, job, role):
@@ -355,19 +356,46 @@ def test_worker_block_preserves_dirty_work_and_receipt_without_replay(setup, mon
         fixtures.deliver(config)
         value = fixtures.result('blocked')
         value['summary'] = '/private/secret/check failed with credentials'
+        if check:
+            value['blocked_check'] = check
         return value
     monkeypatch.setattr(runner, 'execute', blocked)
     runner.run_once(cfg)
     receipt_path = state / 'receipts/task.json'
     receipt = receipt_path.read_bytes()
     public = runner.public_receipt(runner.read(receipt_path))
-    assert public['blocked_reason'] == runner.block_reason('worker_reported_blocked')
+    expected = runner.block_reason('worker_' + check if check else 'worker_reported_blocked')
+    assert public['blocked_reason'] == expected
+    if check:
+        assert expected['reason'] != runner.block_reason('worker_reported_blocked')['reason']
+        assert len(set(runner.WORKER_BLOCKED_CHECKS.values())) == len(runner.WORKER_BLOCKED_CHECKS)
     assert '/private/secret' not in str(public)
     assert 'delivery.txt' in runner.dirty_paths(cfg)
     runner.run_once(cfg)
     assert receipt_path.read_bytes() == receipt
     assert calls == ['worker']
     assert not runner.read(path).get('runner_commits')
+
+
+@pytest.mark.parametrize('check', ['/private/secret/tool', 'arbitrary worker text', '', [], {}])
+def test_worker_blocked_check_rejects_untrusted_identifiers(check):
+    value = fixtures.result('blocked')
+    value['blocked_check'] = check
+    with pytest.raises(ValueError, match='Invalid blocked check'):
+        runner.validate_result(value, 'worker')
+    unsafe = {'reason_code': 'worker_reported_blocked', 'reason': check}
+    assert runner.public_block_reason(unsafe) == runner.block_reason('assignment_preflight')
+
+
+def test_worker_blocked_check_schema_and_status_validation():
+    field = runner.schema('worker', lifecycle=True, pool=True)['properties']['blocked_check']
+    assert field['anyOf'][1]['enum'] == list(runner.WORKER_BLOCKED_CHECKS)
+    value = fixtures.result('ready_for_review')
+    value['blocked_check'] = None
+    runner.validate_result(value, 'worker')
+    value['blocked_check'] = 'build'
+    with pytest.raises(ValueError, match='Invalid blocked check'):
+        runner.validate_result(value, 'worker')
 
 
 def test_bare_program_resolved_using_path(setup, tmp_path, monkeypatch):

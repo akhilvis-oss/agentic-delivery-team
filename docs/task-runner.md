@@ -128,9 +128,15 @@ Blocked receipts add `blocked_reason` with a machine-readable `reason_code` and 
 short `reason`. Codes include `prerequisite_failed`, `worker_reported_blocked` and
 `reviewer_reported_blocked`. Runner-authored reasons identify command preflight
 (including the configured check's one-based index), agent compatibility,
-assignment safety or runner required checks. Worker/reviewer reports use fixed
-messages; their detailed check names and explanations remain private and are
-never inferred from arbitrary worker text. Public receipts and the factual
+assignment safety or runner required checks. Workers can supply the optional
+structured `blocked_check` field: `preflight`, `build`, `story_tests`,
+`runner_checks`, or `prerequisite` (or `null` when none applies). For a blocked
+result, the runner maps this allowlisted category to a distinct fixed explanation,
+so receipts and stand-up distinguish a failed build from unavailable story tests.
+Existing clients that omit the field retain the generic worker-blocked message.
+Unknown categories are rejected; a non-null category requires blocked status.
+Reviewer reports use a fixed message. Detailed check names and explanations stay
+private and are never inferred from arbitrary worker text. Public receipts and the factual
 stand-up validate reasons against the runner's safe vocabulary, falling back to
 a generic safety-preflight reason for unknown or altered data. This change does
 not enable scheduled stand-up.

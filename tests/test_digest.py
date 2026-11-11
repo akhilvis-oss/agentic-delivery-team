@@ -538,12 +538,13 @@ def test_disabled_model_never_calls_or_reserves_budget(tmp_path, model_setting):
 
 
 @pytest.mark.parametrize('tampered', [False, True])
-def test_blocked_reason_rendering_is_path_free(tmp_path, tampered):
+@pytest.mark.parametrize('category', ['worker_reported_blocked', 'worker_build', 'worker_story_tests'])
+def test_blocked_reason_rendering_is_path_free(tmp_path, tampered, category):
     from runner.task_runner import block_reason
     cfg = configuration(tmp_path)
     h = Hub(cfg['lifecycle'])
     h.issue()
-    reason = block_reason('worker_reported_blocked')
+    reason = block_reason(category)
     if tampered:
         reason['reason'] = '/private/secret/tool failed; arbitrary worker text'
     job = dict(id='blocked-job', status='blocked', updated_at=AT.isoformat(),
@@ -553,4 +554,6 @@ def test_blocked_reason_rendering_is_path_free(tmp_path, tampered):
     body = '\n'.join(line for section in sections for line in section)
     assert 'local job needs attention' in body
     assert ('prerequisite_failed' if tampered else 'worker_reported_blocked') in body
+    if not tampered:
+        assert reason['reason'] in body
     assert '/private/secret' not in body and 'arbitrary worker text' not in body

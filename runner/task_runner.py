@@ -53,6 +53,17 @@ BLOCK_REASONS = {
     "worker_reported_blocked": ("worker_reported_blocked", "Worker reported a required check or prerequisite blocked; owner reconciliation required."),
     "reviewer_reported_blocked": ("reviewer_reported_blocked", "Independent reviewer reported blocked; owner reconciliation required."),
 }
+WORKER_BLOCKED_CHECKS = {
+    "preflight": "Worker preflight failed or unavailable; owner reconciliation required.",
+    "build": "Worker build failed or unavailable; owner reconciliation required.",
+    "story_tests": "Worker story tests failed or unavailable; owner reconciliation required.",
+    "runner_checks": "Worker runner checks failed or unavailable; owner reconciliation required.",
+    "prerequisite": "Worker prerequisite failed or unavailable; owner reconciliation required.",
+}
+BLOCK_REASONS.update({
+    "worker_" + check: ("worker_reported_blocked", reason)
+    for check, reason in WORKER_BLOCKED_CHECKS.items()
+})
 
 
 def block_reason(key):
@@ -645,6 +656,10 @@ def schema(role, lifecycle=False, pool=False):
             "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
             "reason": {"type": "string"}}, "required": ["kind", "reason"], "additionalProperties": False}]}
     required = list(fields)
+    if role == "worker":
+        # Optional for compatibility with existing agent-file-v1 clients.
+        fields["blocked_check"] = {"anyOf": [
+            {"type": "null"}, {"type": "string", "enum": list(WORKER_BLOCKED_CHECKS)}]}
     if pool:
         fields["usage_units"] = {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
         fields["rate_limited"] = {"type": "boolean"}
@@ -660,7 +675,7 @@ def validate_result(result, role):
     if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
             or "rate_limited" in result and type(result["rate_limited"]) is not bool):
         raise ValueError("Invalid optional usage or availability report")
-    optional = {"usage_units", "rate_limited"} | ({"disagreement"} if role == "worker" else set())
+    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check"} if role == "worker" else set())
     if not isinstance(result, dict) or not set(spec["required"]) <= set(result) or set(result) - set(spec["required"]) - optional:
         raise ValueError("Incomplete structured result")
     if result.get("rate_limited") and result["status"] != "blocked":
@@ -669,6 +684,10 @@ def validate_result(result, role):
         raise ValueError("Invalid result status")
     if not isinstance(result["summary"], str):
         raise ValueError("Invalid summary")
+    check = result.get("blocked_check")
+    if check is not None and (not isinstance(check, str) or check not in WORKER_BLOCKED_CHECKS
+                              or result["status"] != "blocked"):
+        raise ValueError("Invalid blocked check")
     for key in ("tests", "limitations"):
         if not isinstance(result[key], list) or any(not isinstance(v, str) for v in result[key]):
             raise ValueError("Invalid result list")
@@ -756,6 +775,8 @@ LIFECYCLE_NOTES = {
         "Report ready_for_review after implementation and focused tests. "
         "Required checks (preflight, build, story tests and runner checks) must stop the task "
         "when they fail or are unavailable; report blocked with the check name in private results. "
+        "Set blocked_check to preflight, build, story_tests, runner_checks, or prerequisite "
+        "to identify the failing category safely; use null when none applies. "
         "Exploratory commands (searches, file lookups and listings) may fail normally; "
         "recover and continue. Do not install dependencies, substitute configured tools, "
         "or silently retry a blocked task."
@@ -1426,7 +1447,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                             or git(config, "rev-parse", "HEAD") != before_head):
                         raise CommitRefused("history_changed")
                     if job["worker"]["status"] == "blocked":
-                        job["blocked_reason"] = block_reason("worker_reported_blocked")
+                        check = job["worker"].get("blocked_check")
+                        job["blocked_reason"] = block_reason("worker_" + check if check else "worker_reported_blocked")
                         job["status"] = "needs_owner" if lifecycle_cfg else "blocked"
                         break
                     disagreement = job["worker"].get("disagreement") if lifecycle_cfg else None
