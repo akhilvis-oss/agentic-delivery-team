@@ -655,16 +655,14 @@ def schema(role, lifecycle=False, pool=False):
         fields["disagreement"] = {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
             "reason": {"type": "string"}}, "required": ["kind", "reason"], "additionalProperties": False}]}
-    required = list(fields)
     if role == "worker":
-        # Optional for compatibility with existing agent-file-v1 clients.
+        # Strict output schemas require every property; null means no named check.
         fields["blocked_check"] = {"anyOf": [
             {"type": "null"}, {"type": "string", "enum": list(WORKER_BLOCKED_CHECKS)}]}
     if pool:
         fields["usage_units"] = {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
         fields["rate_limited"] = {"type": "boolean"}
-        required += ["usage_units", "rate_limited"]
-    return {"type": "object", "properties": fields, "required": required,
+    return {"type": "object", "properties": fields, "required": list(fields),
             "additionalProperties": False}
 
 
@@ -676,7 +674,9 @@ def validate_result(result, role):
             or "rate_limited" in result and type(result["rate_limited"]) is not bool):
         raise ValueError("Invalid optional usage or availability report")
     optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check"} if role == "worker" else set())
-    if not isinstance(result, dict) or not set(spec["required"]) <= set(result) or set(result) - set(spec["required"]) - optional:
+    # Accept legacy agent-file-v1 results that omit newly introduced fields.
+    required = set(spec["required"]) - optional
+    if not required <= set(result) or set(result) - set(spec["required"]) - optional:
         raise ValueError("Incomplete structured result")
     if result.get("rate_limited") and result["status"] != "blocked":
         raise ValueError("Rate-limited phase cannot approve work")

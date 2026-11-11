@@ -387,10 +387,17 @@ def test_worker_blocked_check_rejects_untrusted_identifiers(check):
     assert runner.public_block_reason(unsafe) == runner.block_reason('assignment_preflight')
 
 
-def test_worker_blocked_check_schema_and_status_validation():
-    field = runner.schema('worker', lifecycle=True, pool=True)['properties']['blocked_check']
+@pytest.mark.parametrize('lifecycle', [False, True])
+@pytest.mark.parametrize('pool', [False, True])
+def test_worker_blocked_check_schema_and_status_validation(lifecycle, pool):
+    spec = runner.schema('worker', lifecycle=lifecycle, pool=pool)
+    assert set(spec['properties']) == set(spec['required'])
+    field = spec['properties']['blocked_check']
+    assert field['anyOf'][0] == {'type': 'null'}
     assert field['anyOf'][1]['enum'] == list(runner.WORKER_BLOCKED_CHECKS)
     value = fixtures.result('ready_for_review')
+    assert 'blocked_check' not in value
+    runner.validate_result(value, 'worker')
     value['blocked_check'] = None
     runner.validate_result(value, 'worker')
     value['blocked_check'] = 'build'
