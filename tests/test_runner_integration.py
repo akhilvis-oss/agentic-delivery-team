@@ -303,6 +303,76 @@ def test_contradictory_review_prevents_merge(delivery):
     assert not any(w[0] == "AUTO" for w in client.writes)
 
 
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.parametrize("source", ["comment", "review"])
+@pytest.mark.parametrize("reviewer", ["Checker", "Second review"])
+@pytest.mark.parametrize("verdict", ["BLOCKED", "CHANGES REQUIRED"])
+def test_negative_verdict_in_either_channel_blocks_both_merge_paths(
+    delivery, auto, source, reviewer, verdict
+):
+    _, _, job, client = delivery
+    client.auto = auto
+    row = {"body": f"{reviewer}: {verdict}\nNeeds a decision.",
+           "state": "COMMENTED", "commit_id": job["reviewed_head"]}
+    (client.reviews if source == "review" else client.comment_rows).append(row)
+    advance(delivery)
+    assert job["status"] == "needs_owner"
+    assert job["integration"]["reason"] == "merge_conditions_missing"
+    assert not any(w[0] in {"AUTO", "PUT"} for w in client.writes)
+
+
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.parametrize("reviewer", ["Checker", "Second review"])
+@pytest.mark.parametrize("review_state", ["DISMISSED", "PENDING", "CHANGES_REQUESTED", None])
+def test_inactive_pass_never_authorizes_either_merge_path(delivery, auto, reviewer, review_state):
+    cfg, _, job, client = delivery
+    client.auto = auto
+    if reviewer == "Second review":
+        cfg["integration"].update(
+            declared_tier="domain-critical", reviewer_provider="first",
+            second_reviewer={"actor": "second-bot", "provider": "second"})
+        cfg["integration"]["public_evidence"] += (
+            "\n## Failure-mode verification\nFailure cases: synthetic.\nRecovery: polling.\nConcurrency: drift.\n")
+    client.check_state = "pending"
+    advance(delivery)
+    if reviewer == "Checker":
+        client.reviews[0]["state"] = review_state
+    else:
+        client.reviews.append({"commit_id": job["reviewed_head"], "state": review_state,
+                               "user": {"login": "second-bot"},
+                               "body": "Second review: PASS\nProvider: second"})
+    client.check_state = "success"
+    advance(delivery)
+    assert job["integration"]["stage"] != "auto_merge_enabled"
+    assert not any(w[0] in {"AUTO", "PUT"} for w in client.writes)
+
+
+def test_active_approved_checker_pass_can_authorize_merge(delivery):
+    _, _, job, client = delivery
+    client.check_state = "pending"
+    advance(delivery)
+    client.reviews[0]["state"] = "APPROVED"
+    client.check_state = "success"
+    advance(delivery)
+    assert job["integration"]["stage"] == "auto_merge_enabled"
+
+
+@pytest.mark.parametrize("change", ["negative_verdict", "dismissed_pass"])
+def test_direct_merge_rechecks_review_validity_after_clean_status_rejection(delivery, monkeypatch, change):
+    _, _, job, client = delivery
+    def reject_auto_merge(pr):
+        if change == "negative_verdict":
+            client.reviews.append({"state": "COMMENTED", "body": "Checker: BLOCKED"})
+        else:
+            client.reviews[0]["state"] = "DISMISSED"
+        return False
+    monkeypatch.setattr(client, "enable_auto_merge", reject_auto_merge)
+    advance(delivery)
+    assert job["status"] == "needs_owner"
+    assert job["integration"]["reason"] == "merge_conditions_missing"
+    assert not any(w[0] == "PUT" for w in client.writes)
+
+
 def test_integration_opt_in_and_pool_exclusion():
     assert integration.options({}) is None
     with pytest.raises(ValueError):
@@ -382,7 +452,7 @@ def test_push_uses_only_verified_identity_and_disposable_git(tmp_path, monkeypat
     assert len(seen) == 2 and not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("change", ["head", "body", "checks", "review"])
+@pytest.mark.parametrize("change", ["head", "body", "checks", "review", "review_body", "dismissed"])
 def test_changed_evidence_cancels_auto_merge(delivery, change):
     _, _, job, client = delivery
     advance(delivery)
@@ -392,6 +462,10 @@ def test_changed_evidence_cancels_auto_merge(delivery, change):
         client.pr["body"] += "\nchanged"
     elif change == "checks":
         client.check_state = "failure"
+    elif change == "review_body":
+        client.reviews.append({"state": "COMMENTED", "body": "Checker: BLOCKED"})
+    elif change == "dismissed":
+        client.reviews[0]["state"] = "DISMISSED"
     else:
         client.comment_rows.append({"body": "Checker: CHANGES REQUIRED"})
     advance(delivery)

@@ -959,7 +959,15 @@ def reconcile(cfg, jobs, client):
             continue
         try:
             remote = state(client.issue(binding["issue"]))
-            expected = job_records(cfg, job)[-1]["to"]
+            local_records = job_records(cfg, job)
+            if local_records:
+                expected = local_records[-1]["to"]
+            elif job["status"] == "ready_for_integration" and job.get("integration", {}).get("pr"):
+                # Publication hands transitions to the workflow. Report drift
+                # without queuing a runner transition or changing remote state.
+                expected = "merged" if job["integration"].get("stage") == "merged" else "pr-open"
+            else:
+                continue
             if expected != remote:
                 result.append(
                     dict(

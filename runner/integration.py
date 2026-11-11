@@ -282,9 +282,10 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     if any(r.get("state") in {"CHANGES_REQUESTED", "PENDING"} for r in reviews):
         return "merge_conditions_missing"
     if any(re.match(r"(?:Checker|Second review): (?:CHANGES REQUIRED|BLOCKED)", c.get("body", ""))
-           for c in comments):
+           for c in [*comments, *reviews]):
         return "merge_conditions_missing"
-    if not any(r.get("commit_id") == job["reviewed_head"]
+    if not any(r.get("state") in {"COMMENTED", "APPROVED"}
+               and r.get("commit_id") == job["reviewed_head"]
                and r.get("user", {}).get("login") == cfg["actors"]["runner"]
                and r.get("body", "").startswith("Checker: PASS\n")
                and ("Reviewer session: " + job["review_session"]) in r["body"] for r in reviews):
@@ -292,6 +293,7 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     second = opts.get("second_reviewer")
     if opts["declared_tier"] == "domain-critical" and second:
         if not any(r.get("user", {}).get("login") == second["actor"]
+                   and r.get("state") in {"COMMENTED", "APPROVED"}
                    and r.get("commit_id") == job["reviewed_head"]
                    and r.get("body", "").startswith("Second review: PASS\n")
                    and ("Provider: " + second["provider"]) in r["body"] for r in reviews):

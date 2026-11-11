@@ -1164,3 +1164,35 @@ def test_published_job_leaves_pr_states_to_trusted_workflow(tmp_path):
     job = {"status": "ready_for_integration", "assignment": {"lifecycle": {"issue": 1, "event": 2}},
            "integration": {"pr": 9, "stage": "checking"}}
     assert core.job_records(cfg, job) == []
+
+
+@pytest.mark.parametrize("stage,expected", [
+    ("created", "pr-open"), ("checking", "pr-open"),
+    ("auto_merge_enabled", "pr-open"), ("merged", "merged"),
+])
+@pytest.mark.parametrize("matched", [True, False])
+def test_reconcile_published_job_reports_workflow_state_without_writes(tmp_path, stage, expected, matched):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.issue(state=expected if matched else "in-review")
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": stage}}
+    before = copy.deepcopy(job)
+    assert core.reconcile(cfg, [job], h.client()) == (
+        [] if matched else [dict(issue=1, job="job", local=expected, remote="in-review")])
+    assert job == before
+    assert h.calls == []
+    assert not (Path(cfg["state_dir"]) / "outbox").exists()
+
+
+def test_reconcile_published_job_reports_unavailable_remote(tmp_path):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    h.fail_read = True
+    job = {"id": "job", "status": "ready_for_integration",
+           "assignment": {"lifecycle": {"issue": 1, "event": 2}},
+           "integration": {"pr": 9, "stage": "merged"}}
+    assert core.reconcile(cfg, [job], h.client()) == [
+        dict(issue=1, job="job", error="remote_unavailable")]
+    assert h.calls == []
