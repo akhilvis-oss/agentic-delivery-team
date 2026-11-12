@@ -1,6 +1,7 @@
 """Owner-visible stops and polling, using synthetic transports and temporary state."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -117,6 +118,119 @@ def test_same_second_reapproval_attested_exactly_once(tmp_path):
     proofs = [r for r in core.records(cfg, hub.client().comments(1), 1)
               if r["kind"] == "approval" and r["event"] == latest["id"]]
     assert len(proofs) == 1
+
+
+@pytest.mark.parametrize("fresh_first", [False, True])
+@pytest.mark.parametrize("same_second", [False, True])
+def test_delayed_webhook_cannot_attest_stale_scope_or_reject_new_approval(
+    tmp_path, fresh_first, same_second
+):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(body="Original approved story.")
+    old = approval_event(cfg, hub)
+    hub.event(1, "needs-owner", "runner")
+    hub.issues[1]["body"] = "Revised story with the owner's answer."
+    latest = hub.event(1, "approved", "owner")
+    if not same_second:
+        latest["created_at"] = hub.issues[1]["updated_at"] = "2026-01-02T10:01:00+00:00"
+    fresh = approval_event(cfg, hub)
+    client = hub.client("workflow")
+    if fresh_first:
+        core.attest_approval(cfg, client, fresh)
+    for _ in range(2):
+        with pytest.raises(core.Unavailable):
+            core.attest_approval(cfg, client, old)
+        assert core.state(hub.issues[1]) == "approved"
+        assert not any(call[0] == "DELETE" for call in hub.calls)
+    core.attest_approval(cfg, client, fresh)
+    core.attest_approval(cfg, client, fresh)
+    proofs = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert len(proofs) == 1
+    assert proofs[0]["event"] == latest["id"]
+    assert proofs[0]["scope_sha256"] == hashlib.sha256(fresh["issue"]["body"].encode()).hexdigest()
+    core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "approved"
+    explanations = [c["body"] for c in client.comments(1) if "ignored" in c["body"]]
+    assert len(explanations) == 1 and "re-approve" in explanations[0]
+    assert all(cfg["state_dir"] not in body and "Original approved story" not in body
+               for body in explanations)
+
+
+def test_replayed_snapshot_cannot_add_a_second_scope_to_proven_event(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    client = hub.client("workflow")
+    event = approval_event(cfg, hub)
+    core.attest_approval(cfg, client, event)
+    event["issue"]["body"] = "A different same-second snapshot."
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    assert len([r for r in core.records(cfg, client.comments(1), 1)
+                if r["kind"] == "approval"]) == 1
+    assert not core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "approved"
+
+
+def test_event_read_outage_on_replay_preserves_valid_approval(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    client = hub.client("workflow")
+    event = approval_event(cfg, hub)
+    core.attest_approval(cfg, client, event)
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic history outage")
+
+    monkeypatch.setattr(client, "events", unavailable)
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    assert core.state(hub.issues[1]) == "approved"
+    assert not any(call[0] == "DELETE" for call in hub.calls)
+
+
+def test_uncertain_approval_intent_cannot_be_rebound_to_another_scope(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    client = hub.client("workflow")
+    event = approval_event(cfg, hub)
+    request = client.request
+
+    def uncertain(method, path, data=None):
+        if method == "POST" and core.PREFIX in data.get("body", ""):
+            raise core.Uncertain("synthetic lost publication")
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", uncertain)
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    monkeypatch.setattr(client, "request", request)
+    # Restore the label to model the guard observing approval while its first
+    # publication is still uncertain; the cycle and event ID are unchanged.
+    hub.issues[1]["labels"] = [{"name": "status:approved"}]
+    event["issue"]["body"] = "Conflicting snapshot while publication is uncertain."
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    intents = [core.read(p)["record"] for p in (Path(cfg["state_dir"]) / "outbox").glob("*.json")]
+    assert len([r for r in intents if r["kind"] == "approval"]) == 1
+    assert not any(r["kind"] == "approval" for r in core.records(cfg, client.comments(1), 1))
+
+
+def test_valid_proof_takes_precedence_over_old_rejection_marker(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    hub.approve()
+    proof, = core.records(cfg, hub.client().comments(1), 1)
+    client = hub.client("workflow")
+    client.request("POST", "/issues/1/comments", {"body": (
+        f"<!-- agentic-approval-rejected:{proof['event']}:synthetic -->"
+    )})
+    assert not core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "approved"
 
 
 def test_failed_attestation_removes_approval_explains_and_guard_does_not_restore(tmp_path):

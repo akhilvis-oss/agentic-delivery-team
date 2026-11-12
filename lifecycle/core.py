@@ -1200,20 +1200,46 @@ def attest_approval(cfg, client, event):
 def _attest_approval(cfg, client, event):
     issue = event["issue"]
     events = []
+    latest = None
+
+    def ignore_snapshot():
+        # This is not a rejection of the current label event. In particular do
+        # not emit a rejection marker that guard_issue could apply to it.
+        marker = "<!-- agentic-approval-snapshot-ignored:" + key(event) + " -->"
+        comments = client.comments(issue["number"])
+        if not any(marker in c.get("body", "") and c.get("user", {}).get("login")
+                   == cfg["actors"]["workflow"] for c in comments):
+            client.request("POST", f"/issues/{issue['number']}/comments", {"body": (
+                "A delayed or conflicting approval snapshot was ignored. "
+                "It could not be bound to the current approval, so the guard preserved "
+                "the current label and any existing approval proof. Owner: if this story "
+                "is still waiting for approval, remove and re-add status:approved to "
+                "re-approve the current story.\n" + marker
+            )})
+        raise Unavailable("Approval snapshot is stale or ambiguous; current approval preserved")
 
     def statuses(snapshot):
         names = [x["name"] if isinstance(x, dict) else x for x in snapshot["labels"]]
         return sorted(x for x in names if x.startswith("status:"))
 
     def reject_labels(message="Approval needs valid status labels and an owner label event"):
+        # A retry or an evidence outage must not revoke an already attested
+        # approval. Re-read history before removal to detect a newer cycle too.
+        comments = client.comments(issue["number"])
+        proofs = [r for r in records(cfg, comments, issue["number"]) if r["kind"] == "approval"]
+        if any(latest is None or r["event"] == int(latest["id"]) for r in proofs):
+            ignore_snapshot()
+        if events:
+            _, head = canonical_state(cfg, client.events(issue["number"]))
+            if head != latest:
+                ignore_snapshot()
         # Remove only the approval we cannot honour, preserving all other labels.
         removal_error = None
         try:
             client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Aapproved")
         except Unavailable as exc:
             removal_error = exc
-        rejected = max((int(e["id"]) for e in events
-                        if e.get("label", {}).get("name") == "status:approved"), default=0)
+        rejected = int(latest["id"]) if latest is not None else 0
         marker = f"<!-- agentic-approval-rejected:{rejected}:" + key(issue) + " -->"
         try:
             comments = client.comments(issue["number"])
@@ -1252,9 +1278,22 @@ def _attest_approval(cfg, client, event):
     pair = ["status:approved", "status:draft"]
     try:
         events = client.events(issue["number"])
-        snapshots = [statuses(issue), statuses(client.issue(issue["number"]))]
+        canonical, latest = canonical_state(cfg, events)
+        live = client.issue(issue["number"])
+        snapshots = [statuses(issue), statuses(live)]
     except Unavailable:
         reject_labels("Approval evidence unavailable; re-approve")
+    timestamp_matches = [e for e in events
+                         if e.get("event") == "labeled"
+                         and e.get("label", {}).get("name") == "status:approved"
+                         and e.get("created_at") == issue.get("updated_at")]
+    if latest is not None and latest.get("created_at") != issue.get("updated_at"):
+        ignore_snapshot()
+    # IDs identify cycles, but the webhook has no label-event ID. When multiple
+    # cycles share a timestamp, its body must also agree with the live snapshot;
+    # otherwise an old webhook could attest a newer event with obsolete scope.
+    if len(timestamp_matches) > 1 and (issue.get("body") or "") != (live.get("body") or ""):
+        ignore_snapshot()
     if any(s != ["status:approved"] and not (owner and s == pair) for s in snapshots):
         reject_labels()
     if not owner:
@@ -1282,9 +1321,20 @@ def _attest_approval(cfg, client, event):
         and e.get("created_at") == issue.get("updated_at")
         and int(e["id"]) > boundary
     ]
-    canonical, latest = canonical_state(cfg, events)
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":
         reject_labels("Approval event snapshot is unavailable or ambiguous; re-approve")
+    scope = hashlib.sha256((issue.get("body") or "").encode()).hexdigest()
+    proofs = [r for r in records(cfg, client.comments(issue["number"]), issue["number"])
+              if r["kind"] == "approval" and r["event"] == int(latest["id"])]
+    # Include uncertain/pending publications: a lost response must never allow
+    # a second body to be queued for the same event under a different key.
+    intents = [read(p)["record"] for p in (Path(cfg["state_dir"]) / "outbox").glob("*.json")]
+    bound = proofs + [r for r in intents if r["issue"] == issue["number"]
+                     and r["kind"] == "approval" and r["event"] == int(latest["id"])]
+    if any(r["scope_sha256"] != scope for r in bound):
+        ignore_snapshot()
+    if proofs:
+        return
     if pair in snapshots:
         source, _ = canonical_state(
             cfg, [e for e in events if int(e["id"]) < int(latest["id"])]
@@ -1309,7 +1359,7 @@ def _attest_approval(cfg, client, event):
         "approved",
         event=int(latest["id"]),
         kind="approval",
-        scope_sha256=hashlib.sha256((issue.get("body") or "").encode()).hexdigest(),
+        scope_sha256=scope,
         approved_by=cfg["actors"]["owner"],
     )
     path = queue(cfg, record, role="workflow")
@@ -1331,10 +1381,10 @@ def guard_issue(cfg, client, number):
     comments = client.comments(number) if canonical == "approved" else []
     proven = any(r["kind"] == "approval" and r["event"] == int(event["id"])
                  for r in records(cfg, comments, number)) if event else False
-    if canonical == "approved" and event is not None and any(
+    if canonical == "approved" and event is not None and not proven and any(
             c.get("user", {}).get("login") == cfg["actors"]["workflow"]
             and (f"<!-- agentic-approval-rejected:{event['id']}:" in c.get("body", "")
-                 or not proven and "<!-- agentic-approval-rejected:0:" in c.get("body", ""))
+                 or "<!-- agentic-approval-rejected:0:" in c.get("body", ""))
             for c in comments):
         if not permitted(cfg, canonical, "needs-owner", cfg["actors"]["workflow"]):
             return False

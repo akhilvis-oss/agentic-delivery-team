@@ -78,6 +78,18 @@ and re-approval in the same second use event IDs to distinguish approval cycles;
 duplicate approval events within one cycle still stop safely. Replaying an old
 webhook never approves a later edit.
 
+### A delayed or conflicting approval snapshot was ignored
+
+The incoming webhook could not be tied to the current approval. The guard
+preserves the current label and existing proof instead of rejecting a newer
+approval. When approval cycles share a second, a conflicting story body is
+ignored; it cannot create a second proof with different scope for that event.
+An uncertain publication also keeps its original scope on retry. If the current
+approval already has a proof, no action is needed. If the story still waits for
+approval, review its current body, then remove and re-add `status:approved` to
+re-approve. If the body was edited after a same-second re-approval, a fresh
+approval is needed rather than replaying the earlier webhook.
+
 ### Is the service still polling?
 
 Look for the pinned **Lifecycle service last poll** comment on the latest
