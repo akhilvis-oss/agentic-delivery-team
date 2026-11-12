@@ -1,6 +1,6 @@
 {
   "kit": "agentic-delivery-team",
-  "version": "v0.5.3",
+  "version": "v0.5.4",
   "features": {
     "review_gate": true,
     "product_files": true,

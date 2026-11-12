@@ -72,7 +72,9 @@ Read these before relying on the kit:
 
 ## What's next
 
-See the [roadmap](ROADMAP.md): v0.5.3 makes approval to merged pull request fully automatic, and v0.6 adds a one-command setup wizard so owners never touch a config file.
+[v0.5.3](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.3) shipped opt-in delivery from owner approval through PR integration, with control-critical merges still reserved for the owner, plus one-label approval and service status and heartbeat. [v0.5.4](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.4) shipped fresh target-branch fetching for each story and bounded worker check corrections with clearer stop reasons.
+
+See the [roadmap](ROADMAP.md): v0.5.5 is next for lifecycle dispatch through the agent pool and more readable stand-ups; v0.6 plans a setup wizard and owner-tunable settings.
 
 ## Contributing and security
 

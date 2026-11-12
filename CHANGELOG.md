@@ -2,6 +2,27 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## v0.5.4 (2026-11-12): Fresh story bases and bounded check corrections
+- Lifecycle dispatch fetches each story's target branch with the Runner App and pins the fetched commit before creating its worktree. Failed fetches wait for retry without falling back to a stale local branch; recovery preserves existing job bases.
+- Workers can correct check failures caused by their own changes within a configured attempt limit (default three). Unavailable tools and unrelated failures still stop immediately; the runner's required checks remain authoritative.
+- Lifecycle stop comments distinguish unavailable checks, exhausted attempts and unrelated failures using fixed reason codes and owner next steps, without exposing private output.
+
+## v0.5.3 (2026-11-11): Approval through integration
+- **Opt-in standalone PR delivery:** after independent review, the runner can push the reviewed commit, open a pull request, record Checker evidence and merge when policy and trusted checks permit. Control-critical work remains owner-only; delivery uses repository-scoped Runner App permissions.
+- **Approve with one label:** the owner adds `status:approved` to a draft; the guard removes the draft label and binds approval to the event's issue body.
+- **Service observability:** local status, successful-poll heartbeat, stand-up heartbeat age and an optional independently scheduled watchdog with deduplicated outage alerts.
+- Runner verification reports allowlisted blocked-check categories; pool completion uses runner verification evidence.
+- One kit version and feature-switch record, adopter documentation and a public roadmap.
+- Agent rules require a regression test for every P0 or P1 review fix, or an explanation when a test is not possible.
+
+## v0.5.2 (2026-11-10): Runner-owned verification
+- Required checks run in disposable copies of the exact reviewed head before pool integration, with private verification receipts; worker test claims alone cannot approve integration.
+- Documented that tests execute with the host user's access, and the supported dedicated OS user setup for the pool, separate from lifecycle credentials.
+
+## v0.5.1 (2026-11-10): Independent review policy
+- Merge policy requires one independent Checker; a second reviewer from a different model provider is required only when configured. The Checker may use the same model as the Maker, in a fresh session.
+- Updated repository and starter-kit rules, with a regression test for the single-model policy.
+
 ## v0.5.0 (2026-11-10): Agent pool and launch kit
 - **Agent pool** (opt-in): approved, non-conflicting stories run in parallel across agent slots, each in its own worktree. Every story is reviewed by a fresh session from a different slot; lead-and-team mode lets a lead slot delegate and review. Owner-set budgets, rate-limit cool-downs, conflict and dependency waits, and refresh with a new-head review after main moves.
 - **Delivery planning** in the product agent rules: roadmap sections, a first milestone with story weights, story size, test scenarios per story and a critical regression set. The story template gains test scenarios, roadmap section and milestone fields.

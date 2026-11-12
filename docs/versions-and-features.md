@@ -2,10 +2,12 @@
 
 A project uses **one kit version** for everything, and turns **features on or off**. One small file in your repository records both: `.github/agentic-kit.json`, copied from [`templates/agentic-kit.example.json`](../templates/agentic-kit.example.json).
 
+**The kit file is not read by framework code today.** It records the version and which pieces are on; agents are told to read and respect it. The switches are a documented convention, not runtime enforcement: changing one does not itself start or stop a component. A future framework check is tracked in the [roadmap](../ROADMAP.md#later), without a promised date.
+
 ```json
 {
   "kit": "agentic-delivery-team",
-  "version": "v0.5.3",
+  "version": "v0.5.4",
   "features": {
     "review_gate": true,
     "product_files": true,
@@ -17,7 +19,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 }
 ```
 
-"Where is this project?" then has a one-line answer, for example: *v0.5.3, everything on except the lifecycle and stand-up.*
+"Where is this project?" then has a one-line answer, for example: *v0.5.4, everything on except the lifecycle and stand-up.*
 
 ## Features
 
