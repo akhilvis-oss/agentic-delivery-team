@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import fcntl
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
+import tempfile
 import time
 
-from lifecycle import core
+from lifecycle import app_tokens, core
 
 
 def runner_module():
@@ -96,11 +101,62 @@ def ensure_worktree(cfg, claim):
             "-b",
             branch,
             str(path),
-            claim.get("start_commit", cfg["base_branch"]),
+            claim["start_commit"],
         )
     status = git(cfg, "branch", "--show-current", worktree=str(path))
     if status.stdout.strip() != branch:
         raise core.Unavailable("Managed branch changed")
+
+
+def fetch_target(cfg):
+    """Fetch with an App-only credential in an isolated repository, never origin.
+
+    Source config (helpers, URL rewrites, includes and headers) cannot see the
+    credential. Only the fetched objects cross back into the managed repository.
+    """
+    try:
+        if "runner" not in cfg.get("app_auth", {}):
+            raise core.Unavailable("Runner App authentication required")
+        template = core.read(cfg["runner_config"])
+        template["lifecycle_config"] = cfg["config_path"]
+        enabled = runner_module().integration_api().options(template) is not None
+        token, _ = app_tokens.mint(
+            cfg, "runner", fetch_enabled=True, integration_enabled=enabled
+        )
+        with tempfile.TemporaryDirectory(prefix="fetch-", dir=cfg["state_dir"]) as scratch:
+            env = {k: v for k, v in os.environ.items() if k in {"PATH", "SYSTEMROOT", "LANG"}}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       HOME=scratch, XDG_CONFIG_HOME=scratch, GIT_TERMINAL_PROMPT="0")
+
+            def isolated(*args, authenticated=False):
+                command_env = dict(env)
+                if authenticated:
+                    auth = base64.b64encode(("x-access-token:" + token).encode()).decode()
+                    command_env.update(
+                        GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
+                        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + auth,
+                    )
+                return subprocess.run(
+                    ["git", "-C", scratch, "-c", "credential.helper=",
+                     "-c", "core.hooksPath=" + os.devnull,
+                     "-c", "http.followRedirects=false", *args],
+                    env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=True, timeout=120,
+                ).stdout
+
+            isolated("init", "--bare", "--template=")
+            isolated("fetch", "--no-tags", "--no-recurse-submodules",
+                     "https://github.com/" + cfg["repository"] + ".git",
+                     "refs/heads/" + cfg.get("base_branch", "main"), authenticated=True)
+            head = isolated("rev-parse", "--verify", "FETCH_HEAD^{commit}").decode().strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", head):
+                raise core.Unavailable("Invalid fetched commit")
+            git(cfg, "fetch", "--no-tags", "--no-recurse-submodules", scratch, head)
+            return head
+    except (app_tokens.AuthenticationError, core.Unavailable, OSError,
+            ValueError, subprocess.SubprocessError):
+        raise core.Unavailable("target_branch_fetch_failed") from None
 
 
 def cleanup(cfg, claim, issue):
@@ -290,6 +346,15 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 core.save(path, claim)
                 continue
             if claim["stage"] == "claimed":
+                if "start_commit" not in claim:
+                    try:
+                        claim["start_commit"] = fetch_target(cfg)
+                    except core.Unavailable:
+                        claim["error"] = "target_branch_fetch_failed"
+                        core.save(path, claim)
+                        continue
+                    claim.pop("error", None)
+                    core.save(path, claim)
                 record = core.public_record(
                     cfg,
                     claim["issue"],
@@ -333,6 +398,16 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     core.save(path, claim)
                     continue
             if claim["stage"] == "dispatched":
+                # Resume pre-fetch-version claims without using a stale local ref.
+                if "start_commit" not in claim:
+                    try:
+                        claim["start_commit"] = fetch_target(cfg)
+                    except core.Unavailable:
+                        claim["error"] = "target_branch_fetch_failed"
+                        core.save(path, claim)
+                        continue
+                    claim.pop("error", None)
+                    core.save(path, claim)
                 ensure_worktree(cfg, claim)
                 job_root = core.private(root / "jobs" / claim["job"])
                 template = core.read(

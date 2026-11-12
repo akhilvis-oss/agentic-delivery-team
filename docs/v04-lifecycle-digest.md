@@ -14,11 +14,11 @@ This is one opt-in work package for #19 and #25. The owner still controls scope 
 
 Keep the trusted `runner/`, `lifecycle/` and `digest/` directories together outside agent-writable worktrees. Use Python 3.11+, Git and a POSIX host. The implementation has no new Python runtime dependencies. Existing one-file runner installations work with lifecycle disabled; enabling it requires the complete directory layout.
 
-Copy the two example JSON files into private files. Fill absolute paths locally, outside source/agent worktrees. Protect files with mode 0600 and directories with 0700. Never commit the populated private configuration or credentials. For service dispatch, populate both a normal `runner_config` and a `primary_runner_config`; the latter supplies a primary worker profile and the same independent-review controls. The service creates isolated feature worktrees under the configured private `worktree_root`, from the local configured base branch. It never pushes a branch or opens a PR automatically.
+Copy the two example JSON files into private files. Fill absolute paths locally, outside source/agent worktrees. Protect files with mode 0600 and directories with 0700. Never commit the populated private configuration or credentials. For service dispatch, populate both a normal `runner_config` and a `primary_runner_config`; the latter supplies a primary worker profile and the same independent-review controls. The service creates isolated feature worktrees under the configured private `worktree_root`, from the exact fetched commit of the configured target branch on GitHub. It never pushes a branch or opens a PR automatically.
 
 Configure explicit `identity_roles`: the owner identity has `["owner", "product"]`, and the Product App identity has `["product"]`. Runner and Actions identities have their respective roles. The separate `actors` map selects the concrete publishing identity for each automated channel; it is not a one-role-per-person restriction. Role membership controls permitted actions, while owner-only decisions still require the designated owner identity. Configure the canonical `owner`, `runner`, `product` and `workflow` publishing identities. Runner/Product identities must differ from the owner. Use a repository-installed GitHub App installation token or a dedicated machine account's fine-grained token. The runtime performs a fixed read-only GraphQL viewer query before **any write**, and refuses a mismatched/owner identity. An installation/token that cannot satisfy that check is unsupported until verified; use a dedicated account rather than falling back to the owner's credentials. Authentication is explicit environment variables (`token_env`, `product_token_env`), with no `gh`/owner credential discovery or automatic account switching. The optional shared App helper below mints installation tokens in memory.
 
-Grant repository-scoped **Issues write** for labels, comments, follow-ups, assignments and digest issues. Reads of PRs, trusted gate checks and workflow-run metadata additionally require Pull requests read, Checks read and Actions read. Content/Git reads needed by your existing tooling are separate; the service uses your already-present local Git repository, without automatic fetches. Do not grant repository settings, administration, contents write or workflow write to the automation token. The local client restricts all writes to issue/label endpoints in the single configured repository, rejects redirects, and never interpolates issue/comment text into shell commands.
+Grant repository-scoped **Issues write** for labels, comments, follow-ups, assignments and digest issues, and **Contents read** for lifecycle target-branch fetches. Reads of PRs, trusted gate checks and workflow-run metadata additionally require Pull requests read, Checks read and Actions read. With delivery disabled, the fetch token requests exactly Issues write and Contents read (plus implicit Metadata read); ordinary issue-only job tokens retain their existing scope. Delivery-enabled fetch tokens retain the delivery permissions described below. Do not grant repository settings, administration or workflow write. The local client restricts issue transport writes to issue/label endpoints in the single configured repository, rejects redirects, and never interpolates issue/comment text into shell commands.
 
 The Product App publishing identity posts stand-ups and minor follow-up issues. The owner also has the Product role, but the automated client never falls back to the owner's token. The model is disabled by default, including the live trial. Only explicit `model.enabled: true` opts into API prose; then set a separate Claude API key in `model.key_env`. The digest's model identifier, token cap, current prices and monthly USD estimate budget are all private configuration; no model or price is hardcoded. The owner's subscription is not used for this API path.
 
@@ -76,6 +76,25 @@ python -m lifecycle.core --config '<PRIVATE_LIFECYCLE_JSON>' flush
 ```
 
 `serve` uses `poll_seconds`; no launchd installation is performed. An optional private `digest_config` lets the same loop check digest cadence. Only owner-approved labels dispatch normal work; `needs-primary` dispatches the configured Primary once. Other states wait. The service claims `(issue, approval event, deterministic job ID)` in durable private JSON before changing GitHub or enqueuing. Records use atomic, exclusive publication; crashes after labels/comments/enqueue are reconciled against the same claim/job rather than creating another job. Owner re-approval has a new event ID and a new job.
+
+Before dispatching each new approved story, the service fetches the configured
+`base_branch` (default `main`) directly from the configured GitHub repository,
+including private repositories. It authenticates only with the Runner App, using
+an isolated temporary Git repository with no credential helpers or inherited Git
+configuration. The exact fetched commit is saved as `start_commit` in the private
+claim before worktree creation; the story branch starts from that SHA, never a
+local branch. Polling executes jobs one at a time, so a merge that lands before
+the next story starts is included by its next fetch. Primary continuations keep
+their existing reviewed source commit. This does not select GitHub's default
+branch automatically or change PR delivery.
+
+A failed fetch, missing remote branch or App authentication failure records the
+fixed reason `target_branch_fetch_failed` in the claim. The story remains
+`status:approved`, without a worktree or queued job; a later poll retries. There
+is no local-branch fallback. A claim already pinned before a crash keeps its
+recorded start commit during recovery. Use `status` to identify waiting claims
+and inspect private claim state for the fixed reason; no Git output or credential
+is copied into public evidence.
 
 Issue history consists of fixed-field machine blocks authored by trusted identities. Repository, enclosing issue, author/role, transition, key, types and timestamps are checked. Owner label events supply approval authority; arbitrary comments, including digest replies, never do. Public records contain state, actor, job/event IDs, round, commit SHA, outcome, severity counts and fixed reason codes. Finding prose, arguments, paths, logs, task text and worker summaries stay private. P2 follow-up issues contain fixed metadata and reference their source issue; Primary consults private detail during triage.
 

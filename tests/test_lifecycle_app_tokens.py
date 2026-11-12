@@ -42,12 +42,14 @@ def test_mint_rejects_invalid_integration_opt_in(tmp_path, monkeypatch, role, en
         auth.mint(cfg, role, integration_enabled=enabled)
 
 
-def test_comments_only_still_limits_opted_in_runner(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fetch_enabled", [False, True])
+def test_comments_only_still_limits_opted_in_runner(tmp_path, monkeypatch, fetch_enabled):
     cfg = configured(tmp_path)
     api = API(cfg, "runner")
     monkeypatch.setattr(auth, "keychain_pem", lambda s: b"private-fixture")
     monkeypatch.setattr(auth, "jwt", lambda *a: "jwt-fixture")
-    auth.mint(cfg, "runner", integration_enabled=True, comments_only=True, at=AT, opener=api)
+    auth.mint(cfg, "runner", integration_enabled=True, fetch_enabled=fetch_enabled,
+              comments_only=True, at=AT, opener=api)
     assert json.loads(api.calls[2].data)["permissions"] == {"issues": "write"}
 
 
@@ -346,3 +348,36 @@ def test_stateless_token_is_opaque_through_mint_and_repository_request(
     client.opener = SimpleNamespace(open=opened)
     assert client.request("GET", "/issues/32")["number"] == 32
     assert len(calls) == 2 and client.identity_verified
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_fetch_token_exact_permissions(tmp_path, monkeypatch, enabled):
+    cfg = configured(tmp_path)
+    expected = (auth.INTEGRATION_PERMISSIONS if enabled else
+                {"issues": "write", "contents": "read"})
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: b"synthetic-key")
+    monkeypatch.setattr(auth, "jwt", lambda *a: "synthetic-jwt")
+    api = API(cfg, "runner")
+    api.responses[2]["permissions"] = {**expected, "metadata": "read"}
+    auth.mint(cfg, "runner", fetch_enabled=True, integration_enabled=enabled, at=AT, opener=api)
+    assert json.loads(api.calls[2].data)["permissions"] == expected
+    for mutation in ("missing", "extra", "broader"):
+        api = API(cfg, "runner")
+        api.responses[2]["permissions"] = {**expected, "metadata": "read"}
+        if mutation == "missing":
+            api.responses[2]["permissions"].pop("contents")
+        elif mutation == "extra":
+            api.responses[2]["permissions"]["administration"] = "write"
+        else:
+            api.responses[2]["permissions"]["contents"] = "admin"
+        with pytest.raises(auth.AuthenticationError, match="scope mismatch"):
+            auth.mint(cfg, "runner", fetch_enabled=True, integration_enabled=enabled, at=AT, opener=api)
+
+
+@pytest.mark.parametrize("role,enabled", [("runner", 1), ("runner", "true"),
+                                         ("runner", {}), ("product", True)])
+def test_mint_rejects_invalid_fetch_opt_in(tmp_path, monkeypatch, role, enabled):
+    cfg = configured(tmp_path)
+    monkeypatch.setattr(auth, "keychain_pem", lambda s: pytest.fail("must reject before Keychain"))
+    with pytest.raises(auth.AuthenticationError, match="fetch"):
+        auth.mint(cfg, role, fetch_enabled=enabled)

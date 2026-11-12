@@ -599,6 +599,7 @@ def configured_service(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_LIFECYCLE", core)
     monkeypatch.setattr(core, "GitHub", lambda c, role="runner", **kw: h.client(role))
     monkeypatch.setattr(runner, "check_cli", lambda c: "fixture version")
+    monkeypatch.setattr(service, "fetch_target", lambda c: service.git(c, "rev-parse", "main").stdout.strip())
     return cfg, h, runner
 
 
