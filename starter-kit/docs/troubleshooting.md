@@ -41,6 +41,58 @@ To re-trigger, the agent makes a small edit to the pull request description, or 
 
 ## Issues and labels
 
+### A task says `needs-owner`, `needs-primary` or `blocked`
+
+Read the lifecycle comment on the story. Every new stop has a fixed reason code
+and an action; replies to a stand-up do not approve work. To re-approve, resolve
+the stop, remove the stopped status in **Labels**, then add `status:approved` as
+the configured owner. The next build reads the complete story, including
+**Owner decisions**. The reason families mean:
+
+| Stop reason | What happened and what to do |
+| --- | --- |
+| `owner_question` | The builder's exact question is quoted. Add your answer to the story under **Owner decisions**, then re-approve. |
+| `question_withheld` | A question looked private and was withheld in full. Write "Please ask a public-safe question" under **Owner decisions**, then re-approve. Do not paste private logs into GitHub. |
+| `scope_change`, `acceptance_criteria_change`, `story_approval` | Product needs an owner decision. Update the story or its decisions, then re-approve. |
+| `clarification_unverified`, `product_request_unclassified`, `repository_evidence` | Repository evidence did not settle the owner decision. Record the answer under **Owner decisions**, then re-approve. |
+| `worker_*_unavailable`, `prerequisite_failed`, `assignment_preflight` | Setup or a required safety check could not run. Ask the operator to fix setup, then re-approve. |
+| `worker_*_unrelated_failure` | A check failed outside the builder's changes. Arrange a fix for that failure, then re-approve. |
+| `worker_*_attempts_exhausted_N` | The builder used its correction attempts. Arrange further correction, then re-approve. |
+| `worker_preflight`, `worker_build`, `worker_story_tests`, `worker_runner_checks`, `worker_prerequisite`, `worker_reported_blocked` | The builder stopped without a more specific cause. Ask the operator to resolve the named check, then re-approve. |
+| `required_check_failed` | Runner or PR checks failed. The comment includes the failure count and up to five bare test function names when reported. Arrange correction, then re-approve. Paths, parameters and logs are never published. Older results or unknown test formats may lack names or counts. |
+| `reviewer_reported_blocked` | Review needs further work or primary triage. Resolve the review on the linked PR before re-approving. |
+| `execution_failed` | Execution stopped or was interrupted. Ask the operator to reconcile the interrupted work, then re-approve. |
+| `publication_failed`, `publication_uncertain`, `auto_merge_disable_uncertain` | Publishing or cancelling auto-merge failed or has an unknown outcome. Inspect the PR on GitHub and ask the operator to reconcile it before retrying. |
+| `stale_head`, `gate_category_higher`, `merge_conditions_missing` | The reviewed head or required evidence is no longer sufficient. Arrange a fresh review or complete the missing evidence on the PR. |
+| `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
+| `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
+| `approved_scope_changed` | The issue changed after approval. Review the revised story, then re-approve. |
+| `approval_not_attested`, `invalid_status_change`, `owner_requested_stop` | Approval was rejected, the guard restored a stopped status, or a permitted actor stopped the task. Read the preceding comment, resolve it and re-approve. |
+
+### Approval could not be attested
+
+The guard could not uniquely connect the label to an owner event and story
+snapshot. It removes the `status:approved` label it cannot honour and explains
+the recovery on the story. Follow that comment and re-approve. A permitted stop
+and re-approval in the same second use event IDs to distinguish approval cycles;
+duplicate approval events within one cycle still stop safely. Replaying an old
+webhook never approves a later edit.
+
+### Is the service still polling?
+
+Look for the pinned **Lifecycle service last poll** comment on the latest
+stand-up issue. If no stand-up exists or stand-ups are disabled, open the
+**Lifecycle service status** issue. The service updates one pinned comment in
+place for that issue on every poll, before running a builder. The UTC time and
+configured interval are public; local paths and responses are not. Builds and
+reviews can delay the next poll. If the time stops advancing beyond that work,
+ask the operator to restore the service. Re-approving alone cannot restart it.
+Pinning uses [GitHub's issue-comment API](https://docs.github.com/en/rest/issues/comments#pin-an-issue-comment)
+with the existing Issues write permission; no workflow permission change is needed.
+Publication failures stop that poll; an ambiguous create is reconciled by its
+trusted marker instead of posting duplicates. If GitHub has no matching object,
+the operator must reconcile the publication before polling resumes.
+
 ### An issue was labelled `status:draft` automatically
 Expected. Every issue carries one status label, and a new issue starts as a draft. It means "not yet approved for work".
 

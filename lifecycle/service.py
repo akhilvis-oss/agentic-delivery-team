@@ -234,6 +234,70 @@ def cleanup(cfg, claim, issue):
         claim.pop("cleanup_pending", None)
 
 
+def publish_poll(cfg, client, issues, at):
+    """One discoverable, pinned comment; durable intents prevent duplicate POSTs.
+
+    This runs before builder execution so long builds are visible from GitHub.
+    PATCH and pin are idempotent; an ambiguous create must reconcile by marker.
+    """
+    root = Path(cfg["state_dir"])
+    path = root / "public-heartbeat.json"
+    journal = core.read(path) if path.exists() else {}
+    marker = "<!-- agentic-service-status-v1 -->"
+    standups = [i for i in issues if cfg.get("digest_config")
+                and core.is_report(cfg, i) and "<!-- agentic-digest-v1:" in (i.get("body") or "")]
+    statuses = [i for i in issues if i.get("user", {}).get("login") == cfg["actors"]["runner"]
+                and marker in (i.get("body") or "")]
+    targets = standups or statuses
+    if targets:
+        number = max(targets, key=lambda i: i["number"])["number"]
+    else:
+        if journal.get("issue_attempted"):
+            raise core.Unavailable("Service status issue needs reconciliation")
+        journal["issue_attempted"] = True
+        core.save(path, journal)
+        try:
+            issue = client.request("POST", "/issues", {
+                "title": "Lifecycle service status",
+                "body": "The pinned comment shows the service's last poll. "
+                        "If it stops updating, ask the operator to restore the service.\n" + marker,
+            })
+        except core.Unavailable as exc:
+            if not isinstance(exc, core.Uncertain):
+                journal["issue_attempted"] = False
+                core.save(path, journal)
+            raise
+        number = issue["number"]
+    comment_marker = "<!-- agentic-last-poll-v1 -->"
+    comments = [c for c in client.comments(number)
+                if c.get("user", {}).get("login") == cfg["actors"]["runner"]
+                and comment_marker in c.get("body", "")]
+    body = ("Lifecycle service last poll: " + dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat()
+            + ".\nExpected poll interval: " + str(cfg["poll_seconds"])
+            + " seconds, plus time spent building or reviewing. If this time stops "
+            "updating, ask the operator to restore the service; re-approving alone "
+            "will not restart it.\n" + comment_marker)
+    if comments:
+        comment = min(comments, key=lambda c: c["id"])
+        client.request("PATCH", f"/issues/comments/{comment['id']}", {"body": body})
+    else:
+        if journal.get("comment_attempted_for") == number:
+            raise core.Unavailable("Service status comment needs reconciliation")
+        journal["comment_attempted_for"] = number
+        core.save(path, journal)
+        try:
+            comment = client.request("POST", f"/issues/{number}/comments", {"body": body})
+        except core.Unavailable as exc:
+            if not isinstance(exc, core.Uncertain):
+                journal.pop("comment_attempted_for", None)
+                core.save(path, journal)
+            raise
+    if not comment.get("pin"):
+        client.request("PUT", f"/issues/comments/{comment['id']}/pin")
+    journal.update(issue=number, comment=comment["id"], last_poll=at)
+    core.save(path, journal)
+
+
 def poll(cfg, client, *, run_jobs=True, clock=time.time):
     validate_local(cfg)
     core.bind_state(cfg)
@@ -248,9 +312,11 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             return []
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
         core.flush(cfg, client)
+        all_issues = client.pages("/issues?state=all")
+        publish_poll(cfg, client, all_issues, clock())
         issues = [
             i
-            for i in client.pages("/issues?state=all")
+            for i in all_issues
             if "pull_request" not in i and not core.is_report(cfg, i)
         ]
         by_number = {i["number"]: i for i in issues}

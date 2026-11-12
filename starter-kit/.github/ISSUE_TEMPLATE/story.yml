@@ -69,6 +69,11 @@ body:
       label: Must-ask overrides (optional)
       description: Extra items agents must ask about for this story, or items pre-approved for it (for example "schema change expected").
   - type: textarea
+    id: owner_decisions
+    attributes:
+      label: Owner decisions
+      description: Optional. Answer the builder's quoted questions here, then re-approve the story. The next build reads this section.
+  - type: textarea
     id: dependencies
     attributes:
       label: Dependencies
