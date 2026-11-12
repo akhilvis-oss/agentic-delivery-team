@@ -3,14 +3,19 @@
 Where the kit is heading. Plans change with feedback; each item links to its issue, and [milestones](https://github.com/akhilvis-oss/agentic-delivery-team/milestones) show progress.
 
 ## v0.5.3: Approve and walk away (released)
-From the owner's approval to a merged pull request, with no prompts in between.
+[Released v0.5.3](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.3): opt-in delivery from the owner's approval through PR integration when policy permits; control-critical merges remain owner-only.
 - **Automatic integration** ([#78](https://github.com/akhilvis-oss/agentic-delivery-team/issues/78)): after a passing review, the runner opens the pull request, records its review as the Checker, and enables auto-merge when the category allows. Control-critical work still goes to the owner.
 - **Approve with one label** ([#77](https://github.com/akhilvis-oss/agentic-delivery-team/issues/77)): adding `status:approved` replaces the draft label.
 - **One kit version with feature switches** ([#86](https://github.com/akhilvis-oss/agentic-delivery-team/issues/86)): one `.github/agentic-kit.json` records the version and which pieces are on.
 - **Every review finding becomes a test** ([#84](https://github.com/akhilvis-oss/agentic-delivery-team/issues/84)).
 - **Service status and heartbeat** ([#67](https://github.com/akhilvis-oss/agentic-delivery-team/issues/67)): see at a glance that the service is running.
 
-## v0.5.4: Parallel stories and readable stand-ups (next)
+## v0.5.4: Fresh story bases and bounded check corrections (released)
+[Released v0.5.4](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.4): safer sequential lifecycle dispatch and clearer check failure handling.
+- Fetch each story's target branch before creating its worktree ([#97](https://github.com/akhilvis-oss/agentic-delivery-team/issues/97)), pin the fetched commit and preserve it during recovery; failed fetches wait without a stale local fallback.
+- Bounded worker corrections for check failures caused by the worker's changes, with fixed stop reasons and owner next steps ([#101](https://github.com/akhilvis-oss/agentic-delivery-team/issues/101)). Missing tools and unrelated failures still stop immediately.
+
+## v0.5.5: Parallel stories and readable stand-ups (next)
 - **Lifecycle with the agent pool** ([#76](https://github.com/akhilvis-oss/agentic-delivery-team/issues/76)): approved stories go to free slots and run in parallel when they don't overlap.
 - **Readable stand-ups** ([#68](https://github.com/akhilvis-oss/agentic-delivery-team/issues/68)): ignore pre-lifecycle issues, optional titles, a one-line summary.
 
@@ -26,6 +31,7 @@ For owners who only talk to their product agent.
 - **Claude Code as a tested agent** ([#53](https://github.com/akhilvis-oss/agentic-delivery-team/issues/53)), as builder and reviewer.
 
 ## Later
+- Framework validation of the kit version and feature-switch record; today it is a convention for agents, not read by framework code (see [versions and feature switches](docs/versions-and-features.md)).
 - Resuming agent sessions ([#20](https://github.com/akhilvis-oss/agentic-delivery-team/issues/20)).
 - Unattended product agent through an API key, and stories published under the product agent's own identity.
 - Key stores beyond the macOS Keychain.

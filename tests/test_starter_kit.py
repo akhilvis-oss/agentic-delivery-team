@@ -151,3 +151,18 @@ def test_feature_table_lists_dependencies():
     assert "`runner`" in rows["pool"] and "`runner`" in rows["lifecycle"]
     assert "`lifecycle`" in rows["standup"]
     assert "except the lifecycle and stand-up" in text
+
+
+def test_changelog_covers_current_kit_version():
+    import json
+    manifest = json.loads((ROOT / "templates/agentic-kit.example.json").read_text())
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    assert re.search(rf"^## {re.escape(manifest['version'])} \(\d{{4}}-\d{{2}}-\d{{2}}\): .+$",
+                     changelog, re.MULTILINE), "Current kit version needs a dated changelog entry"
+
+
+def test_feature_switches_document_lack_of_framework_enforcement():
+    text = (ROOT / "docs/versions-and-features.md").read_text()
+    assert "The kit file is not read by framework code today." in text
+    assert "agents are told to read and respect it" in text
+    assert "[roadmap](../ROADMAP.md#later)" in text
