@@ -104,11 +104,19 @@ implementation, including the configured executable (or its PATH resolution).
 The runner uses the same resolution for its checks. Keep argv out of public
 evidence. Missing tools block safely; the runner never installs dependencies.
 
-The built-in worker notes require stopping on failed or unavailable required
-checks: preflight, build, story tests and runner checks. Exploratory searches,
-file lookups and listings may fail normally; recover and continue. Avoid the
-unqualified instruction **"stop on any failure"** in task text: it can cause a
-worker to stop on a harmless lookup. Required-check failure behavior is unchanged.
+The built-in worker note tells the worker to correct test, lint and build failures
+caused by its own changes within the same run. `worker_check_attempts` sets the
+total check-attempt limit, including the first attempt (default 3; integer 1–10).
+This is separate from worker/reviewer correction rounds and the phase timeout.
+The worker reports `ready_for_review` only after required checks pass. An
+unavailable environment, dependency or tool stops immediately; exhausted attempts
+or unrelated failures also stop with `blocked` and the `blocked_check` category.
+The worker must never install dependencies, substitute configured tools, change
+test configuration to pass, or delete or skip tests. The bound is a prompt rule,
+not a count independently enforced by the runner; the runner's required-test run
+after delivery is unchanged and still decides. No blocked phase is replayed.
+Exploratory searches, lookups and listings may fail normally; recover and continue.
+Avoid the unqualified instruction **"stop on any failure"** in task text.
 
 - A nonblocking `flock` serializes the entire execution/review/correction cycle. `PAUSE` in the private state directory prevents new jobs; an existing phase continues. `CANCEL` stops the runner's current owned process group and prevents new jobs. Branch/HEAD changes block. A worker changing history, or reporting delivery without committable changes, blocks. Every successful correction gets its own runner-made commit.
 - Each phase has a configured 60–3600 second timeout. The runner creates a separate process group and terminates/reaps only that newly owned group on timeout, cancellation, failure or completion, including descendants. It never signals a PID recovered from disk. SIGTERM performs owned cleanup; SIGKILL/power loss cannot. An unclean `running_*` record becomes `interrupted`, is never replayed, and blocks further dispatch until the operator reconciles it.
@@ -135,6 +143,21 @@ result, the runner maps this allowlisted category to a distinct fixed explanatio
 so receipts and stand-up distinguish a failed build from unavailable story tests.
 Existing clients that omit the field retain the generic worker-blocked message.
 Unknown categories are rejected; a non-null category requires blocked status.
+
+Lifecycle stops (`blocked`, `needs-owner`, `needs-primary`) carry a non-null fixed
+reason code. Workers also report the optional, allowlisted `blocked_cause`:
+`unavailable`, `attempts_exhausted`, or `unrelated_failure` (null when no check
+applies). A non-null cause requires blocked status and a check category; older
+clients can omit it. The runner preserves its configured attempt bound in the job.
+The lifecycle issue comment distinguishes a check that couldn't run from checks
+still failing after that bound, and gives the owner's next step. Reason codes
+include the category and cause (`worker_story_tests_unavailable`, for example),
+plus the configured bound for exhaustion (`worker_story_tests_attempts_exhausted_3`).
+Older results without a cause retain `worker_<blocked_check>` and explicitly say
+the specific cause wasn't reported. Fixed public prose never includes worker
+summaries, private paths, logs or test output.
+The existing outbox handles outages and uncertain writes without replaying work
+or duplicating a confirmed comment.
 Reviewer reports use a fixed message. Detailed check names and explanations stay
 private and are never inferred from arbitrary worker text. Public receipts and the factual
 stand-up validate reasons against the runner's safe vocabulary, falling back to

@@ -6,6 +6,7 @@
   "worker_model": "<WORKER_MODEL>",
   "reviewer_model": "<REVIEWER_MODEL>",
   "max_rounds": 2,
+  "worker_check_attempts": 3,
   "phase_timeout_seconds": 1800,
   "github_receipts": {
     "enabled": false,
