@@ -52,6 +52,25 @@ If approval failed, read the guard comment and the lifecycle run in **Actions**,
 ### A status label changed back on its own
 Expected. The guard workflow reverts status changes made by anyone who isn't allowed to make them. Only the owner can approve or accept work. If the owner's own change was reverted, report it as a bug.
 
+### An approved story is waiting with `target_branch_fetch_failed`
+**Owner** for App installation/permissions or branch configuration; **Wait** for
+a GitHub/network outage. Before starting a story, the lifecycle service fetches
+the configured `base_branch` (default `main`) using the Runner App, including for
+private repositories. The App installation needs Contents read and Issues write;
+delivery-enabled installations retain their existing delivery permissions.
+Check that the App is installed on this repository, its updated permissions were
+accepted, and the configured branch exists on GitHub. The story stays approved
+and retries on a later poll without starting a job. No owner credential or stale
+local branch is used as a fallback. The private claim records the fixed failure
+reason; `status` lists the waiting claim. Do not publish token or Git transport
+output while investigating.
+
+An older dispatched claim may lack `start_commit` even though its worktree or
+queued job already exists. Recovery validates and retains that work's original
+start without a fetch, so a later remote merge or fetch outage does not change
+it. Conflicting or missing worktree/job evidence stops recovery for manual
+reconciliation; preserve the existing receipts and history when investigating.
+
 ## Bot identities and keys
 
 ### The bot gets "404" when looking up its installation
