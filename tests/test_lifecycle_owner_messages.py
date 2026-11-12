@@ -55,6 +55,12 @@ def test_builder_question_is_quoted_verbatim_and_survives_retry(tmp_path):
     "May I read /private/fixture/secret?", "Use C:\\private\\fixture?",
     "Ask owner-fixture?", "Contact person@example.invalid?",
     "token=" + "a" * 24, "sk-" + "x" * 25, "Provider response: raw data",
+    "Should I use account customer-fixture for this integration?",
+    "Should I reuse the access token " + "abcdef1234567890" * 2 + "?",
+    "Should I use the password synthetic-fixture?",
+    "Should I reuse API key synthetic-fixture?",
+    "Should I use login customer-fixture?",
+    "Should I reuse credentials from customer-fixture?",
 ])
 def test_private_question_is_withheld_in_full(tmp_path, question):
     cfg = policy(tmp_path)
@@ -64,6 +70,8 @@ def test_private_question_is_withheld_in_full(tmp_path, question):
     core.sync_job(cfg["config_path"], job, hub.client())
     comment, = hub.client().comments(1)
     assert question not in comment["body"]
+    assert "customer-fixture" not in comment["body"]
+    assert "abcdef1234567890" not in comment["body"]
     record, = core.records(cfg, [comment], 1)
     assert record["reason"] == "question_withheld" and "owner_question" not in record
 
@@ -173,13 +181,14 @@ def test_replayed_snapshot_cannot_add_a_second_scope_to_proven_event(tmp_path):
     assert core.state(hub.issues[1]) == "approved"
 
 
-def test_event_read_outage_on_replay_preserves_valid_approval(tmp_path, monkeypatch):
+def test_event_read_outage_on_replay_recovers_only_after_history_returns(tmp_path, monkeypatch):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     hub.issue()
     client = hub.client("workflow")
     event = approval_event(cfg, hub)
     core.attest_approval(cfg, client, event)
+    events = client.events
 
     def unavailable(*args):
         raise core.Unavailable("synthetic history outage")
@@ -187,8 +196,56 @@ def test_event_read_outage_on_replay_preserves_valid_approval(tmp_path, monkeypa
     monkeypatch.setattr(client, "events", unavailable)
     with pytest.raises(core.Unavailable):
         core.attest_approval(cfg, client, event)
+    # A webhook has no label-event ID. Without history a replay cannot be
+    # distinguished from another same-second approval, even of the same body.
+    assert {"name": "status:approved"} not in hub.issues[1]["labels"]
+    assert any("could not be attested" in c["body"] for c in client.comments(1))
+    monkeypatch.setattr(client, "events", events)
+    core.guard_issue(cfg, client, 1)
+    # History now proves that the original attestation is still current.
     assert core.state(hub.issues[1]) == "approved"
-    assert not any(call[0] == "DELETE" for call in hub.calls)
+
+
+@pytest.mark.parametrize("revised_story", [False, True])
+def test_history_outage_rejects_reapproval_after_attested_cycle(
+    tmp_path, monkeypatch, revised_story
+):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    client = hub.client("workflow")
+    core.attest_approval(cfg, client, approval_event(cfg, hub))
+    original = hub.events_by_issue[1][-1]
+    hub.event(1, "needs-owner", "runner")
+    if revised_story:
+        hub.issues[1]["body"] = "Revised story with an Owner decisions answer."
+    latest = hub.event(1, "approved")
+    assert latest["created_at"] == original["created_at"]
+    event = approval_event(cfg, hub)
+    events = client.events
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic history outage")
+
+    monkeypatch.setattr(client, "events", unavailable)
+    with pytest.raises(core.Unavailable, match="evidence unavailable"):
+        core.attest_approval(cfg, client, event)
+    assert {"name": "status:approved"} not in hub.issues[1]["labels"]
+    explanations = [c["body"] for c in client.comments(1) if "could not be attested" in c["body"]]
+    assert len(explanations) == 1
+    assert "add it again" in explanations[0] and cfg["state_dir"] not in explanations[0]
+    assert event["issue"]["body"] not in explanations[0]
+    monkeypatch.setattr(client, "events", events)
+    core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "needs-owner"
+    retry = hub.event(1, "approved")
+    fresh = approval_event(cfg, hub)
+    core.attest_approval(cfg, client, fresh)
+    core.attest_approval(cfg, client, fresh)
+    proofs = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert [r["event"] for r in proofs] == [original["id"], retry["id"]]
+    core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "approved"
 
 
 def test_uncertain_approval_intent_cannot_be_rebound_to_another_scope(tmp_path, monkeypatch):

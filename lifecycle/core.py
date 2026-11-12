@@ -482,7 +482,10 @@ def safe_question(cfg, question):
         return False
     if re.search(r"[/\\@<>\x00-\x08\x0b-\x1f\x7f]|[A-Za-z0-9_-]{40,}", question):
         return False
-    if re.search(r"(?i)(?:token|password|secret|api.key|account|login)\s*[:=]|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-|AKIA[A-Z0-9]{16}|Bearer\s)", question):
+    # Sensitive values also appear in prose ("use account ...", "token ...").
+    # Withhold the whole question rather than guessing where a value ends or
+    # rewriting text that the owner is promised will be quoted verbatim.
+    if re.search(r"(?i)(?:token|password|secret|api.key|account|login)\s*[:=]|\b(?:tokens?|passwords?|secrets?|api[ ._-]?keys?|accounts?|logins?|credentials?)\b|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-|AKIA[A-Z0-9]{16}|Bearer\s)", question):
         return False
     if re.search(r"(?im)\b(?:provider response|traceback|stdout|stderr|private key)\b", question):
         return False
@@ -1223,11 +1226,13 @@ def _attest_approval(cfg, client, event):
         return sorted(x for x in names if x.startswith("status:"))
 
     def reject_labels(message="Approval needs valid status labels and an owner label event"):
-        # A retry or an evidence outage must not revoke an already attested
-        # approval. Re-read history before removal to detect a newer cycle too.
+        # Preserve a proven current event, never a historical approval cycle.
+        # Without history, even an identical story and timestamp cannot prove
+        # this is a replay: a new approval may share both in the same second.
+        # Re-read available history before removal to detect a newer cycle too.
         comments = client.comments(issue["number"])
         proofs = [r for r in records(cfg, comments, issue["number"]) if r["kind"] == "approval"]
-        if any(latest is None or r["event"] == int(latest["id"]) for r in proofs):
+        if latest is not None and any(r["event"] == int(latest["id"]) for r in proofs):
             ignore_snapshot()
         if events:
             _, head = canonical_state(cfg, client.events(issue["number"]))
