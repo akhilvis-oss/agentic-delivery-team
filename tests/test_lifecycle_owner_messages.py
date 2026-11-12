@@ -307,6 +307,82 @@ def test_failed_attestation_removes_approval_explains_and_guard_does_not_restore
     assert records[-1]["reason"] == "approval_not_attested"
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+@pytest.mark.parametrize("removal_fails", [False, True])
+def test_comments_read_outage_still_rejects_explains_and_recovers(
+    tmp_path, monkeypatch, ambiguous, removal_fails
+):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    if ambiguous:
+        hub.event(1, "approved")
+    client = hub.client("workflow")
+    comments, request = client.comments, client.request
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic comment read outage")
+
+    def write(method, path, data=None):
+        if removal_fails and method == "DELETE":
+            raise core.Unavailable("synthetic label removal outage")
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "comments", unavailable)
+    monkeypatch.setattr(client, "request", write)
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, approval_event(cfg, hub))
+    explanation, = comments(1)
+    body = explanation["body"]
+    assert "Approval could not be attested" in body and "add it again" in body
+    assert cfg["state_dir"] not in body
+    assert hub.issues[1]["body"] not in body and "synthetic" not in body
+    assert not core.records(cfg, comments(1), 1)
+    if removal_fails:
+        assert "remove that label yourself" in body
+    else:
+        assert {"name": "status:approved"} not in hub.issues[1]["labels"]
+        assert "guard removed status:approved" in body
+
+    monkeypatch.setattr(client, "comments", comments)
+    monkeypatch.setattr(client, "request", request)
+    core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "needs-owner"
+    retry = hub.event(1, "approved")
+    fresh = approval_event(cfg, hub)
+    core.attest_approval(cfg, client, fresh)
+    core.attest_approval(cfg, client, fresh)
+    proofs = [r for r in core.records(cfg, comments(1), 1) if r["kind"] == "approval"]
+    assert len(proofs) == 1 and proofs[0]["event"] == retry["id"]
+
+
+def test_delayed_snapshot_explains_and_preserves_new_proof_during_comment_outage(
+    tmp_path, monkeypatch
+):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(body="Original synthetic story.")
+    old = approval_event(cfg, hub)
+    hub.event(1, "needs-owner", "runner")
+    hub.issues[1]["body"] = "Revised synthetic story."
+    hub.event(1, "approved")
+    client = hub.client("workflow")
+    core.attest_approval(cfg, client, approval_event(cfg, hub))
+    comments = client.comments
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic comment read outage")
+
+    monkeypatch.setattr(client, "comments", unavailable)
+    with pytest.raises(core.Unavailable, match="current approval preserved"):
+        core.attest_approval(cfg, client, old)
+    assert core.state(hub.issues[1]) == "approved"
+    assert not any(call[0] == "DELETE" for call in hub.calls)
+    explanation = comments(1)[-1]["body"]
+    assert "snapshot was ignored" in explanation and "re-approve" in explanation
+    assert cfg["state_dir"] not in explanation and old["issue"]["body"] not in explanation
+
+
 def test_manual_stop_label_also_gets_reason_and_comment(tmp_path):
     cfg = policy(tmp_path)
     hub = Hub(cfg)

@@ -1209,7 +1209,10 @@ def _attest_approval(cfg, client, event):
         # This is not a rejection of the current label event. In particular do
         # not emit a rejection marker that guard_issue could apply to it.
         marker = "<!-- agentic-approval-snapshot-ignored:" + key(event) + " -->"
-        comments = client.comments(issue["number"])
+        try:
+            comments = client.comments(issue["number"])
+        except Unavailable:
+            comments = []
         if not any(marker in c.get("body", "") and c.get("user", {}).get("login")
                    == cfg["actors"]["workflow"] for c in comments):
             client.request("POST", f"/issues/{issue['number']}/comments", {"body": (
@@ -1230,7 +1233,12 @@ def _attest_approval(cfg, client, event):
         # Without history, even an identical story and timestamp cannot prove
         # this is a replay: a new approval may share both in the same second.
         # Re-read available history before removal to detect a newer cycle too.
-        comments = client.comments(issue["number"])
+        try:
+            comments = client.comments(issue["number"])
+        except Unavailable:
+            # Missing proof is not permission to leave an unusable approval
+            # label behind. Reads can fail while removal and explanation work.
+            comments = []
         proofs = [r for r in records(cfg, comments, issue["number"]) if r["kind"] == "approval"]
         if latest is not None and any(r["event"] == int(latest["id"]) for r in proofs):
             ignore_snapshot()
@@ -1329,7 +1337,11 @@ def _attest_approval(cfg, client, event):
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":
         reject_labels("Approval event snapshot is unavailable or ambiguous; re-approve")
     scope = hashlib.sha256((issue.get("body") or "").encode()).hexdigest()
-    proofs = [r for r in records(cfg, client.comments(issue["number"]), issue["number"])
+    try:
+        comments = client.comments(issue["number"])
+    except Unavailable:
+        reject_labels("Approval proof unavailable; re-approve")
+    proofs = [r for r in records(cfg, comments, issue["number"])
               if r["kind"] == "approval" and r["event"] == int(latest["id"])]
     # Include uncertain/pending publications: a lost response must never allow
     # a second body to be queued for the same event under a different key.
