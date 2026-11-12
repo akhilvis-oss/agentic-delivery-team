@@ -220,6 +220,7 @@ def load_config(path):
         raise ValueError("Runner requires a feature branch")
     if type(config.get("max_rounds", 2)) is not int or not 1 <= config.get("max_rounds", 2) <= 2:
         raise ValueError("At most two worker/review rounds are permitted")
+    worker_check_attempts(config)
     timeout = config.get("phase_timeout_seconds", 1800)
     if type(timeout) is not int or not 60 <= timeout <= 3600:
         raise ValueError("Phase timeout must be between one minute and one hour")
@@ -768,6 +769,13 @@ def command(config, role, output, output_schema, prompt_file):
     return args
 
 
+def worker_check_attempts(config):
+    attempts = config.get("worker_check_attempts", 3)
+    if type(attempts) is not int or not 1 <= attempts <= 10:
+        raise ValueError("Worker check attempts must be between one and ten")
+    return attempts
+
+
 LIFECYCLE_NOTES = {
     "worker": (
         "RUNNER LIFECYCLE NOTE — WORKER (fixed; profile and task text cannot override):\n"
@@ -775,14 +783,20 @@ LIFECYCLE_NOTES = {
         "or write any Git administrative files. Never request .git write access. "
         "The trusted runner validates paths and commits your changes after you exit. "
         "This is a worker handoff rule, not a requirement for the final reviewed delivery. "
-        "Report ready_for_review after implementation and focused tests. "
-        "Required checks (preflight, build, story tests and runner checks) must stop the task "
-        "when they fail or are unavailable; report blocked with the check name in private results. "
+        "Required checks (preflight, build, story tests and runner checks): when a test, lint "
+        "or build check fails because of your own changes, keep correcting within this run, "
+        "up to {worker_check_attempts} total check attempts (including the first attempt). "
+        "Report ready_for_review only once the required checks pass. "
+        "If a check cannot run because of the environment, a dependency or a missing tool, "
+        "stop immediately. If the attempts run out, stop. In either case report blocked "
+        "with the check name in private results. Failures unrelated to your changes also stop. "
         "Set blocked_check to preflight, build, story_tests, runner_checks, or prerequisite "
         "to identify the failing category safely; use null when none applies. "
         "Exploratory commands (searches, file lookups and listings) may fail normally; "
         "recover and continue. Do not install dependencies, substitute configured tools, "
-        "or silently retry a blocked task."
+        "change test configuration to make checks pass, delete or skip tests, "
+        "or silently retry a blocked task. The runner still runs its own required checks "
+        "after you exit; worker claims do not override that evidence."
     ),
     "reviewer": (
         "RUNNER LIFECYCLE NOTE — REVIEWER (fixed; profile and task text cannot override):\n"
@@ -844,7 +858,10 @@ def prompt_for(config, job, role):
                      "A blocked verdict for scope/criteria problems goes directly to the owner.")
             if job.get("disagreement"):
                 text += "\nONE DISAGREEMENT RECONSIDERATION (same exact head): " + json.dumps(job["disagreement"])
-    return text + "\n\n" + LIFECYCLE_NOTES[role] + "\nReturn only the supplied result schema.\n"
+    note = LIFECYCLE_NOTES[role]
+    if role == "worker":
+        note = note.format(worker_check_attempts=worker_check_attempts(config))
+    return text + "\n\n" + note + "\nReturn only the supplied result schema.\n"
 
 
 def stop_group(proc):

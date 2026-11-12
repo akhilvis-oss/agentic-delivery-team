@@ -81,12 +81,24 @@ gh auth status
 ## Task runner
 
 ### A runner receipt says `blocked`
-**Agent first.** The runner stopped before committing anything, which is the safe outcome. Read the reason; common ones:
+**Agent first.** Read the fixed reason and, for lifecycle jobs, the issue's stop line
+and owner's next step. A worker corrects failing tests, lint or builds caused by
+its own changes within its run, up to `worker_check_attempts` total attempts
+(default 3, including the first attempt). It stops immediately if a required
+environment, dependency or tool is unavailable, or stops when attempts run out.
+`blocked_check` identifies preflight, build, story tests, runner checks or a
+prerequisite. A missing category from an older client receives a generic reason.
+The runner still runs its own required checks after delivery; worker self-checks
+do not replace them. Never install dependencies, replace configured tools,
+change test configuration to pass, delete tests or skip them as a repair.
+Common causes:
 - a prerequisite failed (dependency missing, preflight not passed): fix the story or its dependencies;
 - a configured command failed (wrong path, missing program): fix the configuration;
 - the worker stopped on a harmless exploratory command because its instructions said "stop on any failure": stop rules should cover required checks only.
 
-Never reuse the blocked run's changes. Queue a new task after fixing the cause.
+Preserve the blocked run's changes and private receipt for inspection. The owner
+resolves unavailable prerequisites or reviews exhausted corrections before
+authorizing a new task ID. Never reset the blocked job to queued or replay it.
 
 ### An agent says "Not logged in"
 **Owner.** The runner gives each agent its own private home, which needs its own sign-in or API key. Sign in using the command the coding agent gives you, then check with its status command.

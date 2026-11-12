@@ -398,9 +398,41 @@ def public_record(
     return record
 
 
+# Fixed public prose only. Never render worker summaries, errors, logs or argv.
+STOP_REASONS = {
+    "prerequisite_failed": "A required tool or safety check couldn't run or failed; owner: fix the prerequisite and authorize a new task.",
+    "assignment_preflight": "Assignment safety checks stopped the task; owner: reconcile the assignment before authorizing a new task.",
+    "worker_reported_blocked": "The worker reported a blocked check; owner: inspect the private result and resolve the prerequisite before authorizing a new task.",
+    "reviewer_reported_blocked": "Independent review could not accept the work; owner: resolve the outstanding review before authorizing further correction.",
+    "execution_failed": "Execution stopped or was interrupted; owner: reconcile the private run and worktree before authorizing a new task.",
+    "publication_failed": "Publishing the reviewed work failed; owner: reconcile GitHub before retrying.",
+    "publication_uncertain": "Publishing may have completed; owner: inspect GitHub before retrying.",
+    "stale_head": "The reviewed head changed; owner: arrange a fresh review.",
+    "gate_category_higher": "The gate requires a higher review category; owner: reconcile the review evidence.",
+    "required_check_failed": "A runner or pull request check failed; owner: inspect the checks before authorizing correction.",
+    "merge_conditions_missing": "Required merge evidence is missing; owner: reconcile the evidence before merging.",
+    "owner_merge_required": "The reviewed work requires an owner merge; owner: inspect the evidence and merge when satisfied.",
+    "auto_merge_disable_uncertain": "Auto-merge cancellation is unconfirmed; owner: inspect the pull request before proceeding.",
+    "pr_closed_unmerged": "The pull request closed without merging; owner: decide whether further work is needed.",
+    "approved_scope_changed": "The approved scope changed; owner: review the new scope and approve it before further work.",
+}
+for _check, _label in {
+    "preflight": "Preflight", "build": "Build", "story_tests": "Story tests",
+    "runner_checks": "Runner checks", "prerequisite": "A required prerequisite",
+}.items():
+    STOP_REASONS["worker_" + _check] = (
+        _label + " still failed within the worker's check-attempt limit or couldn't run; "
+        "owner: inspect the private result, resolve the failure and authorize a new task."
+    )
+
+
 def record_body(record):
+    explanation = ""
+    if record["to"] in {"blocked", "needs-owner", "needs-primary"}:
+        explanation = STOP_REASONS.get(record.get("reason"), STOP_REASONS["execution_failed"]) + "\n"
     return (
         "Task lifecycle record (metadata only; no approval implied).\n"
+        + explanation
         + PREFIX
         + json.dumps(record, sort_keys=True)
         + SUFFIX
@@ -922,6 +954,21 @@ def job_records(cfg, job):
         }
         else None
     )
+    reason = integration.get("reason")
+    if reason not in STOP_REASONS:
+        reason = None
+    if target in {"blocked", "needs-owner", "needs-primary"} and reason is None:
+        worker = job.get("worker", {})
+        blocked = job.get("blocked_reason", {})
+        if worker.get("status") == "blocked":
+            category = "worker_" + str(worker.get("blocked_check"))
+            reason = category if category in STOP_REASONS else "worker_reported_blocked"
+        elif isinstance(blocked, dict) and blocked.get("reason_code") in STOP_REASONS:
+            reason = blocked["reason_code"]
+        elif status in {"needs_owner", "needs_primary_review"}:
+            reason = "reviewer_reported_blocked"
+        else:
+            reason = "execution_failed"
     return [
         public_record(
             cfg,
@@ -934,8 +981,7 @@ def job_records(cfg, job):
             kind="review" if outcome else "transition",
             outcome=outcome,
             severities=counts if outcome else {},
-            reason=integration.get("reason") or (
-                "execution_failed" if status in {"failed", "interrupted"} else None),
+            reason=reason,
         )
     ]
 
