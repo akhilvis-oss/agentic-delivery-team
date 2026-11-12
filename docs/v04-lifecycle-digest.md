@@ -96,6 +96,13 @@ recorded start commit during recovery. Use `status` to identify waiting claims
 and inspect private claim state for the fixed reason; no Git output or credential
 is copied into public evidence.
 
+For older dispatched claims without `start_commit`, recovery first checks the
+registered worktree and any durable runner assignment. It records the existing
+job's original base commit, or the worktree HEAD if enqueue never completed,
+without fetching again or replacing receipts or history. Only claims with no
+existing work fetch a new start. Conflicting branch, assignment or history
+evidence requires reconciliation rather than starting replacement work.
+
 Issue history consists of fixed-field machine blocks authored by trusted identities. Repository, enclosing issue, author/role, transition, key, types and timestamps are checked. Owner label events supply approval authority; arbitrary comments, including digest replies, never do. Public records contain state, actor, job/event IDs, round, commit SHA, outcome, severity counts and fixed reason codes. Finding prose, arguments, paths, logs, task text and worker summaries stay private. P2 follow-up issues contain fixed metadata and reference their source issue; Primary consults private detail during triage.
 
 GitHub updates have a private outbox. Labels/assignments are idempotent; append-only writes are marked attempted **before** sending. A lost response is searched for by its trusted record key. If an attempted comment/issue cannot be found, it remains uncertain for manual reconciliation; it is never blindly reposted. Known rejected writes can retry. A conflict on one issue does not authorize overwriting an owner's state or starting another job. Actions runs have ephemeral local storage: a rerun with missing prior comment proof refuses to repost and requires manual reconciliation. Distinct PR event deliveries are separately keyed; a rerun retains the same delivery/run ID. This conservative rule can leave missing metadata after a failed workflow, rather than risking a duplicate append. `reconcile` reports local/GitHub mismatches without changing either side. Unsynced/uncertain records appear in the stand-up.

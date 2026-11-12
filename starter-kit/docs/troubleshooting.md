@@ -65,6 +65,12 @@ local branch is used as a fallback. The private claim records the fixed failure
 reason; `status` lists the waiting claim. Do not publish token or Git transport
 output while investigating.
 
+An older dispatched claim may lack `start_commit` even though its worktree or
+queued job already exists. Recovery validates and retains that work's original
+start without a fetch, so a later remote merge or fetch outage does not change
+it. Conflicting or missing worktree/job evidence stops recovery for manual
+reconciliation; preserve the existing receipts and history when investigating.
+
 ## Bot identities and keys
 
 ### The bot gets "404" when looking up its installation

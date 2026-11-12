@@ -232,3 +232,105 @@ def test_fetch_isolates_source_config_and_inherited_credentials(tmp_path, monkey
     assert len(network) == 1
     assert network[0][1]["env"]["GIT_CONFIG_COUNT"] == "1"
     assert network[0][1]["env"]["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+
+
+def legacy_dispatch(tmp_path, monkeypatch, boundary):
+    cfg, hub, runner, remote, minted, network = transport(tmp_path, monkeypatch)
+    owner, name = ((service, "ensure_worktree") if boundary == "worktree"
+                   else (runner, "enqueue"))
+    original = getattr(owner, name)
+
+    def crash(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("crash after " + boundary)
+
+    monkeypatch.setattr(owner, name, crash)
+    with pytest.raises(RuntimeError, match="crash after"):
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    monkeypatch.setattr(owner, name, original)
+    path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(path)
+    assert claim["stage"] == "dispatched"
+    start = claim.pop("start_commit")  # Simulate a pre-upgrade dispatch receipt.
+    core.save(path, claim)
+    command(remote, "commit", "--allow-empty", "-qm", "later remote merge")
+    assert command(remote, "rev-parse", "HEAD") != start
+    return cfg, hub, runner, remote, network, path, start
+
+
+@pytest.mark.parametrize("boundary", ["worktree", "enqueue"])
+@pytest.mark.parametrize("remote_available", [False, True])
+def test_legacy_dispatch_preserves_existing_work_without_fetch(
+    tmp_path, monkeypatch, boundary, remote_available
+):
+    cfg, hub, runner, remote, network, path, start = legacy_dispatch(
+        tmp_path, monkeypatch, boundary
+    )
+    claim = core.read(path)
+    before_history = command(claim["worktree"], "rev-list", "HEAD")
+    before_comments = list(hub.comments_by_issue[1])
+    # Preserve every already-written runner receipt, not just the queued task.
+    job_root = Path(cfg["state_dir"]) / "jobs" / claim["job"]
+    receipts = {p: p.read_bytes() for p in job_root.rglob("*") if p.is_file()}
+    if not remote_available:
+        cfg["base_branch"] = "missing"
+    assert service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200) == [claim["job"]]
+    recovered = core.read(path)
+    assert recovered["start_commit"] == start and recovered["stage"] == "enqueued"
+    assert "error" not in recovered
+    assert len(network) == 1  # Recovery must not contact GitHub at either boundary.
+    assert command(claim["worktree"], "rev-list", "HEAD") == before_history
+    assert hub.comments_by_issue[1] == before_comments
+    assert all(p.read_bytes() == content for p, content in receipts.items())
+    job = service.jobs(cfg)[0]
+    assert job["base_commit"] == job["assignment"]["base_commit"] == start
+    assert len(service.jobs(cfg)) == 1
+
+
+@pytest.mark.parametrize("mutation", ["branch", "assignment", "lifecycle", "head", "missing_worktree"])
+def test_legacy_dispatch_rejects_inconsistent_existing_evidence(
+    tmp_path, monkeypatch, mutation
+):
+    cfg, hub, runner, remote, network, path, start = legacy_dispatch(
+        tmp_path, monkeypatch, "enqueue"
+    )
+    claim = core.read(path)
+    job_path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    if mutation == "branch":
+        command(claim["worktree"], "checkout", "-b", "unexpected")
+    elif mutation == "head":
+        command(claim["worktree"], "commit", "--allow-empty", "-qm", "unexpected")
+    elif mutation == "missing_worktree":
+        command(cfg["repository_root"], "worktree", "remove", claim["worktree"])
+    else:
+        job = core.read(job_path)
+        if mutation == "assignment":
+            job["assignment"]["base_commit"] = "f" * 40
+        else:
+            job["assignment"]["lifecycle"]["event"] += 1
+            job["assignment_sha256"] = runner.digest(job["assignment"])
+        core.save(job_path, job)
+    before_job = job_path.read_bytes()
+    before_claim = path.read_bytes()
+    with pytest.raises((core.Unavailable, ValueError, runner.Blocked)):
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    assert len(network) == 1
+    assert job_path.read_bytes() == before_job and path.read_bytes() == before_claim
+
+
+def test_legacy_dispatch_recovers_job_base_after_recorded_progress(tmp_path, monkeypatch):
+    cfg, hub, runner, remote, network, path, start = legacy_dispatch(
+        tmp_path, monkeypatch, "enqueue"
+    )
+    claim = core.read(path)
+    command(claim["worktree"], "commit", "--allow-empty", "-qm", "runner progress")
+    head = command(claim["worktree"], "rev-parse", "HEAD")
+    job_path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
+    job = core.read(job_path)
+    job.update(head_commit=head, status="ready_for_integration")
+    core.save(job_path, job)
+    before = job_path.read_bytes()
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    assert core.read(path)["start_commit"] == start != head
+    assert command(claim["worktree"], "rev-parse", "HEAD") == head
+    assert job_path.read_bytes() == before and len(network) == 1

@@ -159,6 +159,40 @@ def fetch_target(cfg):
         raise core.Unavailable("target_branch_fetch_failed") from None
 
 
+def recover_start_commit(cfg, claim, runner):
+    """Recover a legacy dispatch from durable work before contacting GitHub."""
+    worktree = Path(claim["worktree"])
+    job_path = (Path(cfg["state_dir"]) / "jobs" / claim["job"]
+                / "runner-state" / "tasks" / (claim["job"] + ".json"))
+    registered = ("worktree " + str(worktree) + "\n"
+                  in git(cfg, "worktree", "list", "--porcelain").stdout)
+    if not registered:
+        if worktree.exists() or job_path.exists():
+            raise core.Unavailable("Existing work requires reconciliation")
+        return None
+    if git(cfg, "branch", "--show-current", worktree=str(worktree)).stdout.strip() != claim["branch"]:
+        raise core.Unavailable("Managed branch changed")
+    head = git(cfg, "rev-parse", "HEAD^{commit}", worktree=str(worktree)).stdout.strip()
+    if not job_path.exists():
+        # Before enqueue no agent could have run: the owned branch is its start.
+        return head
+    job = runner.read(job_path)
+    assignment = runner.verify_assignment(
+        {"worktree": claim["worktree"], "branch": claim["branch"]}, job
+    )
+    binding = dict(issue=claim["issue"], event=claim["event"], primary=claim["primary"])
+    start = assignment["base_commit"]
+    if (job["id"] != claim["job"] or job.get("github_number") != claim["issue"]
+            or assignment.get("lifecycle") != binding
+            or assignment["task_text"] != claim["task"]
+            or assignment["kind"] != "work" or assignment["after_task"] is not None
+            or not isinstance(start, str) or not re.fullmatch(r"[0-9a-f]{40}", start)
+            or head != (job.get("head_commit") or start)):
+        raise ValueError("Claim/job recovery binding mismatch")
+    git(cfg, "merge-base", "--is-ancestor", start, head, worktree=str(worktree))
+    return start
+
+
 def cleanup(cfg, claim, issue):
     if claim.get("cleaned") or issue["state"] != "closed":
         return
@@ -398,14 +432,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     core.save(path, claim)
                     continue
             if claim["stage"] == "dispatched":
-                # Resume pre-fetch-version claims without using a stale local ref.
+                # Older dispatches may already have durable work. Preserve its
+                # original start and receipts; fetch only before work exists.
                 if "start_commit" not in claim:
-                    try:
-                        claim["start_commit"] = fetch_target(cfg)
-                    except core.Unavailable:
-                        claim["error"] = "target_branch_fetch_failed"
-                        core.save(path, claim)
-                        continue
+                    start = recover_start_commit(cfg, claim, runner)
+                    if start is None:
+                        try:
+                            start = fetch_target(cfg)
+                        except core.Unavailable:
+                            claim["error"] = "target_branch_fetch_failed"
+                            core.save(path, claim)
+                            continue
+                    claim["start_commit"] = start
                     claim.pop("error", None)
                     core.save(path, claim)
                 ensure_worktree(cfg, claim)
