@@ -145,12 +145,17 @@ Existing clients that omit the field retain the generic worker-blocked message.
 Unknown categories are rejected; a non-null category requires blocked status.
 
 Lifecycle stops (`blocked`, `needs-owner`, `needs-primary`) carry a non-null fixed
-reason code. A blocked worker's category appears as `worker_<blocked_check>`.
-The existing lifecycle issue comment includes one plain-language line describing
-the stop and the owner's next step. It uses fixed public prose, never worker
-summaries, private paths, logs or test output. The current result interface names
-the check category but does not distinguish unavailable tools from exhausted
-attempts; the line covers both, and private results retain the worker's detail.
+reason code. Workers also report the optional, allowlisted `blocked_cause`:
+`unavailable`, `attempts_exhausted`, or `unrelated_failure` (null when no check
+applies). A non-null cause requires blocked status and a check category; older
+clients can omit it. The runner preserves its configured attempt bound in the job.
+The lifecycle issue comment distinguishes a check that couldn't run from checks
+still failing after that bound, and gives the owner's next step. Reason codes
+include the category and cause (`worker_story_tests_unavailable`, for example),
+plus the configured bound for exhaustion (`worker_story_tests_attempts_exhausted_3`).
+Older results without a cause retain `worker_<blocked_check>` and explicitly say
+the specific cause wasn't reported. Fixed public prose never includes worker
+summaries, private paths, logs or test output.
 The existing outbox handles outages and uncertain writes without replaying work
 or duplicating a confirmed comment.
 Reviewer reports use a fixed message. Detailed check names and explanations stay

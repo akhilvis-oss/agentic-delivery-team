@@ -392,6 +392,7 @@ def test_worker_blocked_check_rejects_untrusted_identifiers(check):
 def test_worker_blocked_check_schema_and_status_validation(lifecycle, pool):
     spec = runner.schema('worker', lifecycle=lifecycle, pool=pool)
     assert set(spec['properties']) == set(spec['required'])
+    assert spec['properties']['blocked_cause']['anyOf'][1]['enum'] == list(runner.WORKER_BLOCKED_CAUSES)
     field = spec['properties']['blocked_check']
     assert field['anyOf'][0] == {'type': 'null'}
     assert field['anyOf'][1]['enum'] == list(runner.WORKER_BLOCKED_CHECKS)
@@ -424,3 +425,26 @@ def test_program_access_error_blocks_safely(setup, monkeypatch):
     with pytest.raises(runner.CommandUnavailable, match='required check 1') as error:
         runner.verification_commands(cfg)
     assert 'synthetic private access detail' not in str(error.value.blocked_reason)
+
+
+@pytest.mark.parametrize('cause', [*runner.WORKER_BLOCKED_CAUSES, None])
+def test_worker_blocked_cause_validated_and_legacy_compatible(cause):
+    value = fixtures.result('blocked')
+    runner.validate_result(value, 'worker')
+    value.update(blocked_check='story_tests', blocked_cause=cause)
+    runner.validate_result(value, 'worker')
+    if cause is not None:
+        value['blocked_check'] = None
+        with pytest.raises(ValueError, match='Invalid blocked cause'):
+            runner.validate_result(value, 'worker')
+        value.update(blocked_check='story_tests', status='ready_for_review')
+        with pytest.raises(ValueError):
+            runner.validate_result(value, 'worker')
+
+
+@pytest.mark.parametrize('cause', ['/private/secret/tool', '', [], {}, True, 3])
+def test_worker_blocked_cause_rejects_untrusted_values(cause):
+    value = fixtures.result('blocked')
+    value.update(blocked_check='story_tests', blocked_cause=cause)
+    with pytest.raises(ValueError, match='Invalid blocked cause'):
+        runner.validate_result(value, 'worker')

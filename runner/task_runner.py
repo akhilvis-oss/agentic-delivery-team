@@ -54,6 +54,7 @@ BLOCK_REASONS = {
     "worker_reported_blocked": ("worker_reported_blocked", "Worker reported a required check or prerequisite blocked; owner reconciliation required."),
     "reviewer_reported_blocked": ("reviewer_reported_blocked", "Independent reviewer reported blocked; owner reconciliation required."),
 }
+WORKER_BLOCKED_CAUSES = ("unavailable", "attempts_exhausted", "unrelated_failure")
 WORKER_BLOCKED_CHECKS = {
     "preflight": "Worker preflight failed or unavailable; owner reconciliation required.",
     "build": "Worker build failed or unavailable; owner reconciliation required.",
@@ -663,6 +664,8 @@ def schema(role, lifecycle=False, pool=False):
         # Strict output schemas require every property; null means no named check.
         fields["blocked_check"] = {"anyOf": [
             {"type": "null"}, {"type": "string", "enum": list(WORKER_BLOCKED_CHECKS)}]}
+        fields["blocked_cause"] = {"anyOf": [
+            {"type": "null"}, {"type": "string", "enum": list(WORKER_BLOCKED_CAUSES)}]}
     if pool:
         fields["usage_units"] = {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
         fields["rate_limited"] = {"type": "boolean"}
@@ -677,7 +680,7 @@ def validate_result(result, role):
     if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
             or "rate_limited" in result and type(result["rate_limited"]) is not bool):
         raise ValueError("Invalid optional usage or availability report")
-    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check"} if role == "worker" else set())
+    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check", "blocked_cause"} if role == "worker" else set())
     # Accept legacy agent-file-v1 results that omit newly introduced fields.
     required = set(spec["required"]) - optional
     if not required <= set(result) or set(result) - set(spec["required"]) - optional:
@@ -692,6 +695,10 @@ def validate_result(result, role):
     if check is not None and (not isinstance(check, str) or check not in WORKER_BLOCKED_CHECKS
                               or result["status"] != "blocked"):
         raise ValueError("Invalid blocked check")
+    cause = result.get("blocked_cause")
+    if cause is not None and (not isinstance(cause, str) or cause not in WORKER_BLOCKED_CAUSES
+                              or result["status"] != "blocked" or check is None):
+        raise ValueError("Invalid blocked cause")
     for key in ("tests", "limitations"):
         if not isinstance(result[key], list) or any(not isinstance(v, str) for v in result[key]):
             raise ValueError("Invalid result list")
@@ -792,6 +799,9 @@ LIFECYCLE_NOTES = {
         "with the check name in private results. Failures unrelated to your changes also stop. "
         "Set blocked_check to preflight, build, story_tests, runner_checks, or prerequisite "
         "to identify the failing category safely; use null when none applies. "
+        "Set blocked_cause to unavailable when a check cannot run, attempts_exhausted "
+        "when your correction attempts run out, or unrelated_failure for failures unrelated "
+        "to your changes; use null when no check category applies. "
         "Exploratory commands (searches, file lookups and listings) may fail normally; "
         "recover and continue. Do not install dependencies, substitute configured tools, "
         "change test configuration to make checks pass, delete or skip tests, "
@@ -1484,6 +1494,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     commit_preflight(config, job)
                     if lifecycle_cfg:
                         check_lifecycle_admission(config, job)
+                    job["worker_check_attempts"] = worker_check_attempts(config)
                     job["worker"] = execute(config, state, path, job, "worker")
                     validate_result(job["worker"], "worker")
                     if (git(config, "branch", "--show-current") != config["branch"]

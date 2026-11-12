@@ -421,9 +421,23 @@ for _check, _label in {
     "runner_checks": "Runner checks", "prerequisite": "A required prerequisite",
 }.items():
     STOP_REASONS["worker_" + _check] = (
-        _label + " still failed within the worker's check-attempt limit or couldn't run; "
+        _label + ": worker reported blocked without a specific cause; "
         "owner: inspect the private result, resolve the failure and authorize a new task."
     )
+
+    STOP_REASONS["worker_" + _check + "_unavailable"] = (
+        _label + " couldn't run because a required tool, dependency or environment was unavailable; "
+        "owner: restore the prerequisite and authorize a new task."
+    )
+    STOP_REASONS["worker_" + _check + "_unrelated_failure"] = (
+        _label + " failed for a reason unrelated to the worker's changes; "
+        "owner: resolve the existing failure and authorize a new task."
+    )
+    for _attempts in range(1, 11):
+        STOP_REASONS[f"worker_{_check}_attempts_exhausted_{_attempts}"] = (
+            f"{_label} still failing after {_attempts} check attempts; "
+            "owner: arrange further correction and authorize a new task."
+        )
 
 
 def record_body(record):
@@ -963,6 +977,15 @@ def job_records(cfg, job):
         if worker.get("status") == "blocked":
             category = "worker_" + str(worker.get("blocked_check"))
             reason = category if category in STOP_REASONS else "worker_reported_blocked"
+            cause = worker.get("blocked_cause")
+            if isinstance(cause, str) and cause in {"unavailable", "attempts_exhausted", "unrelated_failure"}:
+                candidate = category + "_" + cause
+                if cause == "attempts_exhausted":
+                    attempts = job.get("worker_check_attempts")
+                    if type(attempts) is int and 1 <= attempts <= 10:
+                        candidate += "_" + str(attempts)
+                if candidate in STOP_REASONS:
+                    reason = candidate
         elif isinstance(blocked, dict) and blocked.get("reason_code") in STOP_REASONS:
             reason = blocked["reason_code"]
         elif status in {"needs_owner", "needs_primary_review"}:

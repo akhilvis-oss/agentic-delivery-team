@@ -91,6 +91,8 @@ def test_worker_note_requires_bounded_self_correction(setup, attempts):
     assert "fails because of your own changes, keep correcting within this run" in note
     assert "ready_for_review only once the required checks pass" in note
     assert "stop immediately. If the attempts run out, stop" in note
+    assert "Set blocked_cause to unavailable" in note
+    assert "attempts_exhausted" in note and "unrelated_failure" in note
     assert "Do not install dependencies, substitute configured tools" in note
     assert "change test configuration to make checks pass, delete or skip tests" in note
     assert "runner still runs its own required checks after you exit" in note

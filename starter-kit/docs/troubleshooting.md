@@ -87,7 +87,13 @@ its own changes within its run, up to `worker_check_attempts` total attempts
 (default 3, including the first attempt). It stops immediately if a required
 environment, dependency or tool is unavailable, or stops when attempts run out.
 `blocked_check` identifies preflight, build, story tests, runner checks or a
-prerequisite. A missing category from an older client receives a generic reason.
+prerequisite. `blocked_cause` distinguishes unavailable prerequisites from
+exhausted corrections and unrelated failures. The lifecycle issue line says
+which occurred; exhaustion includes the configured attempt count. Restore the
+prerequisite for an unavailable check, or arrange further correction for exhausted
+attempts, before authorizing a new task. Older clients without a cause receive an
+explicitly unspecified explanation; inspect their private result. A missing
+category from an older client receives a generic reason.
 The runner still runs its own required checks after delivery; worker self-checks
 do not replace them. Never install dependencies, replace configured tools,
 change test configuration to pass, delete tests or skip them as a repair.

@@ -732,14 +732,19 @@ def test_blocked_has_no_rework_and_exhaustion_uses_two_corrections(
     assert "owner:" in core.record_body(stopped[0])
 
 
-@pytest.mark.parametrize("cause,check", [
-    ("a required tool couldn't run", "prerequisite"),
-    ("story tests still failing after 3 attempts", "story_tests"),
+@pytest.mark.parametrize("attempts", [3, 5])
+@pytest.mark.parametrize("cause,expected", [
+    ("unavailable", "Story tests couldn't run because a required tool"),
+    ("attempts_exhausted", "Story tests still failing after {attempts} check attempts"),
+    ("unrelated_failure", "Story tests failed for a reason unrelated"),
 ])
 def test_worker_check_stop_is_immediate_public_and_not_replayed(
-    tmp_path, monkeypatch, cause, check
+    tmp_path, monkeypatch, cause, expected, attempts
 ):
     cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    settings = json.loads(Path(cfg["runner_config"]).read_text())
+    settings["worker_check_attempts"] = attempts
+    core.save(cfg["runner_config"], settings)
     calls = []
 
     def execute(config, state, path, job, role):
@@ -749,7 +754,8 @@ def test_worker_check_stop_is_immediate_public_and_not_replayed(
         runner.save_job(config, path, job)
         fixtures.deliver(config)
         value = fixtures.result("blocked")
-        value.update(blocked_check=check, summary=cause + " /private/secret/tool LOG-SECRET")
+        value.update(blocked_check="story_tests", blocked_cause=cause,
+                     summary="MISLEADING-CAUSE /private/secret/tool LOG-SECRET")
         return value
 
     monkeypatch.setattr(runner, "execute", execute)
@@ -759,9 +765,18 @@ def test_worker_check_stop_is_immediate_public_and_not_replayed(
     assert not job.get("runner_commits") and not job.get("verification_runs")
     stopped = [r for r in core.records(cfg, h.comments_by_issue[1], 1)
                if r["to"] == "needs-owner"]
-    assert len(stopped) == 1 and stopped[0]["reason"] == "worker_" + check
+    suffix = cause + ("_" + str(attempts) if cause == "attempts_exhausted" else "")
+    assert len(stopped) == 1 and stopped[0]["reason"] == "worker_story_tests_" + suffix
+    assert job["worker_check_attempts"] == attempts
+    assert job["worker"]["blocked_cause"] == cause
     body = next(c["body"] for c in h.comments_by_issue[1]
                 if stopped[0]["key"] in c["body"])
+    assert expected.format(attempts=attempts) in body
+    if cause == "unavailable":
+        assert "still failing" not in body
+    else:
+        assert "couldn't run" not in body
+    assert "MISLEADING-CAUSE" not in body
     assert "owner:" in body and "authorize a new task" in body
     assert "/private/secret" not in body and "LOG-SECRET" not in body
     before = list(h.comments_by_issue[1])
@@ -806,7 +821,7 @@ def test_stop_line_survives_transport_failure_without_duplicate(tmp_path, failur
     core.sync_job(cfg["config_path"], job, h.client())
     comments = [c for c in h.comments_by_issue[1] if '"job": "stop-job"' in c["body"]]
     assert len(comments) == 1
-    assert "Build still failed" in comments[0]["body"] and "owner:" in comments[0]["body"]
+    assert "Build: worker reported blocked without a specific cause" in comments[0]["body"] and "owner:" in comments[0]["body"]
 
 
 def test_concurrent_stop_flush_posts_one_safe_line(tmp_path):
@@ -838,7 +853,7 @@ def test_concurrent_stop_flush_posts_one_safe_line(tmp_path):
             release.set()
         first.result()
     comments = [c for c in h.comments_by_issue[1] if record["key"] in c["body"]]
-    assert len(comments) == 1 and "Story tests still failed" in comments[0]["body"]
+    assert len(comments) == 1 and "Story tests: worker reported blocked without a specific cause" in comments[0]["body"]
 
 
 @pytest.mark.parametrize(
@@ -1603,3 +1618,22 @@ def test_delayed_pr_open_preserves_owner_handoff(tmp_path, ordering, reason):
         core.flush(workflow_cfg, h.client("workflow"))
         assert core.state(h.issues[1]) == "needs-owner"
     assert not any(call == ("label", 1, "pr-open") for call in h.calls)
+
+
+@pytest.mark.parametrize("cause,attempts", [
+    ("/private/secret/tool", 3), ("attempts_exhausted_3", 3),
+    ([], 3), ({}, 3), ("attempts_exhausted", None),
+    ("attempts_exhausted", True), ("attempts_exhausted", "3"),
+    ("attempts_exhausted", 0), ("attempts_exhausted", 11),
+])
+def test_stop_cause_or_bound_not_validated_is_not_published(tmp_path, cause, attempts):
+    cfg = policy(tmp_path)
+    job = dict(id="stop-job", round=1, status="needs_owner",
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               worker={"status": "blocked", "blocked_check": "story_tests", "blocked_cause": cause},
+               worker_check_attempts=attempts)
+    record = core.job_records(cfg, job)[0]
+    assert record["reason"] == "worker_story_tests"
+    body = core.record_body(record)
+    assert "without a specific cause" in body
+    assert "/private/secret" not in body
