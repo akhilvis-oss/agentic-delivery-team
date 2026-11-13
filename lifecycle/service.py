@@ -453,6 +453,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                               != "continuation_not_applied"
                               and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
                                           for refusal in local_jobs[r["job"]].get("commit_refusals", []))
+                              and not any(run.get("reason") == "reviewed_worktree_changed"
+                                          or run.get("source_unchanged") is False
+                                          for run in local_jobs[r["job"]].get("verification_runs", []))
                               and local_jobs[r["job"]].get("head_commit") == named), None)
                 count = sum(1 for p in claims_dir.glob("*.json")
                             if (c := core.read(p))["issue"] == issue["number"]

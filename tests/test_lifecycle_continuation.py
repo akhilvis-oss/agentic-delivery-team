@@ -1,6 +1,7 @@
 """Owner continuation uses synthetic clients and disposable repositories only."""
 
 from pathlib import Path
+import sys
 from textwrap import dedent
 
 import pytest
@@ -103,18 +104,25 @@ def test_malformed_continuation_starts_fresh(tmp_path, monkeypatch, block):
 
 @pytest.mark.parametrize("refusal", [
     "unrecorded", "failed", "blocked_integrity", "missing_ancestry", "no_flag", "other_issue", "other_actor",
+    "verification_reason", "verification_source_changed",
 ])
 def test_unverified_or_integrity_failed_saved_commit_is_refused(tmp_path, monkeypatch, refusal):
     cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
     head = old["head_commit"]
     if refusal == "unrecorded":
         head = "a" * 40
-    elif refusal in {"failed", "blocked_integrity", "missing_ancestry"}:
+    elif refusal in {"failed", "blocked_integrity", "missing_ancestry",
+                     "verification_reason", "verification_source_changed"}:
         old["status"] = "failed" if refusal == "failed" else "blocked"
         if refusal == "blocked_integrity":
             old["commit_refusals"] = [{"reason": "history_changed"}]
         if refusal == "missing_ancestry":
             old["blocked_reason"] = runner.block_reason("continuation_not_applied")
+        if refusal.startswith("verification_"):
+            evidence = ({"reason": "reviewed_worktree_changed"}
+                        if refusal == "verification_reason" else {"source_unchanged": False})
+            # Check all attempts, even when the latest evidence is clean.
+            old["verification_runs"] = [evidence, {"status": "passed", "source_unchanged": True}]
         core.save(Path(cfg["state_dir"]) / "jobs" / old["id"] / "runner-state"
                   / "tasks" / (old["id"] + ".json"), old)
     else:
@@ -133,6 +141,53 @@ def test_unverified_or_integrity_failed_saved_commit_is_refused(tmp_path, monkey
     assert claim["stage"] == "finished"
     assert not Path(claim["worktree"]).exists()
     assert len(service.jobs(cfg)) == 1
+    assert any(r["reason"] == "continuation_commit_unrecorded"
+               for r in core.records(cfg, hub.comments_by_issue[1], 1))
+
+
+def test_required_test_integrity_stop_saved_work_cannot_continue(tmp_path, monkeypatch):
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    verify = runner.verify_required_tests
+    calls = []
+
+    def execute(config, state, path, job, role):
+        calls.append(role)
+        assert role == "worker"
+        fixtures.deliver(config)
+        return fixtures.result("ready_for_review")
+
+    def mutate_during_verification(config, state, path, job):
+        target = Path(config["worktree"]) / "delivery.txt"
+        config["verification"] = {
+            "commands": [[sys.executable, "-c",
+                          "from pathlib import Path; Path(" + repr(str(target))
+                          + ").write_text('changed during required tests\\n')"]],
+            "timeout_seconds": 3,
+        }
+        return verify(config, state, path, job)
+
+    monkeypatch.setattr(runner, "execute", execute)
+    monkeypatch.setattr(runner, "verify_required_tests", mutate_during_verification)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    old, = service.jobs(cfg)
+    assert old["status"] == "blocked" and old["continuation"]
+    evidence, = old["verification_runs"]
+    assert evidence["reason"] == "reviewed_worktree_changed"
+    assert evidence["source_unchanged"] is False
+    assert len(old["runner_commits"]) == 2  # build commit, then changed work saved at stop
+    assert command(cfg["repository_root"], "show", old["head_commit"] + ":delivery.txt") == (
+        "changed during required tests"
+    )
+    assert any(r["commit"] == old["head_commit"] and r.get("continuation")
+               for r in core.records(cfg, hub.comments_by_issue[1], 1))
+
+    approve(hub, old["head_commit"])
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    claim = newest_claim(cfg)
+    assert claim["stage"] == "finished"
+    assert claim["error"] == "continuation_commit_unrecorded"
+    assert not Path(claim["worktree"]).exists()
+    assert len(service.jobs(cfg)) == 1 and calls == ["worker"]
     assert any(r["reason"] == "continuation_commit_unrecorded"
                for r in core.records(cfg, hub.comments_by_issue[1], 1))
 
