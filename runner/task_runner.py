@@ -47,6 +47,7 @@ class Blocked(ValueError):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "continuation_not_applied": ("continuation_not_applied", "The continued commit is missing from the built head."),
     "command_preflight": ("prerequisite_failed", "Configured command program unavailable or not executable."),
     "agent_compatibility": ("prerequisite_failed", "Agent compatibility check failed."),
     "assignment_preflight": ("prerequisite_failed", "Assignment safety preflight failed."),
@@ -938,6 +939,12 @@ def prompt_for(config, job, role):
             if job.get("disagreement"):
                 text += "\nONE DISAGREEMENT RECONSIDERATION (same exact head): " + json.dumps(job["disagreement"])
     note = LIFECYCLE_NOTES[role]
+    if role == "worker" and job["assignment"].get("continuation"):
+        previous = job["assignment"]["continuation"]
+        note += ("\nContinuing from commit " + previous["commit"]
+                 + ". Previous stop reason: " + previous["reason"]
+                 + ". The story's acceptance criteria take priority over any findings pasted into the story. "
+                 "This continuation permits one correction round after the initial build and review.")
     if role == "worker":
         note = note.format(worker_check_attempts=worker_check_attempts(config))
     return text + "\n\n" + note + "\nReturn only the supplied result schema.\n"
@@ -1411,7 +1418,8 @@ def publish_receipt(config, path, job, client=None):
 
 
 def enqueue(config, task_id, task_text, *, kind="work", base=None, head=None, delay=0,
-            after_task=None, scopes=(), github_number=None, lifecycle=None, review_base=None, primary_context=None):
+            after_task=None, scopes=(), github_number=None, lifecycle=None, review_base=None, primary_context=None,
+            continuation=None):
     if not ID.fullmatch(task_id) or not 0 <= delay <= 86400 or kind not in {"work", "review"}:
         raise ValueError("Invalid task ID, kind or delay")
     state = private_dir(config["state_dir"])
@@ -1442,6 +1450,14 @@ def enqueue(config, task_id, task_text, *, kind="work", base=None, head=None, de
         assignment["review_base"] = review_base
     if primary_context is not None:
         assignment["primary_context"] = primary_context
+    if continuation is not None:
+        if (not isinstance(continuation, dict) or set(continuation) != {"commit", "number", "reason"}
+                or not isinstance(continuation["commit"], str) or not SHA.fullmatch(continuation["commit"])
+                or type(continuation["number"]) is not int or continuation["number"] not in {1, 2}
+                or continuation["reason"] not in lifecycle_api().STOP_REASONS):
+            raise ValueError("Invalid continuation binding")
+        git(config, "merge-base", "--is-ancestor", continuation["commit"], current)
+        assignment["continuation"] = dict(continuation)
     if lifecycle is not None:
         if (set(lifecycle) != {"issue", "event", "primary"} or lifecycle["issue"] != github_number
                 or type(lifecycle["event"]) is not int or lifecycle["event"] < 1
@@ -1548,6 +1564,11 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     raise Blocked("Lifecycle dispatch requires an event-bound service claim")
             max_attempts = (1 + lifecycle_cfg["pushback"]["max_correction_rounds"]
                             if lifecycle_cfg else config.get("max_rounds", 2))
+            if assignment.get("continuation"):
+                max_attempts = 2
+            # Continuation exhaustion requires another owner approval; automatic
+            # primary dispatch would grant an uncounted extra build and review.
+            escalation_status = "needs_owner" if assignment.get("continuation") else "needs_primary_review"
             dependency = assignment["after_task"]
             if dependency:
                 predecessor = read(state / "tasks" / f"{dependency}.json")
@@ -1603,11 +1624,19 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         if attempt == 1 or dirty_paths(config):
                             raise Blocked("Disagreement requires an existing reviewed clean head")
                         if job.get("disagreement_exchanges", 0):
-                            job["status"] = "needs_primary_review"
+                            job["status"] = escalation_status
                             break
                         job.update(disagreement=disagreement, disagreement_exchanges=1)
                     else:
                         runner_commit(config, path, job, before_head)
+                if assignment.get("continuation"):
+                    try:
+                        git(config, "merge-base", "--is-ancestor",
+                            assignment["continuation"]["commit"], job["head_commit"])
+                    except CommitRefused:
+                        exc = Blocked("Continuation is missing from built head")
+                        exc.blocked_reason = block_reason("continuation_not_applied")
+                        raise exc from None
                 ensure_reviewable(config, job)
                 prerequisite = "agent_compatibility"
                 check_cli(config)
@@ -1651,7 +1680,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         verdict = "ready_for_integration"
                         job["review"]["status"] = verdict
                     if job.get("disagreement") and verdict == "needs_changes":
-                        job["status"] = "needs_primary_review" if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
+                        job["status"] = escalation_status if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
                         break
                     if verdict == "needs_changes" and assignment["lifecycle"]["primary"]:
                         job["status"] = "needs_owner"
@@ -1659,10 +1688,10 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 if verification and verification["status"] != "passed" and verdict == "ready_for_integration":
                     raise Blocked("Review approval contradicts failed required tests")
                 if verdict != "needs_changes" or assignment["kind"] == "review":
-                    job["status"] = "needs_primary_review" if verdict == "needs_changes" else verdict
+                    job["status"] = escalation_status if verdict == "needs_changes" else verdict
                     break
                 if attempt == max_attempts:
-                    job["status"] = "needs_primary_review"
+                    job["status"] = escalation_status
                 elif lifecycle_cfg:
                     job.update(status="changes_requested", updated_at=now())
                     save_job(config, path, job)
