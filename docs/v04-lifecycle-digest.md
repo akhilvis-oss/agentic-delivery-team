@@ -200,6 +200,29 @@ or “never” before its first successful poll. Polls execute jobs synchronousl
 long-running job can delay the next heartbeat; choose the threshold to include the
 expected job duration as well as the poll interval.
 
+In `serve` mode, `Unavailable` (including `Uncertain`) from a poll or stand-up
+keeps the loop alive. The retry wait starts at `poll_seconds`, doubles on each
+consecutive failure, caps at 600 seconds, and resets after success. Retry receipts
+in private state record times, a count and the exception class, never its message.
+`run-once` and `enqueue-only` still exit on the first error.
+
+After the first successful poll and stand-up following failures, the existing
+`agentic-last-poll-v1` status comment adds one line: “Polls first failed: …;
+recovered: …; failed polls: N; exception class: Unavailable.” Times are UTC;
+the class can also be `Uncertain`. The next successful cycle removes the line.
+Other exceptions propagate and exit non-zero. Before exiting, the loop writes
+only the exception class and originating framework function to private
+`service-error.json`. On the next start, after a successful cycle, the same comment
+adds “Service restarted after … in ….” and removes the private record. This line
+also disappears after the next successful cycle. Neither line includes exception
+messages, request paths, URLs or tokens. Failed notice publication retains the
+private receipts for retry; these notices do not resolve ambiguous writes.
+
+Run `serve` under the supplied launchd template with `KeepAlive` (see below), so
+unexpected errors restart automatically. Retrying temporary GitHub failures does
+not replace process supervision. Polls skipped by the interval or lock do not
+consume recovery receipts or count as successful recovery.
+
 Alerts are **opt-in**. Add `"heartbeat_alert_seconds": 600` to your private combined
 lifecycle JSON (or the policy JSON referenced by `policy_file`), choosing an integer
 at least as large as `poll_seconds`. Existing configs without this key keep alerts

@@ -319,11 +319,7 @@ def publish_poll(cfg, client, issues, at):
     comments = [c for c in client.comments(number)
                 if c.get("user", {}).get("login") == cfg["actors"]["runner"]
                 and comment_marker in c.get("body", "")]
-    body = ("Lifecycle service last poll: " + dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat()
-            + ".\nExpected poll interval: " + str(cfg["poll_seconds"])
-            + " seconds, plus time spent building or reviewing. If this time stops "
-            "updating, ask the operator to restore the service; re-approving alone "
-            "will not restart it.\n" + comment_marker)
+    body = poll_body(cfg, at, journal.get("notices", []))
     if comments:
         comment = min(comments, key=lambda c: c["id"])
         client.request("PATCH", f"/issues/comments/{comment['id']}", {"body": body})
@@ -343,6 +339,58 @@ def publish_poll(cfg, client, issues, at):
         client.request("PUT", f"/issues/comments/{comment['id']}/pin")
     journal.update(issue=number, comment=comment["id"], last_poll=at)
     core.save(path, journal)
+
+
+def poll_body(cfg, at, notices):
+    return ("Lifecycle service last poll: " + timestamp(at)
+            + ".\nExpected poll interval: " + str(cfg["poll_seconds"])
+            + " seconds, plus time spent building or reviewing. If this time stops "
+            "updating, ask the operator to restore the service; re-approving alone "
+            "will not restart it.\n"
+            + "".join(line + "\n" for line in notices)
+            + "<!-- agentic-last-poll-v1 -->")
+
+
+def report_recovery(cfg, client, failure, restart):
+    """Publish only after the poll and stand-up finish; retain receipts on failure."""
+    root = Path(cfg["state_dir"])
+    path = root / "public-heartbeat.json"
+    journal = core.read(path)
+    notices = []
+    if failure:
+        notices.append(
+            f"Polls first failed: {timestamp(failure['first_failed'])}; "
+            f"recovered: {timestamp(time.time())}; "
+            f"failed polls: {failure['failures']}; "
+            f"exception class: {failure['exception_class']}."
+        )
+    if restart:
+        notices.append(
+            f"Service restarted after {restart['exception_class']} "
+            f"in {restart['function']}."
+        )
+    if notices or journal.get("notices"):
+        client.request("PATCH", f"/issues/comments/{journal['comment']}",
+                       {"body": poll_body(cfg, journal["last_poll"], notices)})
+        journal["notices"] = notices
+        core.save(path, journal)
+    for name in ("poll-failure.json", "service-error.json"):
+        (root / name).unlink(missing_ok=True)
+
+
+def error_origin(exc):
+    """Only framework function names cross the private/public boundary."""
+    framework = Path(__file__).resolve().parents[1]
+    function = "run_loop"
+    trace = exc.__traceback__
+    while trace:
+        code = trace.tb_frame.f_code
+        filename = Path(code.co_filename).resolve()
+        if any(filename.is_relative_to(framework / folder)
+               for folder in ("lifecycle", "digest", "runner")):
+            function = code.co_name
+        trace = trace.tb_next
+    return function
 
 
 def poll(cfg, client, *, run_jobs=True, clock=time.time):
@@ -890,18 +938,51 @@ def main(argv=None):
 
 
 def run_loop(cfg, client, action):
+    serving = action == "serve"
+    root = Path(cfg["state_dir"]) if serving else None
+    failure = restart = None
+    if serving:
+        core.bind_state(cfg)
+        failure_path = root / "poll-failure.json"
+        restart_path = root / "service-error.json"
+        failure = core.read(failure_path) if failure_path.exists() else None
+        restart = core.read(restart_path) if restart_path.exists() else None
+    wait = min(cfg["poll_seconds"], 600) if serving else None
     while True:
-        poll(cfg, client, run_jobs=action != "enqueue-only")
-        if action != "enqueue-only" and cfg.get("digest_config"):
-            from digest import standup
+        try:
+            previous_poll = heartbeat(cfg) if serving else None
+            poll(cfg, client, run_jobs=action != "enqueue-only")
+            if action != "enqueue-only" and cfg.get("digest_config"):
+                from digest import standup
 
-            digest_cfg = standup.load_config(cfg["digest_config"])
-            standup.run_once(
-                digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
-            )
+                digest_cfg = standup.load_config(cfg["digest_config"])
+                standup.run_once(
+                    digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
+                )
+            if serving and heartbeat(cfg) != previous_poll:
+                report_recovery(cfg, client, failure, restart)
+                failure = restart = None
+                wait = min(cfg["poll_seconds"], 600)
+            delay = cfg["poll_seconds"] if serving else 0
+        except core.Unavailable as exc:
+            if not serving:
+                raise
+            at = time.time()
+            failure = failure or {"first_failed": at, "failures": 0}
+            failure.update(last_failed=at, failures=failure["failures"] + 1,
+                           exception_class=type(exc).__name__)
+            core.save(root / "poll-failure.json", failure)
+            delay = wait
+            wait = min(wait * 2, 600)
+        except Exception as exc:
+            if serving:
+                core.save(root / "service-error.json",
+                          {"exception_class": type(exc).__name__,
+                           "function": error_origin(exc)})
+            raise
         if action in {"run-once", "enqueue-only"}:
             break
-        time.sleep(cfg["poll_seconds"])
+        time.sleep(delay)
     return 0
 
 
