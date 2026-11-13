@@ -431,3 +431,22 @@ silently adopt another PR/head. Failed required checks need correction and a fre
 exact-head review. No live publication or merge is exercised by the synthetic
 suite: run `python -m pytest -q tests/test_runner_integration.py` for its creation,
 head binding, category, failure, recovery and concurrency cases.
+
+### Continuation delivery
+
+The lifecycle service requires an explicit `integration` choice in both runner
+and Primary templates: a complete enabled block as above, or `{"enabled": false}`.
+Incomplete settings stop before dispatch with a public explanation. A Primary job
+copies the delivery settings from the generated config of the job it continues;
+its template cannot enable delivery that the original job had disabled.
+
+A passing review with delivery off stops at `needs-owner` with reason
+`delivery_disabled`, the reviewed commit and a ready-to-paste “Continue from”
+block. To publish later, configure delivery, paste that block into the same story
+and re-approve. The service reuses the recorded review and required checks only
+when the approved scope is unchanged apart from the continuation block, the
+freshly fetched target still equals the review base, and its trusted gate is
+unchanged. Otherwise it records the fallback reason in the claim and runs the
+normal continuation, merging the fetched target before building and reviewing.
+Delivery-only resumes use the existing continuation limit and publication and
+merge controls. No new command or label is needed.

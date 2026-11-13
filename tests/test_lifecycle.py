@@ -606,6 +606,7 @@ def configured_service(tmp_path, monkeypatch):
         reviewer_model="fixture",
         agent=fixtures.agent_config("/must-not-launch"),
         commit_identity={"name": "Fixture", "email": "fixture@example.invalid"},
+        integration={"enabled": False},
     )
     core.save(cfg["runner_config"], settings)
     core.save(cfg["primary_runner_config"], settings)
@@ -670,7 +671,7 @@ def test_runner_phases_pushback_and_minor_followup_privacy(tmp_path, monkeypatch
     monkeypatch.setattr(runner, "execute", execute)
     service.poll(cfg, h.client(), clock=lambda: 100)
     job = service.jobs(cfg)[0]
-    assert job["status"] == "ready_for_integration" and len(job["runner_commits"]) == 2
+    assert job["status"] == "needs_owner" and len(job["runner_commits"]) == 2
     assert len(job["review_history"]) == 2
     public = json.dumps(h.comments_by_issue) + json.dumps(h.issues)
     assert (
@@ -1353,7 +1354,7 @@ def test_claim_recovers_durable_terminal_job_without_readmission(
     service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
     path = next((Path(cfg["state_dir"]) / "jobs").glob("*/runner-state/tasks/*.json"))
     job = core.read(path)
-    job.update(status="ready_for_integration", head_commit="a" * 40)
+    job.update(status="needs_owner", head_commit="a" * 40)
     core.save(path, job)
     h.event(1, "in-progress", "runner")
     h.event(1, "committed", "runner")

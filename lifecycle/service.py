@@ -231,6 +231,101 @@ def recover_start_commit(cfg, claim, runner):
     return start
 
 
+def source_work(cfg, job_id):
+    """Load only service-owned state and verify its issue/event assignment."""
+    if not core.ID.fullmatch(job_id):
+        raise ValueError("Invalid source job")
+    root = Path(cfg["state_dir"]) / "jobs" / job_id
+    config = runner_module().load_config(root / "config.json")
+    job = core.read(root / "runner-state" / "tasks" / (job_id + ".json"))
+    assignment = runner_module().verify_assignment(config, job)
+    if (job["id"] != job_id or assignment["kind"] != "work"
+            or config.get("lifecycle_config") != cfg["config_path"]
+            or assignment.get("lifecycle", {}).get("issue") != job.get("github_number")):
+        raise ValueError("Source job binding changed")
+    return config, job
+
+
+def delivery_template(cfg, claim):
+    template = core.read(cfg["primary_runner_config"] if claim["primary"] else cfg["runner_config"])
+    template["lifecycle_config"] = cfg["config_path"]
+    # Service dispatch requires an explicit choice, including on Primary templates.
+    if "integration" not in template:
+        raise ValueError("Explicit delivery mode required")
+    runner_module().integration_api().options(template)
+    if claim["primary"]:
+        source_config, source = source_work(cfg, claim["source_job"])
+        binding = source["assignment"]["lifecycle"]
+        if (binding["issue"] != claim["issue"] or binding["event"] != claim["source_event"]
+                or source["assignment"]["task_text"] != claim["task"]
+                or source.get("head_commit") != claim["start_commit"]):
+            raise ValueError("Primary source binding changed")
+        template["integration"] = source_config.get("integration", {"enabled": False})
+    if "delivery_settings" in claim:
+        template["integration"] = claim["delivery_settings"]
+    runner_module().integration_api().options(template)
+    return template
+
+
+def resume_delivery(cfg, claim, config, job_path):
+    """Rebind trusted review evidence to this newly approved delivery assignment."""
+    runner = runner_module()
+    _, source = source_work(cfg, claim["delivery_source"])
+    job = runner.read(job_path)
+    assignment = job["assignment"]
+    assignment["base_commit"] = source["base_commit"]
+    assignment["review_base"] = source.get("review_base", source["base_commit"])
+    job.update(base_commit=assignment["base_commit"], review_base=assignment["review_base"],
+               assignment_sha256=runner.digest(assignment), round=source["round"],
+               delivery_source=source["id"])
+    job["status"] = "running_worker"
+    runner.save_job(config, job_path, job)
+    for field in ("head_commit", "reviewed_head", "review", "review_session", "review_history",
+                  "verification_runs", "runner_commits"):
+        job[field] = source[field]
+    # The existing transition protocol and delivery authorization still apply.
+    for status in ("running_worker", "running_reviewer", "ready_for_integration"):
+        job["status"] = status
+        runner.save_job(config, job_path, job)
+
+
+def delivery_candidate(cfg, claim, source_id, history):
+    runner = runner_module()
+    source_config, source = source_work(cfg, source_id)
+    if not any(r["job"] == source_id and r["commit"] == claim["continued_from"]
+               and r["kind"] == "review" and r["outcome"] == "ready_for_integration"
+               and core.has_role(cfg, r["actor"], "runner") for r in history):
+        return None, "review_record_missing"
+    if source["github_number"] != claim["issue"]:
+        raise ValueError("Foreign delivery source")
+    if source.get("integration", {}).get("stage", "new") != "new":
+        return None, "publication_already_started"
+    # Only the continuation block may change when reusing the old review.
+    def scope(text):
+        text = re.sub(r"(?m)^### Continue from\nCommit: [0-9a-f]{40}$", "",
+                      text.replace("\r\n", "\n"))
+        # The story form replaces its optional empty answer when the owner
+        # pastes the block; that wrapper is continuation metadata too.
+        return re.sub(r"(?m)^### Saved work \(optional\)\n\n*(?:_No response_(?:\n|$))?\n*",
+                      "", text).strip()
+    if scope(source["assignment"]["task_text"]) != scope(claim["task"]):
+        return None, "approved_scope_changed"
+    try:
+        runner.integration_api().reviewed(runner, source_config, source)
+    except (ValueError, RuntimeError):
+        return None, "review_evidence_unavailable"
+    base = source.get("review_base", source["base_commit"])
+    target = claim["review_base"]
+    for file in (".github/review-gate.json", "gate/review_gate.py"):
+        old = git(cfg, "show", base + ":" + file, check=False)
+        new = git(cfg, "show", target + ":" + file, check=False)
+        if (old.returncode, old.stdout) != (new.returncode, new.stdout):
+            return None, "trusted_gate_changed"
+    if target != base:
+        return None, "target_branch_moved"
+    return source_id, None
+
+
 def cleanup(cfg, claim, issue, events=()):
     if claim.get("cleaned") or issue["state"] != "closed":
         return
@@ -537,16 +632,19 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                         "review_base", source_job["base_commit"]
                     ),
                     primary_context=source_job.get("review_history", []),
+                    source_job=source_job["id"], source_event=source_job["assignment"]["lifecycle"]["event"],
                 )
             named = None if primary else continuation_commit(claim["task"])
             if named:
                 history = core.records(cfg, client.comments(issue["number"]), issue["number"])
                 local_jobs = {j["id"]: j for j in jobs(cfg)}
                 saved = next((r for r in reversed(history)
-                              if r["commit"] == named and r.get("continuation", False)
-                              and r["to"] in {"needs-owner", "blocked"}
+                              if r["commit"] == named
+                              and ((r.get("continuation", False) and r["to"] in {"needs-owner", "blocked"})
+                                   or (r["kind"] == "review" and r["outcome"] == "ready_for_integration"))
                               and core.has_role(cfg, r["actor"], "runner")
-                              and local_jobs.get(r["job"], {}).get("status") in {"needs_owner", "blocked"}
+                              and local_jobs.get(r["job"], {}).get("status") in {
+                                  "needs_owner", "blocked", "ready_for_integration"}
                               and local_jobs[r["job"]].get("blocked_reason", {}).get("reason_code")
                               != "continuation_not_applied"
                               and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
@@ -561,7 +659,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 if saved:
                     claim.update(start_commit=named, continued_from=named,
                                  continuation_number=count + 1,
-                                 previous_stop_reason=saved["reason"])
+                                 previous_stop_reason=saved["reason"] or "delivery_disabled",
+                                 continuation_source=saved["job"])
                 else:
                     claim["continuation_error"] = "continuation_commit_unrecorded"
                 if count >= 2:
@@ -581,6 +680,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                         Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
                     )
                     if (completed_job.get("stop_saving")
+                            or completed_job["status"] == "ready_for_integration"
                             or runner.integration_api().options(completed_config)):
                         runner.run_once(completed_config, task_id=claim["job"])
                 events = client.events(claim["issue"])
@@ -602,12 +702,12 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 if previous["status"] in runner.TERMINAL:
                     # Completion is durable in the job before the claim. Recover
                     # that boundary without replaying work or re-admitting it.
-                    if previous.get("stop_saving"):
+                    if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
                         if not run_jobs:
                             continue
                         runner.run_once(recovery_config, task_id=claim["job"])
                         previous = runner.read(recovery_path)
-                        if previous.get("stop_saving"):
+                        if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
                             continue
                     claim.update(stage="finished", head=previous.get("head_commit"))
                     core.save(path, claim)
@@ -634,6 +734,14 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 if claim.get("continuation_error"):
                     stop_continuation(cfg, client, path, claim, claim["continuation_error"])
                     continue
+                try:
+                    template = delivery_template(cfg, claim)
+                except (ValueError, OSError):
+                    stop_continuation(cfg, client, path, claim, "delivery_configuration_invalid")
+                    continue
+                if "delivery_settings" not in claim:
+                    claim["delivery_settings"] = template["integration"]
+                    core.save(path, claim)
                 if claim.get("continued_from"):
                     if "review_base" not in claim:
                         try:
@@ -643,6 +751,13 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                             core.save(path, claim)
                             continue
                         claim.pop("error", None)
+                        core.save(path, claim)
+                    if "delivery_resume_checked" not in claim:
+                        source, reason = delivery_candidate(
+                            cfg, claim, claim["continuation_source"],
+                            core.records(cfg, client.comments(claim["issue"]), claim["issue"]))
+                        claim.update(delivery_resume_checked=True, delivery_source=source,
+                                     delivery_resume_fallback=reason)
                         core.save(path, claim)
                     files = prepare_continuation(cfg, claim)
                     if files:
@@ -716,11 +831,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     core.save(path, claim)
                 ensure_worktree(cfg, claim)
                 job_root = core.private(root / "jobs" / claim["job"])
-                template = core.read(
-                    cfg["primary_runner_config"]
-                    if claim["primary"]
-                    else cfg["runner_config"]
-                )
+                template = delivery_template(cfg, claim)
                 template.update(
                     worktree=claim["worktree"],
                     branch=claim["branch"],
@@ -757,6 +868,10 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                         or existing["assignment"]["task_text"] != claim["task"]
                     ):
                         raise ValueError("Claim/job binding mismatch")
+                if claim.get("delivery_source"):
+                    existing = runner.read(job_path)
+                    if existing["status"] == "queued":
+                        resume_delivery(cfg, claim, run_config, job_path)
                 claim.update(stage="enqueued", config=str(config_path))
                 core.save(path, claim)
             if run_jobs and claim["stage"] == "enqueued":

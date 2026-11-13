@@ -1543,7 +1543,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
         for pending_path, pending in jobs:
             if (pending["status"] == "ready_for_integration"
                     and (task_id is None or pending["id"] == task_id)
-                    and integration_api().options(config)):
+                    and ((config.get("lifecycle_config") and not config.get("pool_slot")
+                          and not config.get("phase_context")) or integration_api().options(config))):
                 integration_api().advance(self_module(), config, pending_path, pending)
                 return
         queued = [(p, j) for p, j in jobs if j["status"] == "queued"

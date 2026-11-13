@@ -442,6 +442,8 @@ def public_record(
 
 # Fixed public prose only. Never render worker summaries, errors, logs or argv.
 STOP_REASONS = {
+    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
+    "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
     "continuation_commit_unrecorded": "The named commit is not verified saved work from a permitted stop on this issue. Owner: use the commit from a valid continuation comment, or remove the section and re-approve to restart fresh.",
     "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or remove the section to restart fresh.",
     "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (remove the Continue from section and re-approve), or split the story.",
