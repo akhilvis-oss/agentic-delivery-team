@@ -277,6 +277,10 @@
       ],
       "accepted": [
         "owner"
+      ],
+      "merged": [
+        "workflow",
+        "runner"
       ]
     },
     "pr-open": {

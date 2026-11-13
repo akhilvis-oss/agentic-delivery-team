@@ -140,6 +140,11 @@ def test_next_story_fetches_after_previous_story_merge(tmp_path, monkeypatch):
             command(remote, "merge", "--no-ff", "-m", "merge previous story", "previous-story")
         else:
             assert (Path(config["worktree"]) / "merged.txt").read_text() == "previous story\n"
+        # Model the normal runner's intermediate lifecycle labels. Skipping them
+        # would queue a rejected dispatched-to-in-review transition.
+        number = job["assignment"]["lifecycle"]["issue"]
+        for target in ("in-progress", "committed", "in-review"):
+            hub.event(number, target, "runner")
         job["status"] = "ready_for_integration"
         runner.save_job(config, path, job)
 

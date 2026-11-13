@@ -868,6 +868,50 @@ def queue(cfg, record, *, role="runner", public_body=None):
     return path
 
 
+def owner_merge_verified(cfg, issue, evidence, pr):
+    """Narrow authority for informational owner-merge reconciliation."""
+    stops = [r for r in evidence if r["to"] in {"blocked", "needs-owner", "needs-primary"}
+             and r.get("reason")]
+    return bool(
+        stops and stops[-1]["to"] == "needs-owner"
+        and stops[-1]["reason"] == "owner_merge_required"
+        and stops[-1]["pr"] in {None, pr["number"]}
+        and any(r["kind"] == "transition" and r["to"] == "dispatched"
+                and has_role(cfg, r["actor"], "runner") for r in evidence)
+        and pr.get("merged") is True
+        and pr["base"]["ref"] == cfg.get("base_branch", "main")
+        and pr["head"].get("repo", {}).get("full_name") == cfg["repository"]
+        and pr.get("user", {}).get("login") in set(cfg["actors"].values())
+        and issue in {int(n) for n in re.findall(
+            r"\bCloses\s+#([1-9]\d*)\b", pr.get("body") or "", re.I)}
+        and any(r["kind"] == "review" and r["outcome"] == "ready_for_integration"
+                and r["commit"] == pr["head"]["sha"] for r in evidence)
+    )
+
+
+def reject_transition(cfg, client, path, entry):
+    record = entry["record"]
+    entry.update(status="conflict", error="transition_not_allowed")
+    message = f"Lifecycle transition {record['from']} → {record['to']} rejected by policy"
+    if not entry.get("rejection_attempted"):
+        entry["rejection_attempted"] = True
+        save(path, entry)
+        try:
+            client.request("POST", f"/issues/{record['issue']}/comments", {"body": (
+                f"Lifecycle transition {record['from']} → {record['to']} was rejected. "
+                "The story stays at its current status because the required permission "
+                "or verified owner-merge evidence is missing. Owner: reconcile the story "
+                "before retrying."
+            )})
+        except Unavailable as exc:
+            if not isinstance(exc, Uncertain):
+                entry["rejection_attempted"] = False
+            save(path, entry)
+            raise ValueError(message + "; issue comment could not be confirmed") from None
+    save(path, entry)
+    raise ValueError(message)
+
+
 def flush(cfg, client):
     bind_state(cfg)
     folder = private(Path(cfg["state_dir"]) / "outbox")
@@ -974,10 +1018,13 @@ def flush(cfg, client):
                     if not (restoring or attesting or assumption) and not permitted(
                         cfg, record["from"], record["to"], record["actor"]
                     ):
-                        entry.update(status="conflict", error="transition_not_allowed")
-                        save(path, entry)
-                        blocked_issues.add(record["issue"])
-                        continue
+                        reject_transition(cfg, client, path, entry)
+                    if record["from"] == "needs-owner" and record["to"] == "merged":
+                        pr = client.request("GET", f"/pulls/{record['pr']}") if record["pr"] else None
+                        if (expected_role not in {"workflow", "runner"} or pr is None
+                                or not owner_merge_verified(cfg, record["issue"], remote, pr)
+                                or record["commit"] != pr.get("merge_commit_sha")):
+                            reject_transition(cfg, client, path, entry)
                     # Label replacement is idempotent; append-only comments are not.
                     if current != record["to"]:
                         client.set_state(record["issue"], record["to"])
@@ -1146,6 +1193,7 @@ def job_records(cfg, job):
             outcome=outcome,
             severities=counts if outcome else {},
             reason=reason,
+            pr=integration.get("pr") if reason == "owner_merge_required" else None,
             owner_question=question,
             failed_tests=failures,
             continuation=job.get("continuation", False),
@@ -1648,7 +1696,15 @@ def pr_event(cfg, client, event):
             raise Unavailable("PR head has no trusted successful task review")
     # Validate every managed target before creating any transition intents.
     # Unmanaged links never enter the outbox or trigger a flush of older work.
-    for issue in managed:
+    for issue, evidence in managed.items():
+        if target == "merged" and state(client.issue(issue)) == "needs-owner":
+            if not owner_merge_verified(cfg, issue, evidence, pr):
+                client.request("POST", f"/issues/{issue}/comments", {"body": (
+                    "The PR merged, but this story remains at needs-owner. "
+                    "Only a verified stop waiting for an owner merge can be recorded as merged. "
+                    "Owner: resolve the latest stop reason."
+                )})
+                continue
         record = public_record(
             cfg,
             issue,

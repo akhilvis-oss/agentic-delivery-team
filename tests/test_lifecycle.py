@@ -1322,8 +1322,9 @@ def test_new_owner_approval_supersedes_stale_phase_without_replaying_it(tmp_path
         cfg, 1, "issue-1-event-101", 1, "in-progress", event=101
     )
     path = core.queue(cfg, record)
-    # Old phase cannot advance directly from approved; it becomes a conflict.
-    core.flush(cfg, client)
+    # Old phase cannot advance directly from approved; rejection is explicit.
+    with pytest.raises(ValueError, match="rejected by policy"):
+        core.flush(cfg, client)
     assert core.read(path)["status"] == "conflict"
     h.event(1, "approved", "owner")
     h.approve()
@@ -1822,3 +1823,261 @@ def test_continuation_ref_cleanup_requires_merge_or_owner_close(tmp_path, monkey
         assert claim["cleaned"]
     else:
         assert Path(claim["worktree"]).exists()
+
+
+
+def owner_merge_fixture(cfg, hub, reason="owner_merge_required"):
+    pr = pr_fixture(cfg, hub)
+    hub.event(1, "needs-owner", "runner")
+    stop = core.public_record(cfg, 1, "job", 1, "needs-owner", reason=reason,
+                              kind="review", outcome="ready_for_integration")
+    stop.update({"from": "in-review", "actor": cfg["actors"]["runner"]})
+    hub.comments_by_issue[1].append({"user": {"login": cfg["actors"]["runner"]},
+                                     "body": core.record_body(stop)})
+    pr.update(merged=True, merge_commit_sha="b" * 40, state="closed")
+    return pr
+
+
+@pytest.mark.parametrize("reason,expected", [("owner_merge_required", "merged"),
+                                              ("execution_failed", "needs-owner")])
+def test_owner_merge_respects_latest_stop_reason(tmp_path, reason, expected):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub, reason)
+    core.pr_event(cfg, hub.client("workflow"), {"action": "closed", "pull_request": pr})
+    assert core.state(hub.issues[1]) == expected
+    if expected == "needs-owner":
+        assert "remains at needs-owner" in hub.comments_by_issue[1][-1]["body"]
+
+
+def test_owner_merge_stop_records_published_pr(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    job = dict(id="published-job", round=1, status="needs_owner", head_commit="a" * 40,
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"stage": "owner", "reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    record, = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert record["reason"] == "owner_merge_required" and record["pr"] == 7
+
+
+@pytest.mark.parametrize("unverifiable", ["unmerged", "unreviewed"])
+def test_legacy_owner_merge_scan_cached_until_issue_changes(tmp_path, monkeypatch, unverifiable):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    pr = owner_merge_fixture(cfg, hub)
+    if unverifiable == "unmerged":
+        pr["merged"] = False
+    else:
+        pr["head"]["sha"] = "c" * 40
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    pages = client.pages
+    scans = []
+
+    def listed(path):
+        if path.startswith("/pulls"):
+            scans.append(path)
+        return pages(path)
+
+    monkeypatch.setattr(client, "pages", listed)
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 200)
+    first = [c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")]
+    assert len(scans) == len(first) == 1
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 300)
+    assert [c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")] == first
+    assert len(scans) == 1 and core.state(hub.issues[1]) == "needs-owner"
+    hub.issues[1]["updated_at"] = "2026-01-02T10:00:01+00:00"
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 400)
+    assert len(scans) == 2
+    assert len([c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")]) == 2
+
+
+def test_legacy_owner_merge_read_failure_does_not_cache_negative(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    owner_merge_fixture(cfg, hub)["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    request = client.request
+
+    def unavailable(method, path, data=None):
+        if method == "GET" and path.startswith("/pulls/"):
+            raise core.Unavailable("synthetic read outage")
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", unavailable)
+    with pytest.raises(core.Unavailable):
+        service.backfill_owner_merge(cfg, client, hub.issues[1])
+    cache = Path(cfg["state_dir"]) / "owner-merge-backfill" / "1.json"
+    assert not cache.exists()
+    monkeypatch.setattr(client, "request", request)
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert core.read(cache)["outcome"] == "not_verifiable"
+
+
+def test_legacy_owner_merge_write_recovery_reuses_cached_candidate(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    owner_merge_fixture(cfg, hub)
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    pages, flush = client.pages, core.flush
+    scans = []
+
+    def listed(path):
+        if path.startswith("/pulls"):
+            scans.append(path)
+        return pages(path)
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic write outage")
+
+    monkeypatch.setattr(client, "pages", listed)
+    monkeypatch.setattr(core, "flush", unavailable)
+    with pytest.raises(core.Unavailable):
+        service.backfill_owner_merge(cfg, client, hub.issues[1])
+    cache = core.read(Path(cfg["state_dir"]) / "owner-merge-backfill" / "1.json")
+    assert cache["outcome"] == "verified" and cache["pr"] == 7
+    monkeypatch.setattr(core, "flush", flush)
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert len(scans) == 1 and core.state(hub.issues[1]) == "merged"
+    assert len([r for r in core.records(cfg, hub.comments_by_issue[1], 1)
+                if r["to"] == "merged"]) == 1
+
+
+def test_new_same_second_stop_invalidates_legacy_backfill_cache(tmp_path):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    pr["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    pr["merged"] = True
+    job = dict(id="new-stop", round=2, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"reason": "owner_merge_required"})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    assert hub.issues[1]["updated_at"] == WHEN
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    assert core.state(hub.issues[1]) == "merged"
+
+
+def test_owner_merge_with_known_pr_never_scans_collection(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    hub.issues[1]["state"] = "closed"
+    job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    client = hub.client()
+    monkeypatch.setattr(client, "pages", lambda _: pytest.fail("must not scan closed PRs"))
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert core.state(hub.issues[1]) == "merged"
+
+
+def test_unmerged_known_pr_backfill_is_not_polled_repeatedly(tmp_path):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    pr["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               integration={"reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    calls = list(hub.calls)
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    assert hub.calls == calls
+
+
+def test_rejected_transition_fails_and_comments_once(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="draft")
+    core.queue(cfg, core.public_record(cfg, 1, "job", 0, "merged"), role="workflow")
+    for _ in range(2):
+        with pytest.raises(ValueError, match="draft → merged rejected by policy"):
+            core.flush(cfg, hub.client("workflow"))
+    assert len(hub.comments_by_issue[1]) == 1
+    assert "draft → merged" in hub.comments_by_issue[1][0]["body"]
+    assert core.state(hub.issues[1]) == "draft"
+
+
+@pytest.mark.parametrize("merged", [True, False])
+def test_poll_backfills_owner_merge_once_and_cleans_up(tmp_path, monkeypatch, merged):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    head = service.git(cfg, "rev-parse", "HEAD", worktree=claim["worktree"]).stdout.strip()
+    service.git(cfg, "update-ref", "refs/agentic/continue/" + claim["job"], head)
+    pr = owner_merge_fixture(cfg, hub)
+    pr["merged"] = merged
+    hub.issues[1]["state"] = "closed"
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 300)
+    saved = core.read(claim_path)
+    assert core.state(hub.issues[1]) == ("merged" if merged else "needs-owner")
+    assert bool(saved.get("cleaned")) == merged
+    if merged:
+        assert not Path(claim["worktree"]).exists()
+        assert service.git(cfg, "show-ref", "--verify", "refs/agentic/continue/" + claim["job"], check=False).returncode != 0
+        assert service.git(cfg, "show-ref", "--verify", "refs/heads/" + claim["branch"], check=False).returncode != 0
+        assert "Cleanup: 1 worktrees removed; 1 continuation references removed" in service.status(cfg)
+        assert str(tmp_path) not in service.status(cfg)
+        records = core.records(cfg, hub.comments_by_issue[1], 1)
+        assert len([r for r in records if r["to"] == "merged"]) == 1
+
+
+@pytest.mark.parametrize("target", ["approved", "accepted"])
+def test_merge_authority_cannot_grant_owner_decisions(tmp_path, target):
+    cfg = policy(tmp_path)
+    cfg["transitions"]["needs-owner"][target] = ["runner", "workflow"]
+    core.save(cfg["config_path"], cfg)
+    with pytest.raises(ValueError, match="owner-controlled"):
+        core.load_config(cfg["config_path"])
+
+
+
+@pytest.mark.parametrize("role", ["workflow", "runner"])
+@pytest.mark.parametrize("mutation", ["reason", "head", "unmerged", "link", "foreign", "reviewer"])
+def test_merge_transport_rechecks_narrow_authority(tmp_path, role, mutation):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub, "execution_failed" if mutation == "reason"
+                              else "owner_merge_required")
+    if mutation == "head":
+        pr["head"]["sha"] = "c" * 40
+    elif mutation == "unmerged":
+        pr["merged"] = False
+    elif mutation == "link":
+        pr["body"] = "Closes #2"
+    elif mutation == "foreign":
+        pr["head"]["repo"]["full_name"] = "example/other"
+    elif mutation == "reviewer":
+        hub.comments_by_issue[1][1]["user"]["login"] = "untrusted-fixture"
+    core.queue(cfg, core.public_record(cfg, 1, "pr-7", 0, "merged", pr=7,
+                                      commit=pr["merge_commit_sha"]), role=role)
+    with pytest.raises(ValueError, match="rejected by policy"):
+        core.flush(cfg, hub.client(role))
+    assert core.state(hub.issues[1]) == "needs-owner"
+    assert "needs-owner → merged" in hub.comments_by_issue[1][-1]["body"]
