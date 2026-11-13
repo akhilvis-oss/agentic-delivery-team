@@ -1240,12 +1240,18 @@ def _attest_approval(cfg, client, event):
             # label behind. Reads can fail while removal and explanation work.
             comments = []
         proofs = [r for r in records(cfg, comments, issue["number"]) if r["kind"] == "approval"]
-        if latest is not None and any(r["event"] == int(latest["id"]) for r in proofs):
+        if latest is not None and any(r["event"] >= int(latest["id"]) for r in proofs):
             ignore_snapshot()
         if events:
-            _, head = canonical_state(cfg, client.events(issue["number"]))
-            if head != latest:
-                ignore_snapshot()
+            try:
+                _, head = canonical_state(cfg, client.events(issue["number"]))
+            except Unavailable:
+                # Unreadable history cannot prove an approval. Continue the
+                # rejection; available proof above still protects a newer cycle.
+                pass
+            else:
+                if head != latest:
+                    ignore_snapshot()
         # Remove only the approval we cannot honour, preserving all other labels.
         removal_error = None
         try:
@@ -1421,7 +1427,7 @@ def guard_issue(cfg, client, number):
     if actual == canonical:
         if canonical in {"blocked", "needs-owner", "needs-primary"} and not any(
                 r["to"] == canonical and r.get("reason") in STOP_REASONS
-                and stamp(r["timestamp"]) >= stamp(event["created_at"])
+                and r["event"] == int(event["id"])
                 for r in records(cfg, client.comments(number), number)):
             record = public_record(cfg, number, "label-stop", 0, canonical,
                                    event=int(event["id"]), kind="guard",

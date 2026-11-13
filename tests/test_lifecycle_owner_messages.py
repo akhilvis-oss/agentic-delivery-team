@@ -393,6 +393,105 @@ def test_manual_stop_label_also_gets_reason_and_comment(tmp_path):
     assert record["reason"] == "owner_requested_stop"
 
 
+def test_rejection_history_recheck_outage_removes_label_and_recovers(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    hub.event(1, "approved")  # Ambiguous same-second approval events.
+    client = hub.client("workflow")
+    events = client.events
+    reads = 0
+
+    def fail_recheck(number):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise core.Unavailable("synthetic history recheck outage")
+        return events(number)
+
+    monkeypatch.setattr(client, "events", fail_recheck)
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, approval_event(cfg, hub))
+    assert {"name": "status:approved"} not in hub.issues[1]["labels"]
+    explanation, = client.comments(1)
+    assert "Approval could not be attested" in explanation["body"]
+    assert "add it again" in explanation["body"]
+    assert "synthetic" not in explanation["body"] and cfg["state_dir"] not in explanation["body"]
+    assert not core.records(cfg, client.comments(1), 1)
+
+    monkeypatch.setattr(client, "events", events)
+    core.guard_issue(cfg, client, 1)
+    assert core.state(hub.issues[1]) == "needs-owner"
+    latest = hub.event(1, "approved")
+    fresh = approval_event(cfg, hub)
+    core.attest_approval(cfg, client, fresh)
+    core.attest_approval(cfg, client, fresh)
+    proofs = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert len(proofs) == 1 and proofs[0]["event"] == latest["id"]
+
+
+@pytest.mark.parametrize("target", ["needs-owner", "needs-primary", "blocked"])
+def test_same_second_repeated_stop_is_deduplicated_by_event(tmp_path, target):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state=target)
+    client = hub.client("workflow")
+    first = hub.events_by_issue[1][-1]
+    core.guard_issue(cfg, client, 1)
+    hub.event(1, "approved")
+    if target == "needs-primary":
+        for status in ["dispatched", "in-progress", "committed", "in-review"]:
+            hub.event(1, status, "runner")
+    second = hub.event(1, target, "runner")
+    assert second["created_at"] == first["created_at"]
+    core.guard_issue(cfg, client, 1)
+    core.guard_issue(cfg, client, 1)
+    records = [r for r in core.records(cfg, client.comments(1), 1)
+               if r["to"] == target and r["job"] == "label-stop"]
+    assert [r["event"] for r in records] == [first["id"], second["id"]]
+    assert all(r["reason"] == "owner_requested_stop" for r in records)
+    assert all("owner:" in core.record_body(r).lower() for r in records)
+
+
+def test_rejection_recheck_outage_keeps_newer_proven_approval(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue()
+    hub.event(1, "approved")
+    client = hub.client("workflow")
+    event = approval_event(cfg, hub)
+    comments, events = client.comments, client.events
+    reads = 0
+    newer = None
+
+    def advance_before_proof_read(number):
+        nonlocal newer
+        if newer is None:
+            hub.event(1, "needs-owner", "runner")
+            newer = hub.event(1, "approved")
+            # Simulate another guard publishing proof during this read without
+            # recursively acquiring this invocation's local approval lock.
+            core._attest_approval(cfg, hub.client("workflow"), approval_event(cfg, hub))
+        return comments(number)
+
+    def fail_recheck(number):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise core.Unavailable("synthetic history recheck outage")
+        return events(number)
+
+    monkeypatch.setattr(client, "comments", advance_before_proof_read)
+    monkeypatch.setattr(client, "events", fail_recheck)
+    with pytest.raises(core.Unavailable, match="current approval preserved"):
+        core.attest_approval(cfg, client, event)
+    assert core.state(hub.issues[1]) == "approved"
+    assert not any(call[0] == "DELETE" for call in hub.calls)
+    proofs = [r for r in core.records(cfg, comments(1), 1) if r["kind"] == "approval"]
+    assert len(proofs) == 1 and proofs[0]["event"] == newer["id"]
+    assert "snapshot was ignored" in comments(1)[-1]["body"]
+
+
 def test_unavailable_event_read_rejection_survives_recovery(tmp_path, monkeypatch):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
