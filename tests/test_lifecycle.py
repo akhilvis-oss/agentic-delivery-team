@@ -2082,3 +2082,134 @@ def test_merge_transport_rechecks_narrow_authority(tmp_path, role, mutation):
         core.flush(cfg, hub.client(role))
     assert core.state(hub.issues[1]) == "needs-owner"
     assert "needs-owner → merged" in hub.comments_by_issue[1][-1]["body"]
+
+
+def test_delayed_draft_removal_guard_preserves_later_owner_approval(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="draft")
+    hub.events_by_issue[1].append(dict(
+        id=100, event="unlabeled", label={"name": "status:draft"},
+        actor={"login": cfg["actors"]["owner"]}, created_at=WHEN))
+    latest = hub.event(1, "approved")
+    client = hub.client("workflow")
+    approval = dict(action="labeled", label={"name": "status:approved"},
+                    sender=latest["actor"], issue=client.issue(1))
+    core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    assert not any(r["kind"] == "approval"
+                   for r in core.records(cfg, client.comments(1), 1))
+    assert not any(call[0] == "DELETE" for call in hub.calls)
+    core.attest_approval(cfg, client, approval)
+    proof, = [r for r in core.records(cfg, client.comments(1), 1)
+              if r["kind"] == "approval"]
+    assert proof["event"] == latest["id"]
+    assert not any(call[0] == "DELETE" for call in hub.calls)
+
+
+def test_one_click_after_rejected_attempt_with_draft_still_selected(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    event = approval_picker_event(cfg, hub, actor="product")
+    client = hub.client("workflow")
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    assert client.issue(1)["labels"] == [{"name": "status:draft"}, {"name": "story"}]
+    latest = hub.event(1, "approved")
+    hub.issues[1]["labels"].append({"name": "status:draft"})
+    core.attest_approval(cfg, client, dict(
+        action="labeled", label={"name": "status:approved"},
+        sender={"login": cfg["actors"]["owner"]}, issue=client.issue(1)))
+    core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    assert any(r["kind"] == "approval" and r["event"] == latest["id"]
+               for r in core.records(cfg, client.comments(1), 1))
+
+
+def test_owner_one_click_retry_after_rejected_same_second_approval(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    event = approval_picker_event(cfg, hub)
+    hub.event(1, "approved")
+    hub.issues[1]["labels"].append({"name": "status:draft"})
+    client = hub.client("workflow")
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    hub.counter += 1
+    hub.events_by_issue[1].append(dict(
+        id=hub.counter, event="unlabeled", label={"name": "status:approved"},
+        actor={"login": cfg["actors"]["workflow"]}, created_at=WHEN))
+    latest = hub.event(1, "approved")
+    hub.issues[1]["labels"].append({"name": "status:draft"})
+    core.attest_approval(cfg, client, dict(
+        action="labeled", label={"name": "status:approved"},
+        sender={"login": cfg["actors"]["owner"]}, issue=client.issue(1)))
+    core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    proof, = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert proof["event"] == latest["id"]
+
+
+def test_delayed_guard_preserves_one_click_after_history_outage_rejection(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    event = approval_picker_event(cfg, hub)
+    client = hub.client("workflow")
+    original = client.events
+
+    def unavailable(number):
+        raise core.Unavailable("synthetic history outage")
+
+    monkeypatch.setattr(client, "events", unavailable)
+    with pytest.raises(core.Unavailable):
+        core.attest_approval(cfg, client, event)
+    monkeypatch.setattr(client, "events", original)
+    hub.counter += 1
+    hub.events_by_issue[1].append(dict(
+        id=hub.counter, event="unlabeled", label={"name": "status:approved"},
+        actor={"login": cfg["actors"]["workflow"]}, created_at=WHEN))
+    latest = hub.event(1, "approved")
+    hub.issues[1]["labels"].append({"name": "status:draft"})
+    approval = dict(action="labeled", label={"name": "status:approved"},
+                    sender=latest["actor"], issue=client.issue(1))
+    core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    assert not any(r["kind"] == "approval"
+                   for r in core.records(cfg, client.comments(1), 1))
+    core.attest_approval(cfg, client, approval)
+    proof, = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert proof["event"] == latest["id"]
+
+
+@pytest.mark.parametrize("draft_selected", [False, True])
+def test_delayed_guard_cannot_attest_same_second_body_edit(tmp_path, draft_selected):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="draft", body="The scope the owner approved.")
+    hub.events_by_issue[1].append(dict(
+        id=100, event="unlabeled", label={"name": "status:draft"},
+        actor={"login": cfg["actors"]["owner"]}, created_at=WHEN))
+    latest = hub.event(1, "approved")
+    if draft_selected:
+        hub.issues[1]["labels"].append({"name": "status:draft"})
+    client = hub.client("workflow")
+    approval = dict(action="labeled", label={"name": "status:approved"},
+                    sender=latest["actor"], issue=client.issue(1))
+    hub.issues[1]["body"] = "An edit the owner has never approved."
+    assert client.issue(1)["updated_at"] == latest["created_at"]
+
+    # The earlier removal webhook runs before either the approval or edit
+    # webhook. It must preserve the click without approving the edited scope.
+    core.guard_issue(cfg, client, 1)
+    assert core.state(client.issue(1)) == "approved"
+    assert not any(r["kind"] == "approval"
+                   for r in core.records(cfg, client.comments(1), 1))
+    assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
+
+    # Only the authenticated approval snapshot supplies the body binding.
+    core.attest_approval(cfg, client, approval)
+    core.guard_issue(cfg, client, 1)
+    proof, = [r for r in core.records(cfg, client.comments(1), 1) if r["kind"] == "approval"]
+    assert proof["event"] == latest["id"]
+    assert proof["scope_sha256"] == hashlib.sha256(approval["issue"]["body"].encode()).hexdigest()
+    assert proof["scope_sha256"] != hashlib.sha256(client.issue(1)["body"].encode()).hexdigest()

@@ -1372,10 +1372,9 @@ def _attest_approval(cfg, client, event):
                         "Approval could not be attested: the owner event, status labels or "
                         "approved story snapshot were unavailable or ambiguous. " + removal
                         + "Only the configured owner can approve. "
-                        "To retry, first remove every other status label, including "
-                        "status:draft, in the issue's Labels picker. Then, as the owner, "
-                        "remove status:approved if present and add it again, leaving it "
-                        "as the only status label. The transition must still be allowed "
+                        "To retry, resolve conflicting status labels; status:draft may stay. "
+                        "Then, as the owner, remove status:approved if present and add it again. "
+                        "The guard replaces draft. The transition must still be allowed "
                         "from the last permitted status in the issue history.\n" + marker
                     )},
                 )
@@ -1425,6 +1424,11 @@ def _attest_approval(cfg, client, event):
             current = target
             if target != "approved":
                 boundary = int(item["id"])
+    # A removed approval ends its attempt even if canonical history remains
+    # approved. A fresh owner click must not inherit same-second ambiguity.
+    boundary = max([boundary] + [int(e["id"]) for e in events
+                               if e.get("event") == "unlabeled"
+                               and e.get("label", {}).get("name") == "status:approved"])
     candidates = [
         e
         for e in events
@@ -1456,7 +1460,7 @@ def _attest_approval(cfg, client, event):
         source, _ = canonical_state(
             cfg, [e for e in events if int(e["id"]) < int(latest["id"])]
         )
-        if source != "draft" or not permitted(
+        if source not in {"draft", "approved"} or not permitted(
             cfg, source, "approved", event["sender"]["login"]
         ):
             reject_labels()
@@ -1493,6 +1497,12 @@ def guard_issue(cfg, client, number):
     issue = client.issue(number)
     if is_report(cfg, issue):
         return False
+    labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+    statuses = {label for label in labels if label.startswith("status:")}
+    fresh_after_removal = bool(event and any(
+        e.get("event") == "unlabeled"
+        and e.get("label", {}).get("name") == "status:approved"
+        and int(e["id"]) < int(event["id"]) for e in events))
     # The DELETE from a rejected attestation emits its own webhook. It must
     # never cause the ordinary guard to put the unhonoured approval back.
     comments = client.comments(number) if canonical == "approved" else []
@@ -1501,7 +1511,8 @@ def guard_issue(cfg, client, number):
     if canonical == "approved" and event is not None and not proven and any(
             c.get("user", {}).get("login") == cfg["actors"]["workflow"]
             and (f"<!-- agentic-approval-rejected:{event['id']}:" in c.get("body", "")
-                 or "<!-- agentic-approval-rejected:0:" in c.get("body", ""))
+                 or "<!-- agentic-approval-rejected:0:" in c.get("body", "")
+                 and ("status:approved" not in labels or not fresh_after_removal))
             for c in comments):
         if not permitted(cfg, canonical, "needs-owner", cfg["actors"]["workflow"]):
             return False
@@ -1512,6 +1523,14 @@ def guard_issue(cfg, client, number):
         queue(cfg, record, role="workflow")
         flush(cfg, client)
         return True
+    # Reconcile labels from current history, but only the authenticated owner
+    # approval webhook can bind the approved body. A live body can have changed
+    # within the event's timestamp second; never manufacture a snapshot here.
+    # Remove draft alone so the pending webhook still sees the same approval
+    # event, rather than emitting a replacement approved label event.
+    if canonical == "approved" and statuses == {"status:approved", "status:draft"}:
+        client.request("DELETE", f"/issues/{number}/labels/status%3Adraft")
+        issue = client.issue(number)
     if canonical in {"blocked", "needs-owner", "needs-primary"}:
         client.notify(number)
     try:
@@ -1554,9 +1573,9 @@ def guard_issue(cfg, client, number):
     queue(cfg, record, role="workflow", public_body=(
         "The guard restored the last permitted status. Keep only one status label. "
         "To approve, the configured owner must add status:approved from a permitted "
-        "state. If approval failed, first remove every other status label, including "
-        "status:draft. Then, as the owner, remove status:approved if present and add "
-        "it again, leaving it as the only status label. The transition must still "
+        "state. If approval failed, resolve conflicting labels; status:draft may stay. "
+        "Then, as the owner, remove status:approved if present and add it again. "
+        "The guard replaces draft. The transition must still "
         "be allowed from the last permitted status in the issue history.\n"
         + record_body(record)
     ))

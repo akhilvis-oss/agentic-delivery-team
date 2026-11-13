@@ -339,3 +339,117 @@ def test_legacy_dispatch_recovers_job_base_after_recorded_progress(tmp_path, mon
     assert core.read(path)["start_commit"] == start != head
     assert command(claim["worktree"], "rev-parse", "HEAD") == head
     assert job_path.read_bytes() == before and len(network) == 1
+
+
+@pytest.mark.parametrize("mode", ["merge", "squash_owner", "squash_runner", "unmerged", "unreviewed"])
+def test_cleanup_uses_fresh_target_or_verified_reviewed_merge_head(tmp_path, monkeypatch, mode):
+    from test_lifecycle import owner_merge_fixture, pr_fixture
+
+    cfg, hub, runner, remote, minted, network = transport(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    worktree = Path(claim["worktree"])
+    (worktree / "story.txt").write_text("reviewed story\n")
+    command(worktree, "add", "story.txt")
+    command(worktree, "commit", "-qm", "story")
+    head = command(worktree, "rev-parse", "HEAD")
+    claim.update(stage="finished", head=head, cleanup_pending="branch_not_in_local_base")
+    # Simulate the old cleanup having removed the worktree but retained its branch.
+    command(cfg["repository_root"], "worktree", "remove", str(worktree))
+    # Existing multi-valued upstream configuration must not override the
+    # invocation's verified merge reference, even with a stale local base.
+    command(cfg["repository_root"], "config", "branch." + claim["branch"] + ".remote", ".")
+    command(cfg["repository_root"], "config", "branch." + claim["branch"] + ".merge", "refs/heads/main")
+    core.save(claim_path, claim)
+    command(remote, "fetch", cfg["repository_root"], claim["branch"])
+    if mode == "merge":
+        command(remote, "merge", "--no-ff", "-m", "merge story", "FETCH_HEAD")
+    elif mode.startswith("squash") or mode == "unreviewed":
+        command(remote, "merge", "--squash", "FETCH_HEAD")
+        command(remote, "commit", "-qm", "squash story")
+    merged = command(remote, "rev-parse", "HEAD")
+    # Reuse the authenticated owner/runner PR fixtures, binding their review
+    # and merged records to real disposable commits.
+    pr = owner_merge_fixture(cfg, hub) if mode == "squash_owner" else pr_fixture(cfg, hub)
+    pr["base"]["ref"] = "target"
+    pr["head"]["sha"] = head
+    pr.update(merged=mode != "unmerged", merge_commit_sha=merged)
+    review = core.public_record(
+        cfg, 1, "cleanup-review", 1, "in-review", kind="review",
+        outcome="ready_for_integration", commit=head if mode != "unreviewed" else "f" * 40)
+    review.update({"from": "in-review", "actor": cfg["actors"]["runner"]})
+    hub.comments_by_issue[1].append(dict(
+        user={"login": review["actor"]}, body=core.record_body(review)))
+    record = core.public_record(cfg, 1, "pr-7", 0, "merged", commit=merged, pr=7)
+    record.update({"from": "needs-owner" if mode == "squash_owner" else "pr-open",
+                   "actor": cfg["actors"]["runner" if mode == "squash_owner" else "workflow"]})
+    hub.comments_by_issue[1].append(dict(
+        user={"login": record["actor"]}, body=core.record_body(record)))
+    if mode == "squash_owner":
+        hub.event(1, "merged", "workflow")
+    else:
+        hub.event(1, "pr-open", "workflow")
+        hub.event(1, "merged", "workflow")
+    hub.issues[1]["state"] = "closed"
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    result = core.read(claim_path)
+    exists = service.git(cfg, "show-ref", "--verify", "refs/heads/" + claim["branch"], check=False).returncode == 0
+    assert exists == (mode in {"unmerged", "unreviewed"})
+    if exists:
+        assert result["cleanup_pending"] == "branch_not_verified_merged"
+        assert not result.get("cleaned")
+    else:
+        assert result["cleaned"] and "cleanup_pending" not in result
+    assert command(cfg["repository_root"], "rev-parse", "main") != merged
+    assert len(network) == 2  # Admission fetch plus the next poll's cleanup fetch.
+
+
+@pytest.mark.parametrize("failure", [
+    "fetch", "concurrent_advance", "in_use", "attach_during_fetch", "attach_at_deletion",
+])
+def test_cleanup_retains_branch_when_fetch_or_ownership_changes(tmp_path, monkeypatch, failure):
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim = core.read(next((Path(cfg["state_dir"]) / "claims").glob("*.json")))
+    issue = dict(hub.issues[1], state="closed", labels=[{"name": "status:merged"}])
+    original = service.git
+    head = original(cfg, "rev-parse", "HEAD", worktree=claim["worktree"]).stdout.strip()
+    if failure == "fetch":
+        def unavailable(c):
+            raise core.Unavailable("synthetic fetch outage")
+        monkeypatch.setattr(service, "fetch_target", unavailable)
+    elif failure == "concurrent_advance":
+        def advance(c, *args, **kwargs):
+            if args[-4:] == ("branch", "-d", "--", claim["branch"]):
+                newer = command(c["repository_root"], "commit-tree", head + "^{tree}", "-p", head, "-m", "advance")
+                original(c, "update-ref", "refs/heads/" + claim["branch"], newer)
+            return original(c, *args, **kwargs)
+        monkeypatch.setattr(service, "git", advance)
+    elif failure == "attach_during_fetch":
+        def fetch_and_attach(c):
+            command(c["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
+            return head
+        monkeypatch.setattr(service, "fetch_target", fetch_and_attach)
+    elif failure == "attach_at_deletion":
+        def attach(c, *args, **kwargs):
+            if args[-4:] == ("branch", "-d", "--", claim["branch"]):
+                command(c["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
+            return original(c, *args, **kwargs)
+        monkeypatch.setattr(service, "git", attach)
+    else:
+        command(cfg["repository_root"], "worktree", "remove", claim["worktree"])
+        command(cfg["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
+    service.cleanup(cfg, claim, issue)
+    assert original(cfg, "show-ref", "--verify", "refs/heads/" + claim["branch"], check=False).returncode == 0
+    assert claim["cleanup_pending"] == {
+        "fetch": "target_branch_fetch_failed", "concurrent_advance": "history_changed_requires_owner",
+        "in_use": "branch_in_use_requires_owner",
+        "attach_during_fetch": "branch_in_use_requires_owner",
+        "attach_at_deletion": "branch_in_use_requires_owner"}[failure]
+    assert not claim.get("cleaned")
+    assert original(cfg, "for-each-ref", "refs/agentic/cleanup/").stdout == ""
+    if failure in {"attach_during_fetch", "attach_at_deletion"}:
+        other = tmp_path / "other"
+        assert command(other, "branch", "--show-current") == claim["branch"]
+        assert command(other, "rev-parse", "HEAD") == head
