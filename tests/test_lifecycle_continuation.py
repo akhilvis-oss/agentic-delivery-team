@@ -1,6 +1,7 @@
 """Owner continuation uses synthetic clients and disposable repositories only."""
 
 from pathlib import Path
+import hashlib
 import sys
 from textwrap import dedent
 
@@ -58,6 +59,27 @@ def test_story_form_saved_work_block_continues_after_github_label_spacing(tmp_pa
     assert claim["continued_from"] == old["head_commit"]
     assert command(claim["worktree"], "rev-parse", "HEAD") == old["head_commit"]
     assert Path(claim["worktree"], "delivery.txt").exists()
+
+
+def test_crlf_story_continues_without_normalizing_approved_scope(tmp_path, monkeypatch):
+    cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
+    body = (hub.issues[1]["body"] + "\n\n### Continue from\nCommit: "
+            + old["head_commit"] + "\n").replace("\n", "\r\n")
+    hub.issues[1]["body"] = body
+    event = hub.event(1, "approved", "owner")
+    hub.approve()
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    claim = newest_claim(cfg)
+    job = next(j for j in service.jobs(cfg) if j["id"] == claim["job"])
+    assert claim["continued_from"] == old["head_commit"]
+    assert command(claim["worktree"], "rev-parse", "HEAD") == old["head_commit"]
+    assert Path(claim["worktree"], "delivery.txt").exists()
+    assert claim["task"] == job["assignment"]["task_text"] == body
+    proof, = [r for r in core.records(cfg, hub.comments_by_issue[1], 1)
+              if r["kind"] == "approval" and r["event"] == event["id"]]
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    assert proof["scope_sha256"] == job["assignment"]["task_sha256"] == digest
+    assert digest != hashlib.sha256(body.replace("\r\n", "\n").encode()).hexdigest()
 
 
 def test_owner_continuation_merges_fetched_target_and_binds_full_review(tmp_path, monkeypatch):

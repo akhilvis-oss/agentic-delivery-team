@@ -109,7 +109,7 @@ def ensure_worktree(cfg, claim):
 
 
 def continuation_commit(body):
-    matches = re.findall(r"^### Continue from\nCommit: ([0-9a-f]{40})$", body, re.MULTILINE)
+    matches = re.findall(r"^### Continue from\nCommit: ([0-9a-f]{40})$", body.replace("\r\n", "\n"), re.MULTILINE)
     return matches[0] if len(matches) == 1 else None
 
 
