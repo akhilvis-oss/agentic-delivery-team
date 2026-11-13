@@ -330,6 +330,7 @@ def advance(runner, config, path, job, client=None):
         delivery.update(stage="blocked", reason="publication_failed")
         job.update(status="blocked", updated_at=runner.now(), blocked_reason={
             "reason_code": "publication_failed", "reason": REASONS["publication_failed"]})
+        runner.save_at_stop(config, path, job, job["head_commit"])
         runner.save_job(config, path, job)
         return
 
@@ -352,6 +353,7 @@ def advance(runner, config, path, job, client=None):
         delivery.update(stage="owner" if owner else "blocked", reason=reason)
         job.update(status="needs_owner" if owner else "blocked", blocked_reason={
             "reason_code": reason, "reason": REASONS[reason]})
+        runner.save_at_stop(config, path, job, job["head_commit"])
         persist()
         if not delivery.get("reason_notice_attempted"):
             try:

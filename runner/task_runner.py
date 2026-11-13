@@ -448,7 +448,7 @@ def commit_preflight(config, job):
         raise CommitRefused("preexisting_worktree_changes", dirty)
 
 
-def runner_commit(config, job_path, job, expected_head):
+def runner_commit(config, job_path, job, expected_head, *, saved_at_stop=False):
     identity = commit_identity(config)
     profile = job["assignment"]["profile"]
     policy = commit_policy(profile)
@@ -504,7 +504,8 @@ def runner_commit(config, job_path, job, expected_head):
             tree = trusted_git(config, "write-tree", extra_env=index_env).decode().strip()
             if tree == trusted_git(config, "rev-parse", expected_head + "^{tree}").decode().strip():
                 raise CommitRefused("no_committable_changes", selected)
-            message = f"runner: job {job['id']} kind {job['assignment']['kind']} round {job['round']}\n"
+            message = (f"runner: job {job['id']} saved at stop\n" if saved_at_stop else
+                       f"runner: job {job['id']} kind {job['assignment']['kind']} round {job['round']}\n")
             author_env = {"GIT_AUTHOR_NAME": identity["name"], "GIT_AUTHOR_EMAIL": identity["email"],
                           "GIT_COMMITTER_NAME": identity["name"], "GIT_COMMITTER_EMAIL": identity["email"]}
             sha = trusted_git(config, "commit-tree", tree, "-p", expected_head,
@@ -543,6 +544,50 @@ def runner_commit(config, job_path, job, expected_head):
             for name in (index_path, index_path + ".lock"):
                 if os.path.exists(name):
                     os.unlink(name)
+
+
+def save_at_stop(config, path, job, expected_head):
+    """Preserve builder work using the normal policy, then pin its published head."""
+    if not job.get("stop_saving"):
+        job.update(stop_saving=True, stop_expected=expected_head,
+                   stop_status=job["status"], stop_commit_start=len(job.get("runner_commits", [])))
+    save_job(config, path, job)
+    job["status"] = job.get("stop_status", job["status"])
+    records = job.get("runner_commits", [])[job.get("stop_commit_start", 0):]
+    # A prepared intent may have been published just before the process died.
+    # Confirm it against the branch; never replay an uncertain commit attempt.
+    for record in records:
+        if record["state"] == "prepared":
+            if git(config, "rev-parse", "refs/heads/" + config["branch"]) == record["commit_sha"]:
+                record["state"] = "committed"
+                job["head_commit"] = record["commit_sha"]
+            else:
+                job["stop_save_failed"] = True
+    if not (job.get("stop_ready") or job.get("stop_save_failed")
+            or any(c["state"] == "committed" for c in records)):
+        try:
+            runner_commit(config, path, job, job.get("stop_expected", expected_head), saved_at_stop=True)
+        except CommitRefused as exc:
+            if exc.reason != "no_committable_changes":
+                job["stop_save_failed"] = True
+                # Keep refusal details private and preserve the original stop status.
+                record_refusal(config, path, job, exc)
+                job["status"] = job.get("stop_status", job["status"])
+    if any(c["state"] == "committed" for c in job.get("runner_commits", [])):
+        head = job["head_commit"]
+        try:
+            trusted_git(config, "update-ref", "--no-deref",
+                        "refs/agentic/continue/" + job["id"], head)
+            job["continuation"] = True
+        except CommitRefused:
+            job["stop_save_failed"] = True
+    # Keep the recovery marker durable until lifecycle publication has run.
+    job["stop_ready"] = True
+    save_job(config, path, job)
+    if not job.get("lifecycle_unsynced"):
+        for key in ("stop_saving", "stop_ready", "stop_expected", "stop_status", "stop_commit_start"):
+            job.pop(key, None)
+        save_job(config, path, job)
 
 
 def record_refusal(config, job_path, job, refusal):
@@ -1338,7 +1383,8 @@ def save_job(config, path, job):
     if job.get("blocked_reason") or job["status"] == "blocked":
         receipt["blocked_reason"] = public_block_reason(job.get("blocked_reason"))
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
-    if config.get("lifecycle_config") and job["assignment"].get("lifecycle"):
+    if (config.get("lifecycle_config") and job["assignment"].get("lifecycle")
+            and (not job.get("stop_saving") or job.get("stop_ready"))):
         try:
             lifecycle_api().sync_job(config["lifecycle_config"], job)
         except Exception:
@@ -1462,6 +1508,12 @@ def run_once(config, state=None, client=None, *, task_id=None):
             return
         jobs = [(p, read(p)) for p in sorted((state / "tasks").glob("*.json"))]
         for path, job in jobs:
+            if (job.get("stop_saving") and config.get("lifecycle_config")
+                    and (task_id is None or job["id"] == task_id)):
+                save_at_stop(config, path, job, job.get("stop_expected", job["base_commit"]))
+                publish_receipt(config, path, job, client)
+                return
+        for path, job in jobs:
             if job["status"].startswith("running_"):
                 job.update(status="interrupted", error="Previous runner stopped; reconcile child and worktree",
                            updated_at=now())
@@ -1485,6 +1537,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
             return
         path, job = queued[0]
         prerequisite = "assignment_preflight"
+        stop_expected = None
         try:
             validate_agent(config)
             assignment = verify_assignment(config, job)
@@ -1533,6 +1586,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     commit_preflight(config, job)
                     if lifecycle_cfg:
                         check_lifecycle_admission(config, job)
+                    stop_expected = before_head
                     job["worker_check_attempts"] = worker_check_attempts(config)
                     job["worker"] = execute(config, state, path, job, "worker")
                     validate_result(job["worker"], "worker")
@@ -1614,13 +1668,23 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     save_job(config, path, job)
             job["updated_at"] = now()
         except CommitRefused as exc:
+            # Publish the stop only after preservation has finished.
+            job["stop_saving"] = bool(config.get("lifecycle_config") and stop_expected is not None)
+            if job["stop_saving"]:
+                job.update(stop_expected=job.get("head_commit") or stop_expected,
+                           stop_status="blocked", stop_commit_start=len(job.get("runner_commits", [])))
             record_refusal(config, path, job, exc)
+            if not job.get("stop_saving"):
+                job.pop("stop_saving", None)
         except Blocked as exc:
             job.update(status="blocked", error=str(exc), updated_at=now(),
                        blocked_reason=getattr(exc, "blocked_reason", block_reason(prerequisite)))
         except Exception:
             job.update(status="failed", error="Execution or integrity check failed; inspect private logs",
                        updated_at=now())
+        if (config.get("lifecycle_config") and stop_expected is not None
+                and job["status"] in {"needs_owner", "blocked", "failed"}):
+            save_at_stop(config, path, job, job.get("head_commit") or stop_expected)
         save_job(config, path, job)
         integration_api().advance(self_module(), config, path, job)
         publish_receipt(config, path, job, client)

@@ -193,9 +193,17 @@ def recover_start_commit(cfg, claim, runner):
     return start
 
 
-def cleanup(cfg, claim, issue):
+def cleanup(cfg, claim, issue, events=()):
     if claim.get("cleaned") or issue["state"] != "closed":
         return
+    if not core.ID.fullmatch(claim["job"]):
+        raise ValueError("Invalid cleanup job")
+    # The most recent close/reopen event must attest an owner close.
+    closing = [e for e in events if e.get("event") in {"closed", "reopened"}]
+    owner_closed = bool(closing and closing[-1].get("event") == "closed"
+                        and closing[-1].get("actor", {}).get("login") == cfg["actors"]["owner"])
+    if owner_closed:
+        git(cfg, "update-ref", "--no-deref", "-d", "refs/agentic/continue/" + claim["job"])
     if core.state(issue) != "merged":
         claim["cleanup_pending"] = "closed_without_merge_requires_owner"
         return
@@ -230,6 +238,7 @@ def cleanup(cfg, claim, issue):
     if deleted.returncode:
         claim["cleanup_pending"] = "branch_not_in_local_base"
     else:
+        git(cfg, "update-ref", "--no-deref", "-d", "refs/agentic/continue/" + claim["job"])
         claim.update(cleaned=True)
         claim.pop("cleanup_pending", None)
 
@@ -404,11 +413,16 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             if claim["stage"] == "finished":
                 if run_jobs and claim.get("config"):
                     completed_config = runner.load_config(claim["config"])
-                    if runner.integration_api().options(completed_config):
+                    completed_job = runner.read(
+                        Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
+                    )
+                    if (completed_job.get("stop_saving")
+                            or runner.integration_api().options(completed_config)):
                         runner.run_once(completed_config, task_id=claim["job"])
-                canonical, _ = core.canonical_state(cfg, client.events(claim["issue"]))
+                events = client.events(claim["issue"])
+                canonical, _ = core.canonical_state(cfg, events)
                 if canonical == core.state(issue):
-                    cleanup(cfg, claim, issue)
+                    cleanup(cfg, claim, issue, events)
                 else:
                     claim["cleanup_pending"] = "untrusted_close_state"
                 core.save(path, claim)
@@ -424,6 +438,13 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 if previous["status"] in runner.TERMINAL:
                     # Completion is durable in the job before the claim. Recover
                     # that boundary without replaying work or re-admitting it.
+                    if previous.get("stop_saving"):
+                        if not run_jobs:
+                            continue
+                        runner.run_once(recovery_config, task_id=claim["job"])
+                        previous = runner.read(recovery_path)
+                        if previous.get("stop_saving"):
+                            continue
                     claim.update(stage="finished", head=previous.get("head_commit"))
                     core.save(path, claim)
                     continue
