@@ -262,6 +262,9 @@ def load_config(path, *, local=True):
 def is_report(cfg, issue):
     labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
     return (
+        issue.get("user", {}).get("login") == cfg["actors"]["runner"]
+        and "<!-- agentic-service-status-v1 -->" in (issue.get("body") or "")
+    ) or (
         issue.get("user", {}).get("login") == cfg["actors"]["product"]
         and "<!-- agentic-service-alert-v1:" in (issue.get("body") or "")
     ) or (
@@ -313,6 +316,8 @@ def public_record(
     gate=None,
     scope_sha256=None,
     approved_by=None,
+    owner_question=None,
+    failed_tests=None,
 ):
     if (
         type(issue) is not int
@@ -358,6 +363,10 @@ def public_record(
         type(n) is not int or n < 0 for n in counts.values()
     ):
         raise ValueError("Invalid severity counts")
+    if target in {"blocked", "needs-owner", "needs-primary"}:
+        reason = reason or "execution_failed"
+        if reason not in STOP_REASONS:
+            raise ValueError("Unknown stop reason")
     if reason is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason):
         raise ValueError("Reason must be a fixed code")
     record = dict(
@@ -395,16 +404,39 @@ def public_record(
             scope_sha256,
         ]
     )
+    if owner_question is not None or failed_tests is not None:
+        if target not in {"blocked", "needs-owner", "needs-primary"}:
+            raise ValueError("Stop details require a stopped task")
+        if owner_question is not None:
+            if not safe_question(cfg, owner_question):
+                raise ValueError("Question is not safe for publication")
+            record["owner_question"] = owner_question
+        if failed_tests is not None:
+            if safe_failures(failed_tests) != failed_tests:
+                raise ValueError("Invalid public test summary")
+            record["failed_tests"] = failed_tests
+        record["key"] = key([record["key"], owner_question, failed_tests])
     return record
 
 
 # Fixed public prose only. Never render worker summaries, errors, logs or argv.
 STOP_REASONS = {
+    "owner_question": 'The builder needs your decision. Owner: add the answer to the story under "Owner decisions", then re-approve.',
+    "question_withheld": 'The builder asked a question containing potentially private content, so it could not be published. Owner: write "Please ask a public-safe question" under "Owner decisions", then re-approve.',
+    "scope_change": "A scope decision needs you. Owner: record the scope under Owner decisions, then re-approve.",
+    "acceptance_criteria_change": "An acceptance criteria decision needs you. Owner: update the story and re-approve.",
+    "story_approval": "The story needs your approval. Owner: review the story and re-approve.",
+    "clarification_unverified": "Repository evidence could not answer the question. Owner: add the answer under Owner decisions, then re-approve.",
+    "product_request_unclassified": "The request needs an owner decision. Owner: clarify the story under Owner decisions, then re-approve.",
+    "invalid_status_change": "The guard restored a stopped task after an invalid label change. Owner: read the preceding stop message, resolve it, then re-approve.",
+    "approval_not_attested": "Approval could not be verified and its label was removed. Owner: resolve conflicting labels, then remove and re-add status:approved to re-approve.",
+    "owner_requested_stop": "The task was stopped by a permitted label change. Owner: add any decision under Owner decisions, resolve the reason for stopping, then re-approve.",
+    "repository_evidence": "Repository evidence is available, but the task still needs your decision. Owner: answer under Owner decisions, then re-approve.",
     "prerequisite_failed": "A required tool or safety check couldn't run or failed; owner: fix the prerequisite and authorize a new task.",
     "assignment_preflight": "Assignment safety checks stopped the task; owner: reconcile the assignment before authorizing a new task.",
-    "worker_reported_blocked": "The worker reported a blocked check; owner: inspect the private result and resolve the prerequisite before authorizing a new task.",
+    "worker_reported_blocked": "The builder could not finish a required check; owner: ask the operator to fix setup, then re-approve.",
     "reviewer_reported_blocked": "Independent review could not accept the work; owner: resolve the outstanding review before authorizing further correction.",
-    "execution_failed": "Execution stopped or was interrupted; owner: reconcile the private run and worktree before authorizing a new task.",
+    "execution_failed": "Execution stopped or was interrupted; owner: ask the operator to reconcile the interrupted work, then re-approve.",
     "publication_failed": "Publishing the reviewed work failed; owner: reconcile GitHub before retrying.",
     "publication_uncertain": "Publishing may have completed; owner: inspect GitHub before retrying.",
     "stale_head": "The reviewed head changed; owner: arrange a fresh review.",
@@ -422,7 +454,7 @@ for _check, _label in {
 }.items():
     STOP_REASONS["worker_" + _check] = (
         _label + ": worker reported blocked without a specific cause; "
-        "owner: inspect the private result, resolve the failure and authorize a new task."
+        "owner: ask the operator to resolve the failed check, then re-approve."
     )
 
     STOP_REASONS["worker_" + _check + "_unavailable"] = (
@@ -440,10 +472,52 @@ for _check, _label in {
         )
 
 
+def safe_question(cfg, question):
+    """Only an explicitly supplied public question may leave the builder result.
+
+    Fail closed on private-looking text; never rewrite a question and call it a
+    verbatim quote. Summaries, limitations and provider replies are not sources.
+    """
+    if not isinstance(question, str) or not question.strip() or len(question) > 2000:
+        return False
+    if re.search(r"[/\\@<>\x00-\x08\x0b-\x1f\x7f]|[A-Za-z0-9_-]{40,}", question):
+        return False
+    # Sensitive values also appear in prose ("use account ...", "token ...").
+    # Withhold the whole question rather than guessing where a value ends or
+    # rewriting text that the owner is promised will be quoted verbatim.
+    if re.search(r"(?i)(?:token|password|secret|api.key|account|login)\s*[:=]|\b(?:tokens?|passwords?|secrets?|api[ ._-]?keys?|accounts?|logins?|credentials?)\b|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-|AKIA[A-Z0-9]{16}|Bearer\s)", question):
+        return False
+    if re.search(r"(?im)\b(?:provider response|traceback|stdout|stderr|private key)\b", question):
+        return False
+    if any(name.lower() in question.lower() for name in cfg["identity_roles"]):
+        return False
+    return True
+
+
+def safe_failures(value):
+    """Publish counts and bare test functions, never node paths or parameters."""
+    if (not isinstance(value, dict) or set(value) != {"count", "names"}
+            or type(value["count"]) is not int or value["count"] < 1
+            or not isinstance(value["names"], list)):
+        return None
+    names = list(dict.fromkeys(n for n in value["names"]
+                              if isinstance(n, str) and re.fullmatch(r"test_[a-zA-Z0-9_]{1,100}", n)))[:5]
+    return {"count": value["count"], "names": names}
+
+
 def record_body(record):
     explanation = ""
     if record["to"] in {"blocked", "needs-owner", "needs-primary"}:
         explanation = STOP_REASONS.get(record.get("reason"), STOP_REASONS["execution_failed"]) + "\n"
+        if record.get("owner_question"):
+            explanation += "\nBuilder question (verbatim):\n" + "\n".join(
+                "> " + line for line in record["owner_question"].split("\n")
+            ) + "\n"
+        if record.get("failed_tests"):
+            failures = record["failed_tests"]
+            explanation += f"\nFailing tests: {failures['count']}. First failures: "
+            explanation += ", ".join(failures["names"]) or "names unavailable"
+            explanation += ". Owner: arrange a fix, then re-approve.\n"
     return (
         "Task lifecycle record (metadata only; no approval implied).\n"
         + explanation
@@ -483,6 +557,8 @@ def records(cfg, comments, expected_issue=None):
                 gate=item["gate"],
                 scope_sha256=item["scope_sha256"],
                 approved_by=item["approved_by"],
+                owner_question=item.get("owner_question"),
+                failed_tests=item.get("failed_tests"),
             )
             if (
                 set(item) != set(expected) | {"from", "actor"}
@@ -515,7 +591,8 @@ def records(cfg, comments, expected_issue=None):
             if not special and not permitted(cfg, item["from"], item["to"], actor):
                 continue
             if item["kind"] == "guard" and (
-                item["from"] != item["to"] or item["reason"] != "invalid_status_change"
+                item["from"] != item["to"] or item["reason"] not in {
+                    "invalid_status_change", "owner_requested_stop"}
             ):
                 continue
             stamp(item["timestamp"])
@@ -605,7 +682,11 @@ class GitHub:
 
     def write_allowed(self, method, path):
         if method == "DELETE":
-            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3Adraft", path))
+            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3A(?:draft|approved)", path))
+        if method == "PATCH" and re.fullmatch(r"/issues/comments/[1-9]\d*", path):
+            return True
+        if method == "PUT" and re.fullmatch(r"/issues/comments/[1-9]\d*/pin", path):
+            return True
         return bool(re.fullmatch(
             r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)", path
         ))
@@ -858,7 +939,7 @@ def flush(cfg, client):
                     # Label replacement is idempotent; append-only comments are not.
                     if current != record["to"]:
                         client.set_state(record["issue"], record["to"])
-                    if record["to"] in {"blocked", "needs-owner"} and not entry.get(
+                    if record["to"] in {"blocked", "needs-owner", "needs-primary"} and not entry.get(
                         "notified"
                     ):
                         client.notify(record["issue"])
@@ -888,7 +969,7 @@ def flush(cfg, client):
                             entry["comment_attempted"] = False
                         raise
                     entry["status"] = "synced"
-                if record["to"] in {"blocked", "needs-owner"} and not entry.get(
+                if record["to"] in {"blocked", "needs-owner", "needs-primary"} and not entry.get(
                     "notified"
                 ):
                     client.notify(record["issue"])
@@ -992,6 +1073,24 @@ def job_records(cfg, job):
             reason = "reviewer_reported_blocked"
         else:
             reason = "execution_failed"
+    question = None
+    failures = None
+    if target in {"blocked", "needs-owner", "needs-primary"}:
+        worker = job.get("worker", {})
+        supplied = worker.get("owner_question")
+        if supplied is not None:
+            if safe_question(cfg, supplied):
+                question, reason = supplied, "owner_question"
+            else:
+                reason = "question_withheld"
+        failures = safe_failures(worker.get("failed_tests"))
+        results = (job.get("verification_runs") or [{}])[-1].get("results", [])
+        failed = [r for r in results if r.get("status") == "failed"]
+        count = sum(r.get("reported_counts", {}).get("failed", 0)
+                    for r in failed if isinstance(r.get("reported_counts"), dict))
+        if count:
+            names = [n for r in failed for n in (r.get("failed_tests") or {}).get("names", [])]
+            failures = safe_failures({"count": count, "names": names})
     return [
         public_record(
             cfg,
@@ -1005,6 +1104,8 @@ def job_records(cfg, job):
             outcome=outcome,
             severities=counts if outcome else {},
             reason=reason,
+            owner_question=question,
+            failed_tests=failures,
         )
     ]
 
@@ -1092,37 +1193,144 @@ def attest_approval(cfg, client, event):
         or event.get("label", {}).get("name") != "status:approved"
     ):
         return
+    bind_state(cfg)
+    with lock(Path(cfg["state_dir"]) / "approval.lock") as acquired:
+        if not acquired:
+            raise Unavailable("Approval attestation is already running")
+        return _attest_approval(cfg, client, event)
+
+
+def _attest_approval(cfg, client, event):
     issue = event["issue"]
+    events = []
+    latest = None
+
+    def ignore_snapshot():
+        # This is not a rejection of the current label event. In particular do
+        # not emit a rejection marker that guard_issue could apply to it.
+        marker = "<!-- agentic-approval-snapshot-ignored:" + key(event) + " -->"
+        try:
+            comments = client.comments(issue["number"])
+        except Unavailable:
+            comments = []
+        if not any(marker in c.get("body", "") and c.get("user", {}).get("login")
+                   == cfg["actors"]["workflow"] for c in comments):
+            client.request("POST", f"/issues/{issue['number']}/comments", {"body": (
+                "A delayed or conflicting approval snapshot was ignored. "
+                "It could not be bound to the current approval, so the guard preserved "
+                "the current label and any existing approval proof. Owner: if this story "
+                "is still waiting for approval, remove and re-add status:approved to "
+                "re-approve the current story.\n" + marker
+            )})
+        raise Unavailable("Approval snapshot is stale or ambiguous; current approval preserved")
 
     def statuses(snapshot):
         names = [x["name"] if isinstance(x, dict) else x for x in snapshot["labels"]]
         return sorted(x for x in names if x.startswith("status:"))
 
-    def reject_labels():
-        client.request(
-            "POST",
-            f"/issues/{issue['number']}/comments",
-            {"body": (
-                "Approval was not recorded. Only the configured owner can approve. "
-                "To retry, first remove every other status label, including "
-                "status:draft, in the issue's Labels picker. Then, as the owner, "
-                "remove status:approved if present and add it again, leaving it "
-                "as the only status label. The transition must still be allowed "
-                "from the last permitted status in the issue history."
-            )},
-        )
-        raise Unavailable("Approval needs valid status labels and an owner label event")
+    def reject_labels(message="Approval needs valid status labels and an owner label event"):
+        # Preserve a proven current event, never a historical approval cycle.
+        # Without history, even an identical story and timestamp cannot prove
+        # this is a replay: a new approval may share both in the same second.
+        # Re-read available history before removal to detect a newer cycle too.
+        try:
+            comments = client.comments(issue["number"])
+        except Unavailable:
+            # Missing proof is not permission to leave an unusable approval
+            # label behind. Reads can fail while removal and explanation work.
+            comments = []
+        proofs = [r for r in records(cfg, comments, issue["number"]) if r["kind"] == "approval"]
+        if latest is not None and any(r["event"] >= int(latest["id"]) for r in proofs):
+            ignore_snapshot()
+        if events:
+            try:
+                _, head = canonical_state(cfg, client.events(issue["number"]))
+            except Unavailable:
+                # Unreadable history cannot prove an approval. Continue the
+                # rejection; available proof above still protects a newer cycle.
+                pass
+            else:
+                if head != latest:
+                    ignore_snapshot()
+        # Remove only the approval we cannot honour, preserving all other labels.
+        removal_error = None
+        try:
+            client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Aapproved")
+        except Unavailable as exc:
+            removal_error = exc
+        rejected = int(latest["id"]) if latest is not None else 0
+        marker = f"<!-- agentic-approval-rejected:{rejected}:" + key(issue) + " -->"
+        try:
+            comments = client.comments(issue["number"])
+        except Unavailable:
+            comments = []
+        removal = ("The guard removed status:approved because it cannot honour that label. "
+                   if removal_error is None else
+                   "The guard could not confirm removal of status:approved. "
+                   "Owner: remove that label yourself before retrying. ")
+        if not any(marker in c.get("body", "") and c.get("user", {}).get("login")
+                   == cfg["actors"]["workflow"] for c in comments):
+            try:
+                client.request(
+                    "POST",
+                    f"/issues/{issue['number']}/comments",
+                    {"body": (
+                        "Approval could not be attested: the owner event, status labels or "
+                        "approved story snapshot were unavailable or ambiguous. " + removal
+                        + "Only the configured owner can approve. "
+                        "To retry, first remove every other status label, including "
+                        "status:draft, in the issue's Labels picker. Then, as the owner, "
+                        "remove status:approved if present and add it again, leaving it "
+                        "as the only status label. The transition must still be allowed "
+                        "from the last permitted status in the issue history.\n" + marker
+                    )},
+                )
+            except Unavailable:
+                if removal_error is not None:
+                    raise removal_error
+                raise
+        if removal_error is not None:
+            raise removal_error
+        raise Unavailable(message)
 
     owner = event.get("sender", {}).get("login") == cfg["actors"]["owner"]
     pair = ["status:approved", "status:draft"]
-    snapshots = [statuses(issue), statuses(client.issue(issue["number"]))]
+    try:
+        events = client.events(issue["number"])
+        canonical, latest = canonical_state(cfg, events)
+        live = client.issue(issue["number"])
+        snapshots = [statuses(issue), statuses(live)]
+    except Unavailable:
+        reject_labels("Approval evidence unavailable; re-approve")
+    timestamp_matches = [e for e in events
+                         if e.get("event") == "labeled"
+                         and e.get("label", {}).get("name") == "status:approved"
+                         and e.get("created_at") == issue.get("updated_at")]
+    if latest is not None and latest.get("created_at") != issue.get("updated_at"):
+        ignore_snapshot()
+    # IDs identify cycles, but the webhook has no label-event ID. When multiple
+    # cycles share a timestamp, its body must also agree with the live snapshot;
+    # otherwise an old webhook could attest a newer event with obsolete scope.
+    if len(timestamp_matches) > 1 and (issue.get("body") or "") != (live.get("body") or ""):
+        ignore_snapshot()
     if any(s != ["status:approved"] and not (owner and s == pair) for s in snapshots):
         reject_labels()
     if not owner:
-        return
-    events = client.events(issue["number"])
+        reject_labels()
     # Bind the webhook snapshot to a unique owner label event. Missing or
     # ambiguous timestamp evidence fails closed, rather than guessing an event.
+    # Event IDs order transitions even when GitHub timestamps share a second.
+    # Only approvals since the last permitted non-approved state can describe
+    # this approval cycle. Two approvals in that cycle remain ambiguous.
+    boundary = 0
+    current = "draft"
+    for item in sorted(events, key=lambda e: int(e["id"])):
+        target = item.get("label", {}).get("name", "")[7:]
+        if item.get("event") == "labeled" and target in STATES and permitted(
+                cfg, current, target, item.get("actor", {}).get("login")):
+            current = target
+            if target != "approved":
+                boundary = int(item["id"])
     candidates = [
         e
         for e in events
@@ -1130,14 +1338,26 @@ def attest_approval(cfg, client, event):
         and e.get("label", {}).get("name") == "status:approved"
         and e.get("actor", {}).get("login") == cfg["actors"]["owner"]
         and e.get("created_at") == issue.get("updated_at")
+        and int(e["id"]) > boundary
     ]
-    canonical, latest = canonical_state(cfg, events)
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":
-        if pair in snapshots:
-            reject_labels()
-        raise Unavailable(
-            "Approval event snapshot is unavailable or ambiguous; re-approve"
-        )
+        reject_labels("Approval event snapshot is unavailable or ambiguous; re-approve")
+    scope = hashlib.sha256((issue.get("body") or "").encode()).hexdigest()
+    try:
+        comments = client.comments(issue["number"])
+    except Unavailable:
+        reject_labels("Approval proof unavailable; re-approve")
+    proofs = [r for r in records(cfg, comments, issue["number"])
+              if r["kind"] == "approval" and r["event"] == int(latest["id"])]
+    # Include uncertain/pending publications: a lost response must never allow
+    # a second body to be queued for the same event under a different key.
+    intents = [read(p)["record"] for p in (Path(cfg["state_dir"]) / "outbox").glob("*.json")]
+    bound = proofs + [r for r in intents if r["issue"] == issue["number"]
+                     and r["kind"] == "approval" and r["event"] == int(latest["id"])]
+    if any(r["scope_sha256"] != scope for r in bound):
+        ignore_snapshot()
+    if proofs:
+        return
     if pair in snapshots:
         source, _ = canonical_state(
             cfg, [e for e in events if int(e["id"]) < int(latest["id"])]
@@ -1148,7 +1368,10 @@ def attest_approval(cfg, client, event):
             reject_labels()
         if snapshots[1] == pair:
             # Remove only draft; never overwrite a concurrent status or other label.
-            client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Adraft")
+            try:
+                client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Adraft")
+            except Unavailable:
+                reject_labels("Approval label cleanup failed; re-approve")
         if statuses(client.issue(issue["number"])) != ["status:approved"]:
             reject_labels()
     record = public_record(
@@ -1159,11 +1382,15 @@ def attest_approval(cfg, client, event):
         "approved",
         event=int(latest["id"]),
         kind="approval",
-        scope_sha256=hashlib.sha256((issue.get("body") or "").encode()).hexdigest(),
+        scope_sha256=scope,
         approved_by=cfg["actors"]["owner"],
     )
-    queue(cfg, record, role="workflow")
+    path = queue(cfg, record, role="workflow")
     flush(cfg, client)
+    if read(path)["status"] != "synced" and not any(
+            r["key"] == record["key"]
+            for r in records(cfg, client.comments(issue["number"]), issue["number"])):
+        reject_labels("Approval publication could not be confirmed; re-approve")
 
 
 def guard_issue(cfg, client, number):
@@ -1172,13 +1399,45 @@ def guard_issue(cfg, client, number):
     issue = client.issue(number)
     if is_report(cfg, issue):
         return False
-    if canonical in {"blocked", "needs-owner"}:
+    # The DELETE from a rejected attestation emits its own webhook. It must
+    # never cause the ordinary guard to put the unhonoured approval back.
+    comments = client.comments(number) if canonical == "approved" else []
+    proven = any(r["kind"] == "approval" and r["event"] == int(event["id"])
+                 for r in records(cfg, comments, number)) if event else False
+    if canonical == "approved" and event is not None and not proven and any(
+            c.get("user", {}).get("login") == cfg["actors"]["workflow"]
+            and (f"<!-- agentic-approval-rejected:{event['id']}:" in c.get("body", "")
+                 or "<!-- agentic-approval-rejected:0:" in c.get("body", ""))
+            for c in comments):
+        if not permitted(cfg, canonical, "needs-owner", cfg["actors"]["workflow"]):
+            return False
+        client.set_state(number, "needs-owner")
+        record = public_record(cfg, number, "approval-rejected", 0, "needs-owner",
+                               event=int(event["id"]), reason="approval_not_attested")
+        record.update({"from": canonical, "actor": cfg["actors"]["workflow"]})
+        queue(cfg, record, role="workflow")
+        flush(cfg, client)
+        return True
+    if canonical in {"blocked", "needs-owner", "needs-primary"}:
         client.notify(number)
     try:
         actual = state(issue)
     except ValueError:
         actual = None
     if actual == canonical:
+        # Runner stops already publish their job-bound reason (whose event is
+        # the approval ID). Only manual stops need this label-event notice.
+        if (canonical in {"blocked", "needs-owner", "needs-primary"}
+                and not has_role(cfg, event.get("actor", {}).get("login"), "runner")
+                and not any(
+                r["to"] == canonical and r.get("reason") in STOP_REASONS
+                and r["event"] == int(event["id"])
+                for r in records(cfg, client.comments(number), number))):
+            record = public_record(cfg, number, "label-stop", 0, canonical,
+                                   event=int(event["id"]), kind="guard",
+                                   reason="owner_requested_stop")
+            queue(cfg, record, role="workflow")
+            flush(cfg, client)
         return False
     client.set_state(number, canonical)
     record = public_record(

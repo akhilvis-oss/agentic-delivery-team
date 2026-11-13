@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import threading
@@ -198,15 +199,24 @@ class Client:
 
     def request(self, method, path, data=None):
         self.hub.calls.append((method, path, copy.deepcopy(data)))
-        if method == "DELETE" and path.endswith("/labels/status%3Adraft"):
+        if method == "DELETE" and re.fullmatch(r"/issues/\d+/labels/status%3A(?:draft|approved)", path):
             if self.hub.fail_write:
                 raise core.Unavailable("label removal failed")
             number = int(path.split("/")[2])
             self.hub.issues[number]["labels"] = [
                 x for x in self.hub.issues[number]["labels"]
-                if x["name"] != "status:draft"
+                if x["name"] != "status:" + path.rsplit("%3A", 1)[1]
             ]
             return None
+        if method in {"PATCH", "PUT"} and path.startswith("/issues/comments/"):
+            identity = int(path.split("/")[3])
+            comment = next(c for comments in self.hub.comments_by_issue.values()
+                           for c in comments if c.get("id") == identity)
+            if method == "PATCH":
+                comment["body"] = data["body"]
+            else:
+                comment["pin"] = {"pinned_at": WHEN}
+            return copy.deepcopy(comment)
         if method == "GET" and path.startswith("/pulls/"):
             return copy.deepcopy(self.hub.prs[int(path.split("/")[2])])
         if method == "GET" and "/check-runs" in path:
@@ -214,6 +224,7 @@ class Client:
         if method == "POST" and path.endswith("/comments"):
             number = int(path.split("/")[2])
             value = {
+                "id": 1000 + sum(len(c) for c in self.hub.comments_by_issue.values()),
                 "user": {"login": self.cfg["actors"][self.role]},
                 "body": data["body"],
             }
@@ -230,7 +241,7 @@ class Client:
             value = self.hub.issue(number, "draft", data["body"])
             value.update(
                 title=data["title"],
-                labels=[{"name": x} for x in data["labels"]],
+                labels=[{"name": x} for x in data.get("labels", [])],
                 user={"login": self.cfg["actors"][self.role]},
             )
             if self.hub.fail_write == "after":
@@ -456,7 +467,7 @@ def test_failed_draft_cleanup_recovers_with_fresh_owner_approval(tmp_path, guard
     assert proof["scope_sha256"] == hashlib.sha256(event["issue"]["body"].encode()).hexdigest()
     assert proof["scope_sha256"] != hashlib.sha256(issue["body"].encode()).hexdigest()
     assert core.state(client.issue(1)) == "approved"
-    assert sum(call[0] == "DELETE" for call in h.calls) == 1
+    assert sum(call[0] == "DELETE" for call in h.calls) == 2
 
 
 def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
@@ -475,10 +486,11 @@ def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
     assert requests[0].full_url == (
         "https://api.github.com/repos/example/project/issues/1/labels/status%3Adraft"
     )
-    for path in ("/issues/1/labels/status%3Aapproved", "/issues/1", "/labels"):
+    client.request("DELETE", "/issues/1/labels/status%3Aapproved")
+    for path in ("/issues/1/labels/status%3Ablocked", "/issues/1", "/labels"):
         with pytest.raises(ValueError, match="Only repository issue/label writes"):
             client.request("DELETE", path)
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 def test_picker_cleanup_preserves_concurrent_status_and_does_not_attest(tmp_path, monkeypatch):
@@ -516,7 +528,7 @@ def test_picker_invalid_approval_fails_closed_with_recovery_comment(tmp_path, ac
     assert core.records(cfg, client.comments(1), 1) == []
     assert "Only the configured owner" in client.comments(1)[0]["body"]
     assert "remove status:approved" in client.comments(1)[0]["body"]
-    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert {"name": "status:approved"} not in client.issue(1)["labels"]
     assert not list((Path(cfg["state_dir"]) / "outbox").glob("*.json"))
 
 
@@ -527,7 +539,7 @@ def test_picker_approval_rejects_live_label_drift(tmp_path):
     h.issues[1]["labels"].append({"name": "status:blocked"})
     with pytest.raises(core.Unavailable):
         core.attest_approval(cfg, h.client("workflow"), event)
-    assert not any(call[0] == "DELETE" for call in h.calls)
+    assert {"name": "status:approved"} not in h.client().issue(1)["labels"]
     assert core.records(cfg, h.comments_by_issue[1], 1) == []
 
 

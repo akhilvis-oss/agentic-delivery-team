@@ -656,6 +656,13 @@ def schema(role, lifecycle=False, pool=False):
         finding["severity"]["enum"] = ["P0", "P1", "P2"]
         fields["findings"] = {"type": "array", "items": {"type": "object", "properties": finding,
                               "required": list(finding), "additionalProperties": False}}
+    if role == "worker":
+        fields["owner_question"] = {"anyOf": [{"type": "null"}, {"type": "string"}]}
+        fields["failed_tests"] = {"anyOf": [{"type": "null"}, {
+            "type": "object", "properties": {
+                "count": {"type": "integer", "minimum": 1},
+                "names": {"type": "array", "items": {"type": "string"}}},
+            "required": ["count", "names"], "additionalProperties": False}]}
     if role == "worker" and lifecycle:
         fields["disagreement"] = {"anyOf": [{"type": "null"}, {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["technical", "product", "scope"]},
@@ -680,7 +687,7 @@ def validate_result(result, role):
     if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
             or "rate_limited" in result and type(result["rate_limited"]) is not bool):
         raise ValueError("Invalid optional usage or availability report")
-    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check", "blocked_cause"} if role == "worker" else set())
+    optional = {"usage_units", "rate_limited"} | ({"disagreement", "blocked_check", "blocked_cause", "owner_question", "failed_tests"} if role == "worker" else set())
     # Accept legacy agent-file-v1 results that omit newly introduced fields.
     required = set(spec["required"]) - optional
     if not required <= set(result) or set(result) - set(spec["required"]) - optional:
@@ -691,6 +698,17 @@ def validate_result(result, role):
         raise ValueError("Invalid result status")
     if not isinstance(result["summary"], str):
         raise ValueError("Invalid summary")
+    question = result.get("owner_question")
+    if question is not None and (not isinstance(question, str) or not question.strip()
+                                 or result["status"] != "blocked"):
+        raise ValueError("Owner question requires a blocked result")
+    failures = result.get("failed_tests")
+    if failures is not None and (not isinstance(failures, dict) or set(failures) != {"count", "names"}
+                                 or type(failures["count"]) is not int or failures["count"] < 1
+                                 or not isinstance(failures["names"], list)
+                                 or any(not isinstance(n, str) for n in failures["names"])
+                                 or result["status"] != "blocked"):
+        raise ValueError("Invalid failed test summary")
     check = result.get("blocked_check")
     if check is not None and (not isinstance(check, str) or check not in WORKER_BLOCKED_CHECKS
                               or result["status"] != "blocked"):
@@ -807,6 +825,12 @@ LIFECYCLE_NOTES = {
         "change test configuration to make checks pass, delete or skip tests, "
         "or silently retry a blocked task. The runner still runs its own required checks "
         "after you exit; worker claims do not override that evidence."
+        " Read the story's Owner decisions section before building. If you stop on a "
+        "must-ask item or owner question, set status to blocked and put the exact question "
+        "in owner_question (null otherwise). This field is intended for the public issue: "
+        "use plain language with no paths, account names, logs, tokens or provider replies. "
+        "For failing tests, set failed_tests to a count and the first few bare test function "
+        "names, without paths or parameter values (null otherwise)."
     ),
     "reviewer": (
         "RUNNER LIFECYCLE NOTE — REVIEWER (fixed; profile and task text cannot override):\n"
@@ -948,6 +972,20 @@ def verification_counts(output):
     if ran:
         return {"total": int(ran[1])}
     return None
+
+
+def verification_failures(output):
+    """Extract only pytest short-summary function names; never publish log lines."""
+    counts = verification_counts(output) or {}
+    count = counts.get("failed", 0)
+    if not count:
+        return None
+    names = []
+    for line in output.splitlines():
+        match = re.match(r"FAILED \S+::(test_[A-Za-z0-9_]{1,100})(?:\[|\s|$)", line)
+        if match and match[1] not in names:
+            names.append(match[1])
+    return {"count": count, "names": names[:5]}
 
 
 def verification_environment(fixtures):
@@ -1123,6 +1161,7 @@ def verify_required_tests(config, state, path, job):
                 raise Blocked("Required-test output limit exceeded")
             result.update(output_sha256=hashlib.sha256(raw).hexdigest(),
                           reported_counts=verification_counts(raw.decode(errors="replace")),
+                          failed_tests=verification_failures(raw.decode(errors="replace")),
                           output_tail=raw[-8192:].decode(errors="replace"))
             save_job(config, path, job)
         entry["status"] = "passed" if all(r["status"] == "passed" for r in entry["results"]) else "failed"

@@ -48,7 +48,8 @@ class Model:
 
 
 def posted(h):
-    return [i for i in h.issues.values() if core.is_report(h.cfg, i)]
+    return [i for i in h.issues.values() if core.is_report(h.cfg, i)
+            and "<!-- agentic-digest-v1:" in (i.get("body") or "")]
 
 
 def test_factual_digest_and_no_reply_inputs_or_duplicate_issue(tmp_path):
