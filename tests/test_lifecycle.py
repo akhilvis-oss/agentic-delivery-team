@@ -775,7 +775,7 @@ def test_worker_check_stop_is_immediate_public_and_not_replayed(
     service.poll(cfg, h.client(), clock=lambda: 100)
     job = service.jobs(cfg)[0]
     assert calls == ["worker"] and job["status"] == "needs_owner"
-    assert not job.get("runner_commits") and not job.get("verification_runs")
+    assert len(job["runner_commits"]) == 1 and not job.get("verification_runs")
     stopped = [r for r in core.records(cfg, h.comments_by_issue[1], 1)
                if r["to"] == "needs-owner"]
     suffix = cause + ("_" + str(attempts) if cause == "attempts_exhausted" else "")
@@ -1650,3 +1650,86 @@ def test_stop_cause_or_bound_not_validated_is_not_published(tmp_path, cause, att
     body = core.record_body(record)
     assert "without a specific cause" in body
     assert "/private/secret" not in body
+
+
+@pytest.mark.parametrize("delivery", ["saved", "refused", "empty", "review-blocked", "runner-blocked"])
+def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, delivery):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            if delivery in {"saved", "review-blocked", "runner-blocked"}:
+                fixtures.deliver(config)
+            elif delivery == "refused":
+                (Path(config["worktree"]) / "credentials.txt").write_text("synthetic private work")
+            if delivery == "runner-blocked":
+                raise runner.Blocked("Synthetic prerequisite stopped")
+            return fixtures.result("ready_for_review" if delivery == "review-blocked" else "blocked")
+        return fixtures.result("blocked", "reviewer")
+
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, h.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    target = "blocked" if delivery == "runner-blocked" else "needs-owner"
+    assert job["status"] == ("blocked" if delivery == "runner-blocked" else "needs_owner")
+    stops = [r for r in core.records(cfg, h.comments_by_issue[1], 1) if r["to"] == target]
+    record, = stops
+    body = next(c["body"] for c in h.comments_by_issue[1] if record["key"] in c["body"])
+    ref = "refs/agentic/continue/" + job["id"]
+    for comment in h.comments_by_issue[1]:
+        assert str(tmp_path) not in comment["body"]
+        assert "credentials.txt" not in comment["body"]
+    if delivery in {"saved", "review-blocked", "runner-blocked"}:
+        head = job["head_commit"]
+        assert len(head) == 40 and head != job["base_commit"]
+        assert record["commit"] == head and record["actor"] == cfg["actors"]["runner"]
+        block = "### Continue from\nCommit: " + head
+        assert body.endswith(block + "\nPaste this into the story and re-approve to continue from this work "
+                             "once #110 is in place; without it, re-approval starts fresh.")
+        assert service.git(cfg, "rev-parse", ref).stdout.strip() == head
+        assert service.git(cfg, "show", head + ":delivery.txt").stdout == "delivery\n"
+        if delivery in {"saved", "runner-blocked"}:
+            assert service.git(cfg, "show", "-s", "--format=%s", head).stdout.strip() == (
+                "runner: job " + job["id"] + " saved at stop")
+        # Drop all ordinary references and reflogs: only the continuation ref retains this work.
+        claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+        claim = core.read(claim_path)
+        service.git(cfg, "worktree", "remove", "--", claim["worktree"])
+        service.git(cfg, "branch", "-D", "--", claim["branch"])
+        service.git(cfg, "reflog", "expire", "--expire=now", "--all")
+        service.git(cfg, "gc", "--prune=now")
+        assert service.git(cfg, "cat-file", "-t", head).stdout.strip() == "commit"
+    else:
+        assert not job.get("runner_commits")
+        assert "### Continue from" not in body
+        assert service.git(cfg, "show-ref", "--verify", ref, check=False).returncode != 0
+        if delivery == "refused":
+            assert "couldn't be saved" in body
+            assert (Path(job["assignment"]["worktree"]) / "credentials.txt").exists()
+        else:
+            assert "couldn't be saved" not in body
+
+
+@pytest.mark.parametrize("close", ["merged", "owner", "other", "reopened"])
+def test_continuation_ref_cleanup_requires_merge_or_owner_close(tmp_path, monkeypatch, close):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    head = service.git(cfg, "rev-parse", "HEAD", worktree=claim["worktree"]).stdout.strip()
+    ref = "refs/agentic/continue/" + claim["job"]
+    service.git(cfg, "update-ref", ref, head)
+    issue = copy.deepcopy(h.issues[1])
+    issue.update(state="closed", labels=[{"name": "status:merged" if close == "merged" else "status:needs-owner"}])
+    events = [{"event": "closed", "actor": {"login": cfg["actors"]["owner" if close != "other" else "runner"]}}]
+    if close == "reopened":
+        events.append({"event": "reopened", "actor": {"login": cfg["actors"]["owner"]}})
+    service.cleanup(cfg, claim, issue, events)
+    exists = service.git(cfg, "show-ref", "--verify", ref, check=False).returncode == 0
+    assert exists == (close in {"other", "reopened"})
+    if close == "merged":
+        assert claim["cleaned"]
+    else:
+        assert Path(claim["worktree"]).exists()

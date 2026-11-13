@@ -318,6 +318,8 @@ def public_record(
     approved_by=None,
     owner_question=None,
     failed_tests=None,
+    continuation=False,
+    stop_save_failed=False,
 ):
     if (
         type(issue) is not int
@@ -416,6 +418,13 @@ def public_record(
                 raise ValueError("Invalid public test summary")
             record["failed_tests"] = failed_tests
         record["key"] = key([record["key"], owner_question, failed_tests])
+    if continuation or stop_save_failed:
+        if (target not in {"blocked", "needs-owner"}
+                or type(continuation) is not bool or type(stop_save_failed) is not bool
+                or continuation and commit is None):
+            raise ValueError("Invalid stop preservation details")
+        record.update(continuation=continuation, stop_save_failed=stop_save_failed)
+        record["key"] = key([record["key"], continuation, stop_save_failed])
     return record
 
 
@@ -518,12 +527,20 @@ def record_body(record):
             explanation += f"\nFailing tests: {failures['count']}. First failures: "
             explanation += ", ".join(failures["names"]) or "names unavailable"
             explanation += ". Owner: arrange a fix, then re-approve.\n"
+    tail = ""
+    if record.get("stop_save_failed"):
+        explanation += "\nThe builder's work couldn't be saved completely; owner: ask the operator to reconcile it.\n"
+    if record.get("continuation"):
+        tail = ("\n\n### Continue from\nCommit: " + record["commit"]
+                + "\nPaste this into the story and re-approve to continue from this work once #110 is in place; "
+                  "without it, re-approval starts fresh.")
     return (
         "Task lifecycle record (metadata only; no approval implied).\n"
         + explanation
         + PREFIX
         + json.dumps(record, sort_keys=True)
         + SUFFIX
+        + tail
     )
 
 
@@ -537,10 +554,10 @@ def records(cfg, comments, expected_issue=None):
     for comment in comments:
         actor = comment.get("user", {}).get("login")
         body = comment.get("body", "")
-        if actor not in trusted or body.count(PREFIX) != 1 or not body.endswith(SUFFIX):
+        if actor not in trusted or body.count(PREFIX) != 1 or body.count(SUFFIX) != 1:
             continue
         try:
-            item = json.loads(body.split(PREFIX)[1][: -len(SUFFIX)])
+            item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
             expected = public_record(
                 cfg,
                 item["issue"],
@@ -559,7 +576,11 @@ def records(cfg, comments, expected_issue=None):
                 approved_by=item["approved_by"],
                 owner_question=item.get("owner_question"),
                 failed_tests=item.get("failed_tests"),
+                continuation=item.get("continuation", False),
+                stop_save_failed=item.get("stop_save_failed", False),
             )
+            if body.split(SUFFIX, 1)[1] != record_body(expected).split(SUFFIX, 1)[1]:
+                continue
             if (
                 set(item) != set(expected) | {"from", "actor"}
                 or item["key"] != expected["key"]
@@ -1106,6 +1127,8 @@ def job_records(cfg, job):
             reason=reason,
             owner_question=question,
             failed_tests=failures,
+            continuation=job.get("continuation", False),
+            stop_save_failed=job.get("stop_save_failed", False),
         )
     ]
 

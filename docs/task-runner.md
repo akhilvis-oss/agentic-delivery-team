@@ -164,15 +164,25 @@ stand-up validate reasons against the runner's safe vocabulary, falling back to
 a generic safety-preflight reason for unknown or altered data. This change does
 not enable scheduled stand-up.
 
-If a blocked worker leaves uncommitted changes, preserve its assignment, private
-results and receipts. The owner inspects the changes and the failing prerequisite
-before authorizing any further round with a new job ID and explicit scope. Use a
-separately exported approved release as the tool. A new work job requires a clean
-worktree: the owner must explicitly decide whether to preserve reviewed changes
-on a separate branch/commit or discard them after retaining evidence. The runner
-does not adopt dirty changes, rewrite blocked results, reset jobs to queued or
-silently replay workers. Review-only recovery below applies when a preserved
-worker commit already exists; it cannot adopt an uncommitted worker diff.
+Lifecycle jobs stopping at `needs-owner` or `blocked` save builder edits through
+normal runner commit policy, with message `runner: job <job> saved at stop`.
+Policy refusal still stops the job and publishes a fixed warning without paths;
+refused files remain uncommitted for operator reconciliation. Preflight stops
+before builder execution never adopt pre-existing dirty work.
+
+A stopped job with runner-committed work pins its head locally at
+`refs/agentic/continue/<job>`. The lifecycle record's `commit` identifies that
+head, and its comment ends with a `### Continue from` heading, a
+`Commit: <40-character commit ID>` line, and paste/re-approval instructions.
+There is no continuation block when no builder work was committed. The ref is
+not pushed; it survives local garbage collection and is deleted after successful
+merge cleanup or a verified owner close of the issue. Owner-close cleanup only
+releases the ref; existing dirty/unmerged worktree safeguards still apply.
+
+Continuing from the pasted commit on re-approval requires #110. Until then,
+re-approval starts fresh. Preserve assignments, private results and receipts, and
+use a separately exported approved release as the tool. This does not reset jobs
+to queued, discard dirty work, or replay workers.
 
 A failed/uncertain comment does not change the local execution result or erase its receipt. Delivery is marked attempted **before** sending and is not retried automatically, preventing duplicate comments after a crash/ambiguous response. Inspect GitHub before any manual retry. The fake-client tests verify payload boundaries, default-off behavior and failures; this PR does not post a live receipt or install launchd.
 
