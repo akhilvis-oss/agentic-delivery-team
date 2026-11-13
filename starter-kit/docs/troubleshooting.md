@@ -135,6 +135,28 @@ Publication failures stop that poll; an ambiguous create is reconciled by its
 trusted marker instead of posting duplicates. If GitHub has no matching object,
 the operator must reconcile the publication before polling resumes.
 
+### The status comment reports recovered polls or a restart
+
+**Wait** for temporary GitHub failures. In `serve`, `Unavailable` and `Uncertain`
+are retried after `poll_seconds`, then twice that wait on consecutive failures,
+up to 600 seconds. Success resets the wait. The first successful poll and stand-up
+adds “Polls first failed: …; recovered: …; failed polls: N; exception class: ….”
+to the existing pinned status comment. The times are UTC. The line disappears
+after the next successful cycle; it confirms recovery rather than asking for
+re-approval. One-shot `run-once` and `enqueue-only` still exit on the first error.
+
+**Operator** for unexpected errors. Other exceptions exit non-zero after recording
+only their class and framework function privately. The next start's first
+successful cycle adds “Service restarted after … in ….” to the same comment and
+removes the private error record. The next successful cycle removes that line.
+Neither status line includes messages, request paths, URLs or tokens. If restarts
+repeat, investigate privately using the reported class and function; do not paste
+private responses or logs into an issue.
+
+Run `serve` under the supplied `lifecycle-serve.plist.example` launchd template
+with `KeepAlive`, as described in the [lifecycle guide](../../docs/v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
+It restarts the process after unexpected errors. The kit does not install it.
+
 ### An issue was labelled `status:draft` automatically
 Expected. Every issue carries one status label, and a new issue starts as a draft. It means "not yet approved for work".
 
