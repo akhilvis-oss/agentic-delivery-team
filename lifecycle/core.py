@@ -1425,10 +1425,14 @@ def guard_issue(cfg, client, number):
     except ValueError:
         actual = None
     if actual == canonical:
-        if canonical in {"blocked", "needs-owner", "needs-primary"} and not any(
+        # Runner stops already publish their job-bound reason (whose event is
+        # the approval ID). Only manual stops need this label-event notice.
+        if (canonical in {"blocked", "needs-owner", "needs-primary"}
+                and not has_role(cfg, event.get("actor", {}).get("login"), "runner")
+                and not any(
                 r["to"] == canonical and r.get("reason") in STOP_REASONS
                 and r["event"] == int(event["id"])
-                for r in records(cfg, client.comments(number), number)):
+                for r in records(cfg, client.comments(number), number))):
             record = public_record(cfg, number, "label-stop", 0, canonical,
                                    event=int(event["id"]), kind="guard",
                                    reason="owner_requested_stop")

@@ -387,10 +387,28 @@ def test_manual_stop_label_also_gets_reason_and_comment(tmp_path):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     hub.issue(state="needs-owner")
+    hub.event(1, "needs-owner")
     core.guard_issue(cfg, hub.client("workflow"), 1)
     core.guard_issue(cfg, hub.client("workflow"), 1)
     record, = core.records(cfg, hub.client().comments(1), 1)
     assert record["reason"] == "owner_requested_stop"
+
+
+@pytest.mark.parametrize("target", ["needs-owner", "needs-primary", "blocked"])
+def test_runner_stop_then_guard_preserves_runner_reason(tmp_path, target):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    record = core.public_record(cfg, 1, "issue-1-event-101", 1, target,
+                                reason="reviewer_reported_blocked", event=101)
+    core.queue(cfg, record)
+    core.flush(cfg, hub.client())
+    core.guard_issue(cfg, hub.client("workflow"), 1)
+    core.guard_issue(cfg, hub.client("workflow"), 1)
+    recs = core.records(cfg, hub.client().comments(1), 1)
+    assert not [r for r in recs if r["job"] == "label-stop"]
+    assert len(recs) == 1 and recs[0]["reason"] == "reviewer_reported_blocked"
+    assert "owner_requested_stop" not in hub.client().comments(1)[0]["body"]
 
 
 def test_rejection_history_recheck_outage_removes_label_and_recovers(tmp_path, monkeypatch):
@@ -435,6 +453,9 @@ def test_same_second_repeated_stop_is_deduplicated_by_event(tmp_path, target):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     hub.issue(state=target)
+    # The fixture's initial stop is Runner-set. Owner manually reasserts it;
+    # both notices tested here must describe actual manual label events.
+    hub.event(1, target)
     client = hub.client("workflow")
     first = hub.events_by_issue[1][-1]
     core.guard_issue(cfg, client, 1)
@@ -442,7 +463,8 @@ def test_same_second_repeated_stop_is_deduplicated_by_event(tmp_path, target):
     if target == "needs-primary":
         for status in ["dispatched", "in-progress", "committed", "in-review"]:
             hub.event(1, status, "runner")
-    second = hub.event(1, target, "runner")
+        hub.event(1, target, "runner")
+    second = hub.event(1, target)
     assert second["created_at"] == first["created_at"]
     core.guard_issue(cfg, client, 1)
     core.guard_issue(cfg, client, 1)
