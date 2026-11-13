@@ -1523,18 +1523,13 @@ def guard_issue(cfg, client, number):
         queue(cfg, record, role="workflow")
         flush(cfg, client)
         return True
-    # A run triggered by an earlier label removal can observe a later owner
-    # approval. Attest that current event, provided the live scope still has
-    # its event timestamp; never use the earlier webhook's story snapshot.
-    if (canonical == "approved" and event is not None and not proven
-            and statuses in ({"status:approved"}, {"status:approved", "status:draft"})
-            and issue.get("updated_at") == event.get("created_at")
-            and int(event["id"]) == max(
-                int(e["id"]) for e in events
-                if e.get("label", {}).get("name", "").startswith("status:"))):
-        attest_approval(cfg, client, dict(
-            action="labeled", label={"name": "status:approved"},
-            sender=event["actor"], issue=issue))
+    # Reconcile labels from current history, but only the authenticated owner
+    # approval webhook can bind the approved body. A live body can have changed
+    # within the event's timestamp second; never manufacture a snapshot here.
+    # Remove draft alone so the pending webhook still sees the same approval
+    # event, rather than emitting a replacement approved label event.
+    if canonical == "approved" and statuses == {"status:approved", "status:draft"}:
+        client.request("DELETE", f"/issues/{number}/labels/status%3Adraft")
         issue = client.issue(number)
     if canonical in {"blocked", "needs-owner", "needs-primary"}:
         client.notify(number)
