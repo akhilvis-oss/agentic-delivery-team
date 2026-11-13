@@ -400,7 +400,8 @@ def test_combined_lifecycle_review_cleanup_and_factual_digest(tmp_path, monkeypa
     monkeypatch.setattr(runner, "execute", execute)
     service.poll(policy_cfg, h.client(), clock=lambda: 100)
     job = service.jobs(policy_cfg)[0]
-    assert job["status"] == "ready_for_integration"
+    assert job["status"] == "needs_owner"
+    assert job["blocked_reason"]["reason_code"] == "delivery_disabled"
     cfg = configuration(tmp_path)
     before = copy.deepcopy(h.issues[1])
     result = standup.run_once(
@@ -413,7 +414,7 @@ def test_combined_lifecycle_review_cleanup_and_factual_digest(tmp_path, monkeypa
     assert result["status"] == "posted" and h.issues[1] == before
     body = posted(h)[0]["body"]
     assert (
-        "Ready to demo" in body
+        "Needs your decision" in body
         and "Runner commit" in body
         and "Summary unavailable" in body
     )

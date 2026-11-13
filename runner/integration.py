@@ -20,6 +20,7 @@ TIERS = ["light", "standard", "domain-critical", "control-critical"]
 RELEASE_PATHS = ["changelog*", "*/changelog*", "releases/*", "*/releases/*",
                  "*release-notes*", "*release_notes*"]
 REASONS = {
+    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
     "publication_failed": "Publishing the reviewed commit or pull request failed; reconcile before retrying.",
     "publication_uncertain": "A publication write may have completed; inspect GitHub before retrying.",
     "stale_head": "The pull request or local head changed; a fresh review is required.",
@@ -316,7 +317,16 @@ def merge_evidence(core, cfg, client, pr, opts, job):
 
 def advance(runner, config, path, job, client=None):
     opts = options(config)
-    if not opts or job["status"] != "ready_for_integration":
+    if job["status"] != "ready_for_integration":
+        return
+    if not opts:
+        if (config.get("lifecycle_config") and job["assignment"].get("lifecycle")
+                and not config.get("pool_slot") and not config.get("phase_context")):
+            reason = "delivery_disabled"
+            job.update(status="needs_owner", updated_at=runner.now(), blocked_reason={
+                "reason_code": reason, "reason": REASONS[reason]})
+            runner.save_at_stop(config, path, job, job["head_commit"])
+            runner.save_job(config, path, job)
         return
     runner.integration_api()  # Register fixed public reasons before persistence.
     delivery = job.setdefault("integration", {"stage": "new"})
