@@ -744,12 +744,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
         runner = runner_module()
         for path in sorted(claims_dir.glob("*.json")):
             claim = core.read(path)
+            if claim["stage"] == "finished" and claim.get("cleaned"):
+                continue
             issue = by_number.get(claim["issue"])
             if not issue:
                 continue
-            issue = client.issue(claim["issue"])
-            evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
-            finished = core.finished_issue(issue, evidence)
+            # The current all-issues listing already proves closed/final stories
+            # cannot execute. Keep fresh evidence checks for claims that can.
+            finished = core.finished_issue(issue)
+            if not finished:
+                issue = client.issue(claim["issue"])
+                evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+                finished = core.finished_issue(issue, evidence)
             if finished:
                 claim["stage"] = "finished"
                 completed_path = (root / "jobs" / claim["job"] / "runner-state"

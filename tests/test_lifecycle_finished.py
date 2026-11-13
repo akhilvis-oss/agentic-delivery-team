@@ -10,6 +10,98 @@ from test_lifecycle import Hub, policy
 from test_lifecycle_retry import StopLoop, simulation
 
 
+@pytest.mark.parametrize("state", ["closed", "merged", "accepted", "in-review"])
+def test_many_finished_cleaned_claims_make_no_per_claim_requests(tmp_path, monkeypatch, state):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    for number in range(1, 41):
+        issue = hub.issue(number, state="in-review" if state == "closed" else state)
+        if state == "closed":
+            issue["state"] = "closed"
+        core.save(Path(cfg["state_dir"]) / "claims" / f"old-{number}.json",
+                  dict(job=f"old-{number}", issue=number, stage="finished", cleaned=True,
+                       config="obsolete"))
+    client = hub.client()
+    requests = []
+    for name in ("issue", "comments"):
+        original = getattr(client, name)
+
+        def counted(number, method=name, read=original):
+            requests.append((method, number))
+            return read(number)
+
+        monkeypatch.setattr(client, name, counted)
+    monkeypatch.setattr(service, "publish_poll", lambda *a: None)
+    monkeypatch.setattr(service, "runner_module", lambda: SimpleNamespace())
+    for at in (100, 200):
+        service.poll(cfg, client, clock=lambda: at)
+    assert requests == []
+    assert not hub.calls
+
+
+@pytest.mark.parametrize("state", ["closed", "merged", "accepted"])
+def test_listed_finished_claim_uses_listing_and_retains_cleanup(tmp_path, monkeypatch, state):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    issue = hub.issue(state="merged" if state == "closed" else state)
+    if core.state(issue) == "merged":
+        hub.events_by_issue[1].pop()
+        hub.event(1, "pr-open", "workflow")
+        hub.event(1, "merged", "workflow")
+    if state == "closed":
+        issue["state"] = "closed"
+    path = Path(cfg["state_dir"]) / "claims" / "old.json"
+    core.save(path, dict(job="old", issue=1, stage="finished", config="obsolete",
+                         cleanup_pending="branch_not_verified_merged"))
+    client = hub.client()
+    monkeypatch.setattr(client, "issue", lambda _: pytest.fail("redundant issue request"))
+    monkeypatch.setattr(client, "comments", lambda _: pytest.fail("redundant comments request"))
+    monkeypatch.setattr(service, "publish_poll", lambda *a: None)
+    monkeypatch.setattr(service, "runner_module", lambda: SimpleNamespace())
+    cleanups = []
+    monkeypatch.setattr(service, "cleanup", lambda *a, **kw: cleanups.append((a, kw)))
+    service.poll(cfg, client, clock=lambda: 100)
+    assert len(cleanups) == 1
+    assert cleanups[0][0][2] == issue
+    assert cleanups[0][0][3] == hub.events_by_issue[1]
+    assert not hub.calls
+
+
+@pytest.mark.parametrize("state", ["closed", "merged", "accepted"])
+def test_active_claim_checks_fresh_finished_state_before_recovery(tmp_path, monkeypatch, state):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    path = Path(cfg["state_dir"]) / "claims" / "old.json"
+    core.save(path, dict(job="old", issue=1, stage="enqueued", config="obsolete"))
+    client = hub.client()
+    read_issue, read_comments = client.issue, client.comments
+    requests = []
+
+    def fresh_issue(number):
+        requests.append("issue")
+        issue = read_issue(number)
+        if state == "closed":
+            issue["state"] = "closed"
+        else:
+            issue["labels"] = [{"name": "status:" + state}]
+        return issue
+
+    def comments(number):
+        requests.append("comments")
+        return read_comments(number)
+
+    monkeypatch.setattr(client, "issue", fresh_issue)
+    monkeypatch.setattr(client, "comments", comments)
+    monkeypatch.setattr(service, "runner_module", lambda: SimpleNamespace())
+    monkeypatch.setattr(service, "cleanup", lambda *a, **kw: None)
+    monkeypatch.setattr(service, "publish_poll", lambda *a: None)
+    service.poll(cfg, client, clock=lambda: 100)
+    assert requests == ["issue", "comments"]
+    assert core.read(path)["stage"] == "finished"
+    assert not hub.calls
+
+
 def rejected(cfg, issue=1, job="bad", role="runner"):
     return core.queue(cfg, core.public_record(cfg, issue, job, 0, "merged"), role=role)
 
