@@ -308,3 +308,11 @@ stories on its next poll and uses the existing guarded cleanup path. Local
 Rejected queued transitions comment on the issue and fail the workflow instead
 of silently discarding the transition. Merge records grant neither approval nor
 acceptance.
+
+New owner-merge stop records include the PR number for direct lookup. Lookup results,
+including completed closed-PR scans for older records without a PR number, are cached
+in private state by issue, update time and stop record. Unchanged unverified issues
+are not queried for PRs again;
+issue updates or a new stop allow a fresh scan. Read failures remain retryable,
+and a verified candidate is retained before writes for recovery without rescanning.
+Cached candidates still require fresh merge-authority verification before writes.

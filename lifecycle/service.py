@@ -302,18 +302,31 @@ def backfill_owner_merge(cfg, client, issue):
              and r.get("reason")]
     if not stops or stops[-1]["reason"] != "owner_merge_required":
         return issue
-    candidates = ([client.request("GET", f"/pulls/{stops[-1]['pr']}")]
-                  if stops[-1]["pr"] else client.pages("/pulls?state=closed"))
+    stop = stops[-1]
+    cache_path = Path(cfg["state_dir"]) / "owner-merge-backfill" / f"{issue['number']}.json"
+    generation = {"updated_at": issue["updated_at"], "stop_key": stop["key"]}
+    cached = core.read(cache_path) if cache_path.exists() else {}
+    current = all(cached.get(k) == v for k, v in generation.items())
+    if current and cached.get("outcome") == "not_verifiable":
+        return issue
+    number = stop["pr"] or (cached.get("pr") if current else None)
+    candidates = ([{"number": number}] if number else client.pages("/pulls?state=closed"))
     for candidate in candidates:
         # Fetch the authoritative merged flag and head, rather than list metadata.
         pr = client.request("GET", f"/pulls/{candidate['number']}")
         if not core.owner_merge_verified(cfg, issue["number"], evidence, pr):
             continue
+        # Retain the verified candidate before writes so interrupted or
+        # uncertain publication retries never repeat the collection scan.
+        core.save(cache_path, {**generation, "outcome": "verified", "pr": pr["number"]})
         record = core.public_record(cfg, issue["number"], f"pr-{pr['number']}", 0, "merged",
                                     commit=pr["merge_commit_sha"], pr=pr["number"])
         core.queue(cfg, record, role="runner")
         core.flush(cfg, client)
         return client.issue(issue["number"])
+    # Only completed reads can establish a negative result. Transport
+    # failures propagate and remain retryable instead of poisoning cache.
+    core.save(cache_path, {**generation, "outcome": "not_verifiable"})
     return issue
 
 

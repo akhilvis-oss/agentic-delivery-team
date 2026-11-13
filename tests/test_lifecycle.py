@@ -1850,6 +1850,163 @@ def test_owner_merge_respects_latest_stop_reason(tmp_path, reason, expected):
         assert "remains at needs-owner" in hub.comments_by_issue[1][-1]["body"]
 
 
+def test_owner_merge_stop_records_published_pr(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    job = dict(id="published-job", round=1, status="needs_owner", head_commit="a" * 40,
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"stage": "owner", "reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    record, = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert record["reason"] == "owner_merge_required" and record["pr"] == 7
+
+
+@pytest.mark.parametrize("unverifiable", ["unmerged", "unreviewed"])
+def test_legacy_owner_merge_scan_cached_until_issue_changes(tmp_path, monkeypatch, unverifiable):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = "finished"
+    core.save(claim_path, claim)
+    pr = owner_merge_fixture(cfg, hub)
+    if unverifiable == "unmerged":
+        pr["merged"] = False
+    else:
+        pr["head"]["sha"] = "c" * 40
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    pages = client.pages
+    scans = []
+
+    def listed(path):
+        if path.startswith("/pulls"):
+            scans.append(path)
+        return pages(path)
+
+    monkeypatch.setattr(client, "pages", listed)
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 200)
+    first = [c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")]
+    assert len(scans) == len(first) == 1
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 300)
+    assert [c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")] == first
+    assert len(scans) == 1 and core.state(hub.issues[1]) == "needs-owner"
+    hub.issues[1]["updated_at"] = "2026-01-02T10:00:01+00:00"
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 400)
+    assert len(scans) == 2
+    assert len([c for c in hub.calls if c[0] == "GET" and c[1].startswith("/pulls/")]) == 2
+
+
+def test_legacy_owner_merge_read_failure_does_not_cache_negative(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    owner_merge_fixture(cfg, hub)["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    request = client.request
+
+    def unavailable(method, path, data=None):
+        if method == "GET" and path.startswith("/pulls/"):
+            raise core.Unavailable("synthetic read outage")
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", unavailable)
+    with pytest.raises(core.Unavailable):
+        service.backfill_owner_merge(cfg, client, hub.issues[1])
+    cache = Path(cfg["state_dir"]) / "owner-merge-backfill" / "1.json"
+    assert not cache.exists()
+    monkeypatch.setattr(client, "request", request)
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert core.read(cache)["outcome"] == "not_verifiable"
+
+
+def test_legacy_owner_merge_write_recovery_reuses_cached_candidate(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    owner_merge_fixture(cfg, hub)
+    hub.issues[1]["state"] = "closed"
+    client = hub.client()
+    pages, flush = client.pages, core.flush
+    scans = []
+
+    def listed(path):
+        if path.startswith("/pulls"):
+            scans.append(path)
+        return pages(path)
+
+    def unavailable(*args):
+        raise core.Unavailable("synthetic write outage")
+
+    monkeypatch.setattr(client, "pages", listed)
+    monkeypatch.setattr(core, "flush", unavailable)
+    with pytest.raises(core.Unavailable):
+        service.backfill_owner_merge(cfg, client, hub.issues[1])
+    cache = core.read(Path(cfg["state_dir"]) / "owner-merge-backfill" / "1.json")
+    assert cache["outcome"] == "verified" and cache["pr"] == 7
+    monkeypatch.setattr(core, "flush", flush)
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert len(scans) == 1 and core.state(hub.issues[1]) == "merged"
+    assert len([r for r in core.records(cfg, hub.comments_by_issue[1], 1)
+                if r["to"] == "merged"]) == 1
+
+
+def test_new_same_second_stop_invalidates_legacy_backfill_cache(tmp_path):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    pr["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    pr["merged"] = True
+    job = dict(id="new-stop", round=2, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"reason": "owner_merge_required"})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    assert hub.issues[1]["updated_at"] == WHEN
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    assert core.state(hub.issues[1]) == "merged"
+
+
+def test_owner_merge_with_known_pr_never_scans_collection(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    hub.issues[1]["state"] = "closed"
+    job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               review={"status": "ready_for_integration", "findings": []},
+               integration={"reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    client = hub.client()
+    monkeypatch.setattr(client, "pages", lambda _: pytest.fail("must not scan closed PRs"))
+    service.backfill_owner_merge(cfg, client, hub.issues[1])
+    assert core.state(hub.issues[1]) == "merged"
+
+
+def test_unmerged_known_pr_backfill_is_not_polled_repeatedly(tmp_path):
+    cfg = policy(tmp_path)
+    core.bind_state(cfg)
+    hub = Hub(cfg)
+    pr = owner_merge_fixture(cfg, hub)
+    pr["merged"] = False
+    hub.issues[1]["state"] = "closed"
+    job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               integration={"reason": "owner_merge_required", "pr": 7})
+    core.sync_job(cfg["config_path"], job, hub.client())
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    calls = list(hub.calls)
+    service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
+    assert hub.calls == calls
+
+
 def test_rejected_transition_fails_and_comments_once(tmp_path):
     cfg = policy(tmp_path)
     hub = Hub(cfg)

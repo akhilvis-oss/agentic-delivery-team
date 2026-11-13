@@ -1193,6 +1193,7 @@ def job_records(cfg, job):
             outcome=outcome,
             severities=counts if outcome else {},
             reason=reason,
+            pr=integration.get("pr") if reason == "owner_merge_required" else None,
             owner_question=question,
             failed_tests=failures,
             continuation=job.get("continuation", False),
