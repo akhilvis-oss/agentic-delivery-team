@@ -240,8 +240,15 @@ def cleanup(cfg, claim, issue, events=()):
     closing = [e for e in events if e.get("event") in {"closed", "reopened"}]
     owner_closed = bool(closing and closing[-1].get("event") == "closed"
                         and closing[-1].get("actor", {}).get("login") == cfg["actors"]["owner"])
+
+    def remove_continuation():
+        ref = "refs/agentic/continue/" + claim["job"]
+        if git(cfg, "show-ref", "--verify", ref, check=False).returncode == 0:
+            git(cfg, "update-ref", "--no-deref", "-d", ref)
+            claim["removed_continuations"] = claim.get("removed_continuations", 0) + 1
+
     if owner_closed:
-        git(cfg, "update-ref", "--no-deref", "-d", "refs/agentic/continue/" + claim["job"])
+        remove_continuation()
     if core.state(issue) != "merged":
         claim["cleanup_pending"] = "closed_without_merge_requires_owner"
         return
@@ -271,14 +278,43 @@ def cleanup(cfg, claim, issue, events=()):
             claim["cleanup_pending"] = "dirty_worktree_requires_owner"
             return
         git(cfg, "worktree", "remove", "--", str(path))
+        claim["removed_worktrees"] = claim.get("removed_worktrees", 0) + 1
     # Never force-delete unmerged history. Operator refreshes the local base first.
     deleted = git(cfg, "branch", "-d", "--", claim["branch"], check=False)
     if deleted.returncode:
         claim["cleanup_pending"] = "branch_not_in_local_base"
     else:
-        git(cfg, "update-ref", "--no-deref", "-d", "refs/agentic/continue/" + claim["job"])
+        remove_continuation()
         claim.update(cleaned=True)
         claim.pop("cleanup_pending", None)
+
+
+def backfill_owner_merge(cfg, client, issue):
+    if issue["state"] != "closed":
+        return issue
+    try:
+        if core.state(issue) != "needs-owner":
+            return issue
+    except ValueError:
+        return issue
+    evidence = core.records(cfg, client.comments(issue["number"]), issue["number"])
+    stops = [r for r in evidence if r["to"] in {"blocked", "needs-owner", "needs-primary"}
+             and r.get("reason")]
+    if not stops or stops[-1]["reason"] != "owner_merge_required":
+        return issue
+    candidates = ([client.request("GET", f"/pulls/{stops[-1]['pr']}")]
+                  if stops[-1]["pr"] else client.pages("/pulls?state=closed"))
+    for candidate in candidates:
+        # Fetch the authoritative merged flag and head, rather than list metadata.
+        pr = client.request("GET", f"/pulls/{candidate['number']}")
+        if not core.owner_merge_verified(cfg, issue["number"], evidence, pr):
+            continue
+        record = core.public_record(cfg, issue["number"], f"pr-{pr['number']}", 0, "merged",
+                                    commit=pr["merge_commit_sha"], pr=pr["number"])
+        core.queue(cfg, record, role="runner")
+        core.flush(cfg, client)
+        return client.issue(issue["number"])
+    return issue
 
 
 def publish_poll(cfg, client, issues, at):
@@ -414,6 +450,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             for i in all_issues
             if "pull_request" not in i and not core.is_report(cfg, i)
         ]
+        issues = [backfill_owner_merge(cfg, client, i) for i in issues]
         by_number = {i["number"]: i for i in issues}
         for issue in issues:
             try:
@@ -774,6 +811,10 @@ def status(cfg, *, clock=time.time):
     )
     claims = [core.read(p) for p in sorted((root / "claims").glob("*.json"))]
     local_jobs = jobs(cfg)
+    lines.append(
+        f"Cleanup: {sum(c.get('removed_worktrees', 0) for c in claims)} worktrees removed; "
+        f"{sum(c.get('removed_continuations', 0) for c in claims)} continuation references removed"
+    )
     lines.append("Active claims:")
     active = [
         f"  Issue #{c['issue']}: {c['job']} ({c['stage']})"

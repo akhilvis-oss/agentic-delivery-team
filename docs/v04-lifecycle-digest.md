@@ -298,3 +298,13 @@ rm "$HOME/Library/LaunchAgents/org.example.agentic-lifecycle.plist"
 Retain private state and logs for reconciliation. On other platforms, owners can
 schedule the same `serve` and separate `watchdog` commands with their own service
 manager; non-macOS templates and installation automation are outside this story.
+
+After an owner merges a reviewed PR, a story stopped at `needs-owner` for
+`owner_merge_required` becomes `merged`. Both the workflow and the service verify
+the linked PR is merged and its head matches a trusted successful task review;
+other stop reasons remain for owner reconciliation. The service backfills closed
+stories on its next poll and uses the existing guarded cleanup path. Local
+`status` reports removed worktrees and continuation references as counts only.
+Rejected queued transitions comment on the issue and fail the workflow instead
+of silently discarding the transition. Merge records grant neither approval nor
+acceptance.
