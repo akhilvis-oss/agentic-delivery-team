@@ -69,6 +69,32 @@ the configured owner. The next build reads the complete story, including
 | `approved_scope_changed` | The issue changed after approval. Review the revised story, then re-approve. |
 | `approval_not_attested`, `invalid_status_change`, `owner_requested_stop` | Approval was rejected, the guard restored a stopped status, or a permitted actor stopped the task. Read the preceding comment, resolve it and re-approve. |
 
+### Continue saved work or restart fresh
+
+**Owner.** After resolving a stop, paste the runner's block into the story exactly:
+
+```text
+### Continue from
+Commit: <the full 40-character lowercase commit ID from the stop comment>
+```
+
+Replace the placeholder with the saved commit, then re-approve the complete story.
+Only runner-recorded saved work from `needs-owner` or `blocked` can continue;
+integrity failures cannot. The service fetches the target branch and merges it
+into the saved work before starting the builder. Review covers the full change
+from that fetched target. The acceptance criteria take priority over pasted
+findings. Each continuation permits a build and review plus one correction and
+fresh review. A story permits at most two continuations, counted from its claims.
+
+To restart fresh, remove the entire **Continue from** section and re-approve.
+Malformed blocks are ignored and start fresh. `continuation_commit_unrecorded`
+means the commit could not be verified as eligible saved work on this issue.
+`continuation_conflict` lists repository-relative conflicting files and stops
+before any builder runs; arrange resolution or restart fresh.
+`continuation_limit` means restart fresh or split the story.
+`continuation_not_applied` means the saved commit is missing from the built head;
+ask the operator to reconcile history before re-approving.
+
 ### Approval could not be attested
 
 The guard could not uniquely connect the label to an owner event and story

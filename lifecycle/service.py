@@ -108,6 +108,44 @@ def ensure_worktree(cfg, claim):
         raise core.Unavailable("Managed branch changed")
 
 
+def continuation_commit(body):
+    matches = re.findall(r"^### Continue from\nCommit: ([0-9a-f]{40})$", body, re.MULTILINE)
+    return matches[0] if len(matches) == 1 else None
+
+
+def stop_continuation(cfg, client, path, claim, reason, files=None):
+    record = core.public_record(
+        cfg, claim["issue"], claim["job"], 0, "blocked",
+        event=claim["event"], reason=reason, conflict_files=files,
+    )
+    core.queue(cfg, record)
+    core.flush(cfg, client)
+    claim.update(stage="finished", error=reason)
+    core.save(path, claim)
+
+
+def prepare_continuation(cfg, claim):
+    """Idempotent across a crash after the merge but before saving the claim."""
+    ensure_worktree(cfg, claim)
+    target = claim["review_base"]
+    tree = claim["worktree"]
+    if git(cfg, "merge-base", "--is-ancestor", target, "HEAD", check=False,
+           worktree=tree).returncode == 0:
+        return []
+    identity = runner_module().commit_identity(core.read(cfg["runner_config"]))
+    merged = git(cfg, "-c", "user.name=" + identity["name"],
+                 "-c", "user.email=" + identity["email"],
+                 "merge", "--no-ff", "--no-edit", target, check=False, worktree=tree)
+    if merged.returncode:
+        files = git(cfg, "diff", "--name-only", "--diff-filter=U", "-z",
+                    worktree=tree).stdout.split("\0")
+        files = sorted(f for f in files if f)
+        if not files:
+            raise core.Unavailable("Continuation merge failed without conflicts")
+        return files
+    return []
+
+
 def fetch_target(cfg):
     """Fetch with an App-only credential in an isolated repository, never origin.
 
@@ -402,6 +440,31 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     ),
                     primary_context=source_job.get("review_history", []),
                 )
+            named = None if primary else continuation_commit(claim["task"])
+            if named:
+                history = core.records(cfg, client.comments(issue["number"]), issue["number"])
+                local_jobs = {j["id"]: j for j in jobs(cfg)}
+                saved = next((r for r in reversed(history)
+                              if r["commit"] == named and r.get("continuation", False)
+                              and r["to"] in {"needs-owner", "blocked"}
+                              and core.has_role(cfg, r["actor"], "runner")
+                              and local_jobs.get(r["job"], {}).get("status") in {"needs_owner", "blocked"}
+                              and local_jobs[r["job"]].get("blocked_reason", {}).get("reason_code")
+                              != "continuation_not_applied"
+                              and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
+                                          for refusal in local_jobs[r["job"]].get("commit_refusals", []))
+                              and local_jobs[r["job"]].get("head_commit") == named), None)
+                count = sum(1 for p in claims_dir.glob("*.json")
+                            if (c := core.read(p))["issue"] == issue["number"]
+                            and c.get("continued_from"))
+                if saved:
+                    claim.update(start_commit=named, continued_from=named,
+                                 continuation_number=count + 1,
+                                 previous_stop_reason=saved["reason"])
+                else:
+                    claim["continuation_error"] = "continuation_commit_unrecorded"
+                if count >= 2:
+                    claim["continuation_error"] = "continuation_limit"
             core.create(path, claim)
         processed = []
         runner = runner_module()
@@ -467,6 +530,23 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 core.save(path, claim)
                 continue
             if claim["stage"] == "claimed":
+                if claim.get("continuation_error"):
+                    stop_continuation(cfg, client, path, claim, claim["continuation_error"])
+                    continue
+                if claim.get("continued_from"):
+                    if "review_base" not in claim:
+                        try:
+                            claim["review_base"] = fetch_target(cfg)
+                        except core.Unavailable:
+                            claim["error"] = "target_branch_fetch_failed"
+                            core.save(path, claim)
+                            continue
+                        claim.pop("error", None)
+                        core.save(path, claim)
+                    files = prepare_continuation(cfg, claim)
+                    if files:
+                        stop_continuation(cfg, client, path, claim, "continuation_conflict", files)
+                        continue
                 if "start_commit" not in claim:
                     try:
                         claim["start_commit"] = fetch_target(cfg)
@@ -564,6 +644,10 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                         lifecycle=binding,
                         review_base=claim.get("review_base"),
                         primary_context=claim.get("primary_context"),
+                        continuation=({"commit": claim["continued_from"],
+                                       "number": claim["continuation_number"],
+                                       "reason": claim["previous_stop_reason"]}
+                                      if claim.get("continued_from") else None),
                     )
                 else:
                     existing = runner.read(job_path)

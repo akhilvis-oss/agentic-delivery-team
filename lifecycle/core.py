@@ -320,6 +320,7 @@ def public_record(
     failed_tests=None,
     continuation=False,
     stop_save_failed=False,
+    conflict_files=None,
 ):
     if (
         type(issue) is not int
@@ -425,11 +426,26 @@ def public_record(
             raise ValueError("Invalid stop preservation details")
         record.update(continuation=continuation, stop_save_failed=stop_save_failed)
         record["key"] = key([record["key"], continuation, stop_save_failed])
+    if conflict_files is not None:
+        if (reason != "continuation_conflict" or not isinstance(conflict_files, list)
+                or not conflict_files or any(
+                    not isinstance(f, str) or not f or f.startswith("/")
+                    or "\\" in f or ":" in f
+                    or any(p in {"", ".", ".."} for p in f.split("/"))
+                    or any(ord(c) < 32 or ord(c) == 127 for c in f)
+                    for f in conflict_files)):
+            raise ValueError("Invalid conflict file names")
+        record["conflict_files"] = conflict_files
+        record["key"] = key([record["key"], conflict_files])
     return record
 
 
 # Fixed public prose only. Never render worker summaries, errors, logs or argv.
 STOP_REASONS = {
+    "continuation_commit_unrecorded": "The named commit is not verified saved work from a permitted stop on this issue. Owner: use the commit from a valid continuation comment, or remove the section and re-approve to restart fresh.",
+    "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or remove the section to restart fresh.",
+    "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (remove the Continue from section and re-approve), or split the story.",
+    "continuation_not_applied": "The continued commit is missing from the built head. Owner: reconcile the history before re-approving.",
     "owner_question": 'The builder needs your decision. Owner: add the answer to the story under "Owner decisions", then re-approve.',
     "question_withheld": 'The builder asked a question containing potentially private content, so it could not be published. Owner: write "Please ask a public-safe question" under "Owner decisions", then re-approve.',
     "scope_change": "A scope decision needs you. Owner: record the scope under Owner decisions, then re-approve.",
@@ -528,6 +544,10 @@ def record_body(record):
             explanation += ", ".join(failures["names"]) or "names unavailable"
             explanation += ". Owner: arrange a fix, then re-approve.\n"
     tail = ""
+    if record.get("conflict_files"):
+        explanation += "\nConflicting files (repository-relative):\n" + "\n".join(
+            "- " + json.dumps(f, ensure_ascii=True) for f in record["conflict_files"]
+        ) + "\n"
     if record.get("stop_save_failed"):
         explanation += "\nThe builder's work couldn't be saved completely; owner: ask the operator to reconcile it.\n"
     if record.get("continuation"):
@@ -578,6 +598,7 @@ def records(cfg, comments, expected_issue=None):
                 failed_tests=item.get("failed_tests"),
                 continuation=item.get("continuation", False),
                 stop_save_failed=item.get("stop_save_failed", False),
+                conflict_files=item.get("conflict_files"),
             )
             if body.split(SUFFIX, 1)[1] != record_body(expected).split(SUFFIX, 1)[1]:
                 continue

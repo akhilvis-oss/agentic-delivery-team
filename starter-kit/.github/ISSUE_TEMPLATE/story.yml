@@ -74,6 +74,12 @@ body:
       label: Owner decisions
       description: Optional. Answer the builder's quoted questions here, then re-approve the story. The next build reads this section.
   - type: textarea
+    id: continue_from
+    attributes:
+      label: Continue from
+      description: Optional. To continue saved work, paste the exact Commit line from the runner's stop comment here. Leave empty to restart fresh. At most two continuations, each with one correction round.
+      placeholder: "Commit: <40-character lowercase commit ID>"
+  - type: textarea
     id: dependencies
     attributes:
       label: Dependencies
