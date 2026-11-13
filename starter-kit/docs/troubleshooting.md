@@ -79,6 +79,10 @@ Commit: <the full 40-character lowercase commit ID from the stop comment>
 ```
 
 Replace the placeholder with the saved commit, then re-approve the complete story.
+In the story form's **Saved work (optional)** field, paste both lines, including
+the heading. When editing an existing issue body, insert the same complete block.
+Keep the two lines adjacent: GitHub inserts a blank line after form labels, so
+relying on a form label as the heading and pasting only the Commit line starts fresh.
 Only runner-recorded saved work from `needs-owner` or `blocked` can continue;
 integrity failures cannot. The service fetches the target branch and merges it
 into the saved work before starting the builder. Review covers the full change

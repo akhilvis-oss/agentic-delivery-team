@@ -76,9 +76,11 @@ body:
   - type: textarea
     id: continue_from
     attributes:
-      label: Continue from
-      description: Optional. To continue saved work, paste the exact Commit line from the runner's stop comment here. Leave empty to restart fresh. At most two continuations, each with one correction round.
-      placeholder: "Commit: <40-character lowercase commit ID>"
+      label: Saved work (optional)
+      description: Optional. Paste the complete two-line block from the runner's stop comment here, including the heading. Keep the heading and Commit line adjacent, with no blank line between them. GitHub adds a blank line after form labels, so the Commit line alone will start fresh. Leave empty to restart fresh. At most two continuations, each with one correction round.
+      placeholder: |
+        ### Continue from
+        Commit: <40-character lowercase commit ID>
   - type: textarea
     id: dependencies
     attributes:
