@@ -14,6 +14,7 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 
 from lifecycle import app_tokens, core
 
@@ -419,11 +420,30 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
         if ancestor.returncode and head != verified_merge_head(cfg, client, issue):
             claim["cleanup_pending"] = "branch_not_verified_merged"
             return
-        # Compare-and-delete the verified head. A concurrent branch advance is
-        # retained, including after squash merges where branch -d cannot work.
-        deleted = git(cfg, "update-ref", "--no-deref", "-d", ref, head, check=False)
+        # Recheck after network/evidence collection, then let branch -d guard
+        # checked-out branches at deletion too. update-ref alone bypasses that
+        # guard. A detached worktree pins the merge check to the verified head
+        # (including squash merges), retaining an unverified concurrent advance.
+        if "branch " + ref + "\n" in git(cfg, "worktree", "list", "--porcelain").stdout:
+            claim["cleanup_pending"] = "branch_in_use_requires_owner"
+            return
+        with tempfile.TemporaryDirectory(prefix="cleanup-", dir=cfg["state_dir"]) as scratch:
+            git(cfg, "worktree", "add", "--detach", "--", scratch, head)
+            try:
+                # An undefined remote prevents stale/multi-valued upstream
+                # settings from replacing the detached HEAD merge check.
+                deleted = git(
+                    cfg, "-c", "branch." + claim["branch"] + ".remote=cleanup-" + uuid.uuid4().hex,
+                    "branch", "-d", "--", claim["branch"], check=False,
+                    worktree=scratch,
+                )
+            finally:
+                git(cfg, "worktree", "remove", "--", scratch)
         if deleted.returncode:
-            claim["cleanup_pending"] = "history_changed_requires_owner"
+            in_use = "branch " + ref + "\n" in git(cfg, "worktree", "list", "--porcelain").stdout
+            claim["cleanup_pending"] = (
+                "branch_in_use_requires_owner" if in_use else "history_changed_requires_owner"
+            )
             return
     remove_continuation()
     claim.update(cleaned=True)

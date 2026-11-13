@@ -357,6 +357,10 @@ def test_cleanup_uses_fresh_target_or_verified_reviewed_merge_head(tmp_path, mon
     claim.update(stage="finished", head=head, cleanup_pending="branch_not_in_local_base")
     # Simulate the old cleanup having removed the worktree but retained its branch.
     command(cfg["repository_root"], "worktree", "remove", str(worktree))
+    # Existing multi-valued upstream configuration must not override the
+    # invocation's verified merge reference, even with a stale local base.
+    command(cfg["repository_root"], "config", "branch." + claim["branch"] + ".remote", ".")
+    command(cfg["repository_root"], "config", "branch." + claim["branch"] + ".merge", "refs/heads/main")
     core.save(claim_path, claim)
     command(remote, "fetch", cfg["repository_root"], claim["branch"])
     if mode == "merge":
@@ -401,7 +405,9 @@ def test_cleanup_uses_fresh_target_or_verified_reviewed_merge_head(tmp_path, mon
     assert len(network) == 2  # Admission fetch plus the next poll's cleanup fetch.
 
 
-@pytest.mark.parametrize("failure", ["fetch", "concurrent_advance", "in_use"])
+@pytest.mark.parametrize("failure", [
+    "fetch", "concurrent_advance", "in_use", "attach_during_fetch", "attach_at_deletion",
+])
 def test_cleanup_retains_branch_when_fetch_or_ownership_changes(tmp_path, monkeypatch, failure):
     cfg, hub, runner = configured_service(tmp_path, monkeypatch)
     service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
@@ -415,11 +421,22 @@ def test_cleanup_retains_branch_when_fetch_or_ownership_changes(tmp_path, monkey
         monkeypatch.setattr(service, "fetch_target", unavailable)
     elif failure == "concurrent_advance":
         def advance(c, *args, **kwargs):
-            if args[:3] == ("update-ref", "--no-deref", "-d") and args[3].startswith("refs/heads/"):
+            if args[-4:] == ("branch", "-d", "--", claim["branch"]):
                 newer = command(c["repository_root"], "commit-tree", head + "^{tree}", "-p", head, "-m", "advance")
-                original(c, "update-ref", args[3], newer)
+                original(c, "update-ref", "refs/heads/" + claim["branch"], newer)
             return original(c, *args, **kwargs)
         monkeypatch.setattr(service, "git", advance)
+    elif failure == "attach_during_fetch":
+        def fetch_and_attach(c):
+            command(c["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
+            return head
+        monkeypatch.setattr(service, "fetch_target", fetch_and_attach)
+    elif failure == "attach_at_deletion":
+        def attach(c, *args, **kwargs):
+            if args[-4:] == ("branch", "-d", "--", claim["branch"]):
+                command(c["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
+            return original(c, *args, **kwargs)
+        monkeypatch.setattr(service, "git", attach)
     else:
         command(cfg["repository_root"], "worktree", "remove", claim["worktree"])
         command(cfg["repository_root"], "worktree", "add", str(tmp_path / "other"), claim["branch"])
@@ -427,5 +444,12 @@ def test_cleanup_retains_branch_when_fetch_or_ownership_changes(tmp_path, monkey
     assert original(cfg, "show-ref", "--verify", "refs/heads/" + claim["branch"], check=False).returncode == 0
     assert claim["cleanup_pending"] == {
         "fetch": "target_branch_fetch_failed", "concurrent_advance": "history_changed_requires_owner",
-        "in_use": "branch_in_use_requires_owner"}[failure]
+        "in_use": "branch_in_use_requires_owner",
+        "attach_during_fetch": "branch_in_use_requires_owner",
+        "attach_at_deletion": "branch_in_use_requires_owner"}[failure]
     assert not claim.get("cleaned")
+    assert original(cfg, "for-each-ref", "refs/agentic/cleanup/").stdout == ""
+    if failure in {"attach_during_fetch", "attach_at_deletion"}:
+        other = tmp_path / "other"
+        assert command(other, "branch", "--show-current") == claim["branch"]
+        assert command(other, "rev-parse", "HEAD") == head
