@@ -1652,7 +1652,11 @@ def test_stop_cause_or_bound_not_validated_is_not_published(tmp_path, cause, att
     assert "/private/secret" not in body
 
 
-@pytest.mark.parametrize("delivery", ["saved", "refused", "empty", "review-blocked", "runner-blocked"])
+@pytest.mark.parametrize("delivery", [
+    "saved", "refused", "empty", "review-blocked", "runner-blocked",
+    "exit-saved", "timeout-saved", "malformed-saved",
+    "exit-refused", "timeout-refused", "malformed-refused",
+])
 def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, delivery):
     cfg, h, runner = configured_service(tmp_path, monkeypatch)
 
@@ -1660,10 +1664,16 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
         job.update(status="running_" + role, updated_at=core.now())
         runner.save_job(config, path, job)
         if role == "worker":
-            if delivery in {"saved", "review-blocked", "runner-blocked"}:
+            if delivery in {"saved", "review-blocked", "runner-blocked"} or delivery.endswith("-saved"):
                 fixtures.deliver(config)
-            elif delivery == "refused":
+            elif delivery == "refused" or delivery.endswith("-refused"):
                 (Path(config["worktree"]) / "credentials.txt").write_text("synthetic private work")
+            if delivery.startswith("exit-"):
+                raise RuntimeError("Synthetic nonzero exit")
+            if delivery.startswith("timeout-"):
+                raise TimeoutError("Synthetic terminated worker timeout")
+            if delivery.startswith("malformed-"):
+                return {"malformed": True}
             if delivery == "runner-blocked":
                 raise runner.Blocked("Synthetic prerequisite stopped")
             return fixtures.result("ready_for_review" if delivery == "review-blocked" else "blocked")
@@ -1672,8 +1682,9 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
     monkeypatch.setattr(runner, "execute", execute)
     service.poll(cfg, h.client(), clock=lambda: 100)
     job, = service.jobs(cfg)
-    target = "blocked" if delivery == "runner-blocked" else "needs-owner"
-    assert job["status"] == ("blocked" if delivery == "runner-blocked" else "needs_owner")
+    failed = delivery.startswith(("exit-", "timeout-", "malformed-"))
+    target = "blocked" if delivery == "runner-blocked" or failed else "needs-owner"
+    assert job["status"] == ("failed" if failed else "blocked" if delivery == "runner-blocked" else "needs_owner")
     stops = [r for r in core.records(cfg, h.comments_by_issue[1], 1) if r["to"] == target]
     record, = stops
     body = next(c["body"] for c in h.comments_by_issue[1] if record["key"] in c["body"])
@@ -1681,7 +1692,7 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
     for comment in h.comments_by_issue[1]:
         assert str(tmp_path) not in comment["body"]
         assert "credentials.txt" not in comment["body"]
-    if delivery in {"saved", "review-blocked", "runner-blocked"}:
+    if delivery in {"saved", "review-blocked", "runner-blocked"} or delivery.endswith("-saved"):
         head = job["head_commit"]
         assert len(head) == 40 and head != job["base_commit"]
         assert record["commit"] == head and record["actor"] == cfg["actors"]["runner"]
@@ -1690,7 +1701,7 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
                              "once #110 is in place; without it, re-approval starts fresh.")
         assert service.git(cfg, "rev-parse", ref).stdout.strip() == head
         assert service.git(cfg, "show", head + ":delivery.txt").stdout == "delivery\n"
-        if delivery in {"saved", "runner-blocked"}:
+        if delivery != "review-blocked":
             assert service.git(cfg, "show", "-s", "--format=%s", head).stdout.strip() == (
                 "runner: job " + job["id"] + " saved at stop")
         # Drop all ordinary references and reflogs: only the continuation ref retains this work.
@@ -1705,11 +1716,89 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
         assert not job.get("runner_commits")
         assert "### Continue from" not in body
         assert service.git(cfg, "show-ref", "--verify", ref, check=False).returncode != 0
-        if delivery == "refused":
+        if delivery == "refused" or delivery.endswith("-refused"):
             assert "couldn't be saved" in body
             assert (Path(job["assignment"]["worktree"]) / "credentials.txt").exists()
         else:
             assert "couldn't be saved" not in body
+
+
+@pytest.mark.parametrize("claim_stage", ["enqueued", "finished"])
+@pytest.mark.parametrize("boundary", ["intent", "prepared", "published", "committed", "refused", "ready"])
+def test_stop_recovers_durable_boundaries_without_worker_replay(tmp_path, monkeypatch, boundary, claim_stage):
+    cfg, h, runner = configured_service(tmp_path, monkeypatch)
+    executions = []
+
+    def execute(config, state, path, job, role):
+        executions.append(role)
+        job.update(status="running_worker", updated_at=core.now())
+        runner.save_job(config, path, job)
+        if boundary == "refused":
+            (Path(config["worktree"]) / "credentials.txt").write_text("synthetic work")
+        else:
+            fixtures.deliver(config)
+        return fixtures.result("blocked")
+
+    class Crash(BaseException):
+        pass
+
+    original_save = runner.save
+    original_git = runner.trusted_git
+
+    def crash_save(path, value):
+        original_save(path, value)
+        if not value.get("stop_saving") or "assignment" not in value:
+            return
+        commits = value.get("runner_commits", [])
+        state = commits[-1]["state"] if commits else None
+        hit = {"intent": not commits, "prepared": state == "prepared",
+               "committed": state == "committed", "refused": bool(value.get("commit_refusals")),
+               "ready": bool(value.get("stop_ready"))}
+        if hit.get(boundary):
+            raise Crash()
+
+    def crash_git(config, *args, **kwargs):
+        result = original_git(config, *args, **kwargs)
+        if boundary == "published" and args[:2] == ("update-ref", "--no-deref") and args[2].startswith("refs/heads/"):
+            raise Crash()
+        return result
+
+    monkeypatch.setattr(runner, "execute", execute)
+    monkeypatch.setattr(runner, "save", crash_save)
+    monkeypatch.setattr(runner, "trusted_git", crash_git)
+    with pytest.raises(Crash):
+        service.poll(cfg, h.client(), clock=lambda: 100)
+    stopped, = service.jobs(cfg)
+    assert stopped["stop_saving"]
+    assert not [r for r in core.records(cfg, h.comments_by_issue[1], 1) if r["to"] == "needs-owner"]
+    claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
+    claim = core.read(claim_path)
+    claim["stage"] = claim_stage
+    core.save(claim_path, claim)
+    monkeypatch.setattr(runner, "save", original_save)
+    monkeypatch.setattr(runner, "trusted_git", original_git)
+    for timestamp in (200, 300):
+        service.poll(cfg, h.client(), clock=lambda: timestamp)
+    job, = service.jobs(cfg)
+    assert executions == ["worker"]
+    assert not job.get("stop_saving")
+    assert job["status"] == "needs_owner"
+    assert core.read(claim_path)["stage"] == "finished"
+    record, = [r for r in core.records(cfg, h.comments_by_issue[1], 1) if r["to"] == "needs-owner"]
+    body = next(c["body"] for c in h.comments_by_issue[1] if record["key"] in c["body"])
+    assert str(tmp_path) not in json.dumps(h.comments_by_issue)
+    assert "credentials.txt" not in json.dumps(h.comments_by_issue)
+    if boundary in {"refused", "prepared"}:
+        assert job["stop_save_failed"]
+        assert "couldn't be saved" in body
+        assert "### Continue from" not in body
+        assert not job.get("head_commit")
+    else:
+        assert len(job["runner_commits"]) == 1
+        head = job["head_commit"]
+        assert record["commit"] == head
+        assert "### Continue from\nCommit: " + head in body
+        assert service.git(cfg, "rev-parse", "refs/agentic/continue/" + job["id"]).stdout.strip() == head
 
 
 @pytest.mark.parametrize("close", ["merged", "owner", "other", "reopened"])

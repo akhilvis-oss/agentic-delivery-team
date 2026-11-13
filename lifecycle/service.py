@@ -413,7 +413,11 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             if claim["stage"] == "finished":
                 if run_jobs and claim.get("config"):
                     completed_config = runner.load_config(claim["config"])
-                    if runner.integration_api().options(completed_config):
+                    completed_job = runner.read(
+                        Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
+                    )
+                    if (completed_job.get("stop_saving")
+                            or runner.integration_api().options(completed_config)):
                         runner.run_once(completed_config, task_id=claim["job"])
                 events = client.events(claim["issue"])
                 canonical, _ = core.canonical_state(cfg, events)
@@ -434,6 +438,13 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 if previous["status"] in runner.TERMINAL:
                     # Completion is durable in the job before the claim. Recover
                     # that boundary without replaying work or re-admitting it.
+                    if previous.get("stop_saving"):
+                        if not run_jobs:
+                            continue
+                        runner.run_once(recovery_config, task_id=claim["job"])
+                        previous = runner.read(recovery_path)
+                        if previous.get("stop_saving"):
+                            continue
                     claim.update(stage="finished", head=previous.get("head_commit"))
                     core.save(path, claim)
                     continue
