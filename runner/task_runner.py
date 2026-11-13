@@ -1566,6 +1566,9 @@ def run_once(config, state=None, client=None, *, task_id=None):
                             if lifecycle_cfg else config.get("max_rounds", 2))
             if assignment.get("continuation"):
                 max_attempts = 2
+            # Continuation exhaustion requires another owner approval; automatic
+            # primary dispatch would grant an uncounted extra build and review.
+            escalation_status = "needs_owner" if assignment.get("continuation") else "needs_primary_review"
             dependency = assignment["after_task"]
             if dependency:
                 predecessor = read(state / "tasks" / f"{dependency}.json")
@@ -1621,7 +1624,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         if attempt == 1 or dirty_paths(config):
                             raise Blocked("Disagreement requires an existing reviewed clean head")
                         if job.get("disagreement_exchanges", 0):
-                            job["status"] = "needs_primary_review"
+                            job["status"] = escalation_status
                             break
                         job.update(disagreement=disagreement, disagreement_exchanges=1)
                     else:
@@ -1677,7 +1680,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         verdict = "ready_for_integration"
                         job["review"]["status"] = verdict
                     if job.get("disagreement") and verdict == "needs_changes":
-                        job["status"] = "needs_primary_review" if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
+                        job["status"] = escalation_status if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
                         break
                     if verdict == "needs_changes" and assignment["lifecycle"]["primary"]:
                         job["status"] = "needs_owner"
@@ -1685,10 +1688,10 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 if verification and verification["status"] != "passed" and verdict == "ready_for_integration":
                     raise Blocked("Review approval contradicts failed required tests")
                 if verdict != "needs_changes" or assignment["kind"] == "review":
-                    job["status"] = "needs_primary_review" if verdict == "needs_changes" else verdict
+                    job["status"] = escalation_status if verdict == "needs_changes" else verdict
                     break
                 if attempt == max_attempts:
-                    job["status"] = "needs_primary_review"
+                    job["status"] = escalation_status
                 elif lifecycle_cfg:
                     job.update(status="changes_requested", updated_at=now())
                     save_job(config, path, job)

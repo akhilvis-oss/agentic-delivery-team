@@ -174,14 +174,21 @@ def test_third_continuation_is_refused_from_claim_count(tmp_path, monkeypatch):
     assert len(service.jobs(cfg)) == 1
 
 
-def test_continuation_has_exactly_one_correction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("disagreement", [False, True])
+def test_continuation_has_exactly_one_correction(tmp_path, monkeypatch, disagreement):
     cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
     approve(hub, old["head_commit"])
     calls = []
 
     def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
         calls.append(role)
         if role == "worker":
+            if disagreement and job["round"] == 2:
+                value = fixtures.result("ready_for_review")
+                value["disagreement"] = {"kind": "technical", "reason": "Finding is disputed."}
+                return value
             fixtures.deliver(config)
             return fixtures.result("ready_for_review")
         return fixtures.result("needs_changes", "reviewer")
@@ -192,6 +199,14 @@ def test_continuation_has_exactly_one_correction(tmp_path, monkeypatch):
     job = next(j for j in service.jobs(cfg) if j["id"] == claim["job"])
     assert calls == ["worker", "reviewer", "worker", "reviewer"]
     assert job["round"] == 2 and len(job["review_history"]) == 2
+    # A later poll must not turn budget exhaustion into an automatic primary build.
+    service.poll(cfg, hub.client(), clock=lambda: 300)
+    assert calls == ["worker", "reviewer", "worker", "reviewer"]
+    assert len(service.jobs(cfg)) == 2  # original stop and owner-approved continuation
+    claims = [core.read(p) for p in (Path(cfg["state_dir"]) / "claims").glob("*.json")]
+    assert len(claims) == 2 and not any(c["primary"] for c in claims)
+    assert job["status"] == "needs_owner"
+    assert core.state(hub.issues[1]) != "needs-primary"
 
 
 def test_missing_continued_commit_stops_before_review(tmp_path, monkeypatch):
