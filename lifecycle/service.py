@@ -19,6 +19,14 @@ import uuid
 from lifecycle import app_tokens, core
 
 
+def flush_outbox(cfg, client):
+    """Policy rejections are durable issue-local outcomes; other errors still escape."""
+    try:
+        core.flush(cfg, client)
+    except core.TransitionRejected:
+        pass
+
+
 def runner_module():
     spec = importlib.util.spec_from_file_location(
         "lifecycle_runner",
@@ -120,7 +128,7 @@ def stop_continuation(cfg, client, path, claim, reason, files=None):
         event=claim["event"], reason=reason, conflict_files=files,
     )
     core.queue(cfg, record)
-    core.flush(cfg, client)
+    flush_outbox(cfg, client)
     claim.update(stage="finished", error=reason)
     core.save(path, claim)
 
@@ -483,7 +491,7 @@ def backfill_owner_merge(cfg, client, issue):
         record = core.public_record(cfg, issue["number"], f"pr-{pr['number']}", 0, "merged",
                                     commit=pr["merge_commit_sha"], pr=pr["number"])
         core.queue(cfg, record, role="runner")
-        core.flush(cfg, client)
+        flush_outbox(cfg, client)
         return client.issue(issue["number"])
     # Only completed reads can establish a negative result. Transport
     # failures propagate and remain retryable instead of poisoning cache.
@@ -616,7 +624,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
         if cursor.exists() and clock() < core.read(cursor)["next_poll"]:
             return []
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
-        core.flush(cfg, client)
+        flush_outbox(cfg, client)
         all_issues = client.pages("/issues?state=all")
         publish_poll(cfg, client, all_issues, clock())
         issues = [
@@ -739,8 +747,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
             issue = by_number.get(claim["issue"])
             if not issue:
                 continue
+            issue = client.issue(claim["issue"])
+            evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+            finished = core.finished_issue(issue, evidence)
+            if finished:
+                claim["stage"] = "finished"
+                completed_path = (root / "jobs" / claim["job"] / "runner-state"
+                                  / "tasks" / (claim["job"] + ".json"))
+                if completed_path.exists():
+                    claim["head"] = core.read(completed_path).get("head_commit")
+                core.save(path, claim)
             if claim["stage"] == "finished":
-                if run_jobs and claim.get("config"):
+                if not finished and run_jobs and claim.get("config"):
                     completed_config = runner.load_config(claim["config"])
                     completed_job = runner.read(
                         Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
@@ -847,7 +865,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                     event=claim["event"],
                 )
                 outbox = core.queue(cfg, record)
-                core.flush(cfg, client)
+                flush_outbox(cfg, client)
                 if core.read(outbox)["status"] != "synced":
                     continue
                 claim["stage"] = "dispatched"
@@ -1009,6 +1027,11 @@ def status(cfg, *, clock=time.time):
         f"Cleanup: {sum(c.get('removed_worktrees', 0) for c in claims)} worktrees removed; "
         f"{sum(c.get('removed_continuations', 0) for c in claims)} continuation references removed"
     )
+    conflicts = [core.read(p) for p in (root / "outbox").glob("*.json")]
+    lines.append("Rejected transitions: " + str(sum(
+        e["status"] == "conflict" and e.get("error") == "transition_not_allowed"
+        for e in conflicts
+    )))
     lines.append("Active claims:")
     active = [
         f"  Issue #{c['issue']}: {c['job']} ({c['stage']})"
