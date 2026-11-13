@@ -326,7 +326,36 @@ def delivery_candidate(cfg, claim, source_id, history):
     return source_id, None
 
 
-def cleanup(cfg, claim, issue, events=()):
+def verified_merge_head(cfg, client, issue):
+    """Return only a reviewed PR head bound to an authenticated merge record."""
+    if client is None:
+        return None
+    evidence = core.records(cfg, client.comments(issue["number"]), issue["number"])
+    merges = [r for r in evidence if r["kind"] == "transition" and r["to"] == "merged"
+              and r.get("pr") and any(core.has_role(cfg, r["actor"], role)
+                                      for role in ("runner", "workflow"))]
+    for record in reversed(merges):
+        pr = client.request("GET", f"/pulls/{record['pr']}")
+        if (pr.get("merged") is not True or record["commit"] != pr.get("merge_commit_sha")
+                or pr["base"]["ref"] != cfg.get("base_branch", "main")
+                or pr["head"].get("repo", {}).get("full_name") != cfg["repository"]
+                or pr.get("user", {}).get("login") not in set(cfg["actors"].values())
+                or issue["number"] not in {int(n) for n in re.findall(
+                    r"\bCloses\s+#([1-9]\d*)\b", pr.get("body") or "", re.I)}
+                or not any(r["kind"] == "transition" and r["to"] == "dispatched"
+                           and core.has_role(cfg, r["actor"], "runner") for r in evidence)
+                or not any(r["kind"] == "review" and r["outcome"] == "ready_for_integration"
+                           and r["commit"] == pr["head"]["sha"] for r in evidence)):
+            continue
+        if record["from"] == "needs-owner" and not core.owner_merge_verified(
+                cfg, issue["number"], evidence, pr):
+            continue
+        if core.permitted(cfg, record["from"], "merged", record["actor"]):
+            return pr["head"]["sha"]
+    return None
+
+
+def cleanup(cfg, claim, issue, events=(), *, client=None):
     if claim.get("cleaned") or issue["state"] != "closed":
         return
     if not core.ID.fullmatch(claim["job"]):
@@ -374,14 +403,31 @@ def cleanup(cfg, claim, issue, events=()):
             return
         git(cfg, "worktree", "remove", "--", str(path))
         claim["removed_worktrees"] = claim.get("removed_worktrees", 0) + 1
-    # Never force-delete unmerged history. Operator refreshes the local base first.
-    deleted = git(cfg, "branch", "-d", "--", claim["branch"], check=False)
-    if deleted.returncode:
-        claim["cleanup_pending"] = "branch_not_in_local_base"
-    else:
-        remove_continuation()
-        claim.update(cleaned=True)
-        claim.pop("cleanup_pending", None)
+    ref = "refs/heads/" + claim["branch"]
+    if "branch " + ref + "\n" in git(cfg, "worktree", "list", "--porcelain").stdout:
+        claim["cleanup_pending"] = "branch_in_use_requires_owner"
+        return
+    branch = git(cfg, "show-ref", "--verify", "--hash", ref, check=False)
+    if branch.returncode == 0:
+        head = branch.stdout.strip()
+        try:
+            target = fetch_target(cfg)
+        except core.Unavailable:
+            claim["cleanup_pending"] = "target_branch_fetch_failed"
+            return
+        ancestor = git(cfg, "merge-base", "--is-ancestor", head, target, check=False)
+        if ancestor.returncode and head != verified_merge_head(cfg, client, issue):
+            claim["cleanup_pending"] = "branch_not_verified_merged"
+            return
+        # Compare-and-delete the verified head. A concurrent branch advance is
+        # retained, including after squash merges where branch -d cannot work.
+        deleted = git(cfg, "update-ref", "--no-deref", "-d", ref, head, check=False)
+        if deleted.returncode:
+            claim["cleanup_pending"] = "history_changed_requires_owner"
+            return
+    remove_continuation()
+    claim.update(cleaned=True)
+    claim.pop("cleanup_pending", None)
 
 
 def backfill_owner_merge(cfg, client, issue):
@@ -686,7 +732,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
                 events = client.events(claim["issue"])
                 canonical, _ = core.canonical_state(cfg, events)
                 if canonical == core.state(issue):
-                    cleanup(cfg, claim, issue, events)
+                    cleanup(cfg, claim, issue, events, client=client)
                 else:
                     claim["cleanup_pending"] = "untrusted_close_state"
                 core.save(path, claim)
