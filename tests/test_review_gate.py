@@ -338,7 +338,8 @@ def test_cli_exit_codes_and_body_is_data(tmp_path, capsys):
 def test_repository_config_is_valid_and_protects_the_gate():
     repo_cfg = gate.load_config(ROOT / ".github/review-gate.json")
     for path in ("gate/review_gate.py", ".github/review-gate.json", "templates/review-gate.example.json",
-                 "tests/test_review_gate.py", "LICENSE"):
+                 "tests/test_review_gate.py", "LICENSE", "starter-kit/AGENTS.md",
+                 "starter-kit/PRODUCT_AGENT.md", "starter-kit/docs/product/vision.md"):
         assert gate.file_tier(path, repo_cfg) == "control-critical", path
     assert gate.file_tier("docs/guide.md", repo_cfg) == "light"
     assert gate.file_tier("runner/agent_task_runner.py", repo_cfg) == "domain-critical"
