@@ -23,7 +23,7 @@ GitHub is the record throughout: issues, labels, pull requests and reviews hold 
 
 | Piece | What it does | Status | Docs |
 | --- | --- | --- | --- |
-| **Starter kit** | Agent rules (`AGENTS.md`), product agent rules, product docs and a story template to copy into your project | Unreleased | [`starter-kit/`](starter-kit/) |
+| **Starter kit** | Agent rules (`AGENTS.md`), product agent rules, product docs and a story template to copy into your project | [v0.4.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.4.0) | [`starter-kit/`](starter-kit/) |
 | **Review gate** | Four review categories (light, standard, domain-critical, control-critical) derived from changed files and enforced in CI | [v0.2.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.2.0) | [Review categories](docs/review-categories.md) |
 | **Task runner** | Delegates one approved task to a coding agent, gets an independent review, and makes the commit itself after checking the changed paths | [v0.3.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.3.0) | [Task runner](docs/task-runner.md) |
 | **Task lifecycle and stand-up** | One status label per issue, guarded transitions, owner-only approval, bot identities, and a factual stand-up digest | [v0.4.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.4.0) | [Lifecycle and digest](docs/v04-lifecycle-digest.md) |

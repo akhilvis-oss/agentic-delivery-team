@@ -37,6 +37,7 @@
           "requirements-dev.txt",
           "LICENSE",
           "AGENTS.md",
+          "starter-kit/*",
           "*.env*",
           "*secret*",
           "*credential*",
