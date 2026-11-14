@@ -704,6 +704,23 @@ def test_post_review_stop_posts_all_open_findings(tmp_path, status):
     assert len(record["stop_details"]["findings"]) == 2
 
 
+def test_empty_finding_criterion_validates_and_stop_recovers_description_ac_ids(tmp_path):
+    review = fixtures.result("needs_changes", "reviewer")
+    review["findings"] = [dict(severity="P1", path="example.py", criterion="",
+                               detail="AC-2 and AC-4 fail; AC-2 also needs recovery.")]
+    fixtures.runner.validate_result(review, "reviewer")
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    job = stopped_job()
+    job.update(status="needs_primary_review", review=review)
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    assert "Open finding: P1 — AC-2, AC-4\n> " in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["findings"][0]["criterion"] == "AC-2, AC-4"
+
+
 def test_findings_limit_is_visible_and_does_not_include_old_review(tmp_path):
     cfg = policy(tmp_path)
     job = stopped_job()

@@ -702,7 +702,7 @@ def schema(role, lifecycle=False, pool=False):
         finding["severity"]["enum"] = ["P0", "P1", "P2"]
         finding["criterion"] = {"type": "string"}
         fields["findings"] = {"type": "array", "items": {"type": "object", "properties": finding,
-                              "required": ["severity", "path", "detail"], "additionalProperties": False}}
+                              "required": list(finding), "additionalProperties": False}}
     if role == "worker":
         fields["owner_question"] = {"anyOf": [{"type": "null"}, {"type": "string"}]}
         fields["failed_tests"] = {"anyOf": [{"type": "null"}, {
@@ -892,8 +892,8 @@ LIFECYCLE_NOTES = {
         "Judge the work in the exact commit range against the assignment. "
         "Do not modify files or history. Finding descriptions are public (at most 600 "
         "characters each): do not include paths, account names, secrets, prompt text or "
-        "log excerpts. Set criterion to the related acceptance criterion (for example AC-1) "
-        "for every finding; detail explains the finding."
+        "log excerpts. Set criterion to the AC ID the finding relates to, or an empty string if none. "
+        "Detail explains the finding."
     ),
 }
 
