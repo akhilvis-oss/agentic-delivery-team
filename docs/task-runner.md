@@ -377,7 +377,10 @@ missing or duplicate sections fail closed at the gate and require reconciliation
 The runner does not infer domain evidence or scope acknowledgements from a PASS.
 
 The default required Actions build workflow is `.github/workflows/ci.yml`; set
-`integration.checks_workflow` for a different installed path. The trusted gate
+`integration.checks_workflow` for a different installed path. The required build
+check name defaults to `checks`; set `integration.checks_name` (for example,
+`"offline"`) to match your workflow's job name. Its workflow, head and PR bindings
+are still required. The trusted gate
 workflow remains the lifecycle's `trusted_gate_workflow`. The category is derived
 from the immutable PR base's gate rules and complete revision-bound file evidence,
 and must be supported by a successful trusted `review-gate` run. A declared higher
@@ -411,7 +414,13 @@ release assignments explicitly when their notes use other names. This transport 
 or release-publication operation. If GitHub specifically rejects auto-merge for
 "clean status", the runner repeats the complete evidence check, directly merges
 with `sha` and `merge_method: merge`, then records the head and reviews relied on.
-Other rejections do not invoke that fallback. Branch protection remains necessary
+Before enabling auto-merge the runner reads the repository's `allow_auto_merge`.
+If it is false, or GitHub explicitly rejects auto-merge as not allowed for the
+repository, delivery stops at `needs-owner` with `owner_merge_required`. It posts
+one "needs your merge" notice with the PR link and does not retry or directly
+merge. The owner's later merge is recorded as `merged`, as for control-critical
+work. Other auto-merge errors retain their existing retry/reconciliation behavior.
+Branch protection remains necessary
 because GitHub offers no atomic snapshot lock across these API calls.
 
 Delivery intents and results live in private job `integration` state. Every write

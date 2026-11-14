@@ -1799,10 +1799,9 @@ def guard_issue(cfg, client, number):
 def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
     """Unknown/partial/stale/name-colliding checks are never a passing gate."""
     try:
-        # pull_request_target executes on the base commit, not the PR head.
-        # Several PRs share that commit: collect all checks, then bind each run
-        # separately to the PR number and reviewed head (and base for delivery).
-        execution_sha = pr["base"]["sha"]
+        # GitHub attaches the trusted check to the PR head even though the
+        # workflow executes trusted base code. Bind its run to this PR too.
+        execution_sha = pr["head"]["sha"]
         runs, total, ids = [], None, set()
         for page in range(1, 1001):
             result = client.request(
