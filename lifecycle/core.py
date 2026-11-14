@@ -416,6 +416,8 @@ def public_record(
         if target not in {"blocked", "needs-owner", "needs-primary"}:
             raise ValueError("Stop details require a stopped task")
         if owner_question is not None:
+            if isinstance(owner_question, str):
+                owner_question = inert_mentions(owner_question)
             if not safe_question(cfg, owner_question):
                 raise ValueError("Question is not safe for publication")
             record["owner_question"] = owner_question
@@ -510,6 +512,12 @@ for _check, _label in {
         )
 
 
+def inert_mentions(text):
+    """Break mention syntax idempotently, leaving email addresses readable."""
+    return re.sub(r"([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})|@(?!\u200d)",
+                  lambda match: match[1] or "@\u200d", text)
+
+
 def public_quote(cfg, text, limit):
     """Sanitize before truncating; never trust exemptions in agent-supplied prose."""
     spec = importlib.util.spec_from_file_location(
@@ -545,6 +553,7 @@ def public_quote(cfg, text, limit):
                      for n, line in enumerate(text.split("\n"), 1))
     # Neutralize HTML, including lifecycle record delimiters, idempotently.
     text = text.replace("<", "[less-than]").replace(">", "[greater-than]")
+    text = inert_mentions(text)
     marker = " [truncated]"
     return text if len(text) <= limit else text[:limit - len(marker)] + marker
 
@@ -597,10 +606,21 @@ def safe_question(cfg, question):
     """Only an explicitly supplied public question may leave the builder result.
 
     Fail closed on private-looking text; never rewrite a question and call it a
-    verbatim quote. Summaries, limitations and provider replies are not sources.
+    verbatim quote, apart from making mentions inert. Summaries, limitations
+    and provider replies are not sources.
     """
     if not isinstance(question, str) or not question.strip() or len(question) > 2000:
         return False
+    if any(name.lower() in question.lower() for name in cfg["identity_roles"]):
+        return False
+    if re.search(r"[A-Za-z0-9_-]{40,}", question):
+        return False
+    if public_quote(cfg, question, 2000) != inert_mentions(question):
+        return False
+    # Mentions are made inert when constructing the public record. Mask only
+    # mention syntax for validation; email addresses and paths still fail closed.
+    question = re.sub(r"@\u200d[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)?",
+                      "[mention]", inert_mentions(question))
     if re.search(r"[/\\@<>\x00-\x08\x0b-\x1f\x7f]|[A-Za-z0-9_-]{40,}", question):
         return False
     # Sensitive values also appear in prose ("use account ...", "token ...").
@@ -611,8 +631,6 @@ def safe_question(cfg, question):
     if re.search(r"(?im)\b(?:provider response|traceback|stdout|stderr|private key)\b", question):
         return False
     if public_quote(cfg, question, 2000) != question:
-        return False
-    if any(name.lower() in question.lower() for name in cfg["identity_roles"]):
         return False
     return True
 
@@ -1354,6 +1372,8 @@ def job_records(cfg, job):
         worker = job.get("worker", {})
         supplied = worker.get("owner_question")
         if supplied is not None:
+            if isinstance(supplied, str):
+                supplied = inert_mentions(supplied)
             if safe_question(cfg, supplied):
                 question, reason = supplied, "owner_question"
             else:

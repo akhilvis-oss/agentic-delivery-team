@@ -103,7 +103,7 @@ without fetching again or replacing receipts or history. Only claims with no
 existing work fetch a new start. Conflicting branch, assignment or history
 evidence requires reconciliation rather than starting replacement work.
 
-Issue history consists of fixed-field machine blocks authored by trusted identities. Repository, enclosing issue, author/role, transition, key, types and timestamps are checked. Owner label events supply approval authority; arbitrary comments, including digest replies, never do. Public records contain state, actor, job/event IDs, round, commit SHA, outcome, severity counts and fixed reason codes. Finding prose, arguments, paths, logs, task text and worker summaries stay private. P2 follow-up issues contain fixed metadata and reference their source issue; Primary consults private detail during triage.
+Issue history consists of fixed-field machine blocks authored by trusted identities. Repository, enclosing issue, author/role, transition, key, types and timestamps are checked. Owner label events supply approval authority; arbitrary comments, including digest replies, never do. Public records contain state, actor, job/event IDs, round, commit SHA, outcome, severity counts and fixed reason codes, plus sanitized stop summaries, findings and builder questions (see limits below). Arguments, logs and task text stay private. P2 follow-up issues contain fixed metadata and reference their source issue; Primary consults private detail during triage.
 
 GitHub updates have a private outbox. Labels/assignments are idempotent; append-only writes are marked attempted **before** sending. A lost response is searched for by its trusted record key. If an attempted comment/issue cannot be found, it remains uncertain for manual reconciliation; it is never blindly reposted. Known rejected writes can retry. A conflict on one issue does not authorize overwriting an owner's state or starting another job. Actions runs have ephemeral local storage: a rerun with missing prior comment proof refuses to repost and requires manual reconciliation. Distinct PR event deliveries are separately keyed; a rerun retains the same delivery/run ID. This conservative rule can leave missing metadata after a failed workflow, rather than risking a duplicate append. `reconcile` reports local/GitHub mismatches without changing either side. Unsynced/uncertain records appear in the stand-up.
 
@@ -167,7 +167,15 @@ With `model.enabled: false` (or omitted), the digest requires no model identifie
 
 A UTC-month private budget ledger records a conservative byte-based input-token estimate, configured output cap, configured prices and reserved USD estimate before the call. It refuses a model call whose reservation would exceed `monthly_budget_usd`; factual publication continues. Failed/ambiguous calls keep their reservation and are not called again for the same digest ID. Reported API token usage is retained when valid; estimates are not an exact provider invoice or a substitute for provider-side limits. Set and review current prices yourself; no credential, price, model name or subscription assumption is shipped in code.
 
-Private state contains full assignments and findings. Public GitHub reports do not: they use whitelisted fields, fixed prose, IDs, issue links and commit metadata only. Public-repository users must explicitly accept that these facts become public. Replies to digest issues are never collected as decisions, approvals or instructions. A report issue has a dedicated marker/author/label and is excluded from task automation, preventing recursive digests.
+Private state contains full assignments and findings. Stand-up reports use whitelisted fields, fixed prose, IDs, issue links and commit metadata only. Public-repository users must explicitly accept that these facts become public. Replies to digest issues are never collected as decisions, approvals or instructions. A report issue has a dedicated marker/author/label and is excluded from task automation, preventing recursive digests.
+
+## Limits
+
+Builder summaries, reviewer findings and builder questions are posted publicly on
+the issue, cleaned of paths, tokens, account names and active mentions. Mentions
+are made inert; questions containing private-looking text are withheld in full.
+These filters reduce accidental disclosure but cannot establish that arbitrary
+agent prose is suitable for publication.
 
 Sources: [GitHub issue events](https://docs.github.com/en/rest/issues/events), [labels](https://docs.github.com/en/rest/issues/labels), [assignees](https://docs.github.com/en/rest/issues/assignees), [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation), and [Claude Messages API](https://platform.claude.com/docs/en/api/messages/create).
 
@@ -199,6 +207,14 @@ do not refresh it. The factual stand-up includes “Service last polled N minute
 or “never” before its first successful poll. Polls execute jobs synchronously, so a
 long-running job can delay the next heartbeat; choose the threshold to include the
 expected job duration as well as the poll interval.
+
+Public status publication is best effort: any failure records only its exception
+class in private `public-heartbeat-failure.json` and dispatch continues in the same
+poll. The next poll retries publication. After a successful listing finds no status
+issue or comment marker, creation retries immediately, including after a deleted
+artifact or an ambiguous create. Duplicate status comments are tolerated; only the
+oldest matching comment is updated. This retry exception applies only to service
+status, not lifecycle records or other append-only writes.
 
 In `serve` mode, `Unavailable` (including `Uncertain`) from a poll or stand-up
 keeps the loop alive. The retry wait starts at `poll_seconds`, doubles on each
