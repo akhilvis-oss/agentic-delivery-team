@@ -204,7 +204,23 @@ In `serve` mode, `Unavailable` (including `Uncertain`) from a poll or stand-up
 keeps the loop alive. The retry wait starts at `poll_seconds`, doubles on each
 consecutive failure, caps at 600 seconds, and resets after success. Retry receipts
 in private state record times, a count and the exception class, never its message.
-`run-once` and `enqueue-only` still exit on the first error.
+`run-once` and `enqueue-only` still exit on transport errors.
+
+Policy rejections are contained to their issue: the service continues polling and
+`status` shows a `Rejected transitions` count from the durable outbox. A new
+rejection still fails a workflow run, after allowing other issues to flush.
+Confirmed rejection comments make their conflict entries final; later flushes skip
+them. Unconfirmed comments hold back only that issue. An uncertain append is
+searched for under the publishing identity and record marker, never blindly
+repeated. Older attempted rejections require matching trusted comment evidence;
+an attempted flag alone is not confirmation. Missing evidence requires operator
+reconciliation.
+
+Before recovery or delivery, the service checks the current issue and latest
+trusted lifecycle record. Closed issues and stories at `merged` or `accepted` have
+their claims finished locally, and queued job records are superseded without
+GitHub writes. Verified owner-merge backfill, guarded local cleanup and the service
+heartbeat retain their existing behavior.
 
 After the first successful poll and stand-up following failures, the existing
 `agentic-last-poll-v1` status comment adds one line: “Polls first failed: …;

@@ -44,6 +44,10 @@ class Unavailable(RuntimeError):
     pass
 
 
+class TransitionRejected(ValueError):
+    """A policy rejection, distinct from malformed data or programming errors."""
+
+
 class Uncertain(Unavailable):
     """A write may have reached GitHub; never blindly repeat it."""
 
@@ -891,27 +895,60 @@ def owner_merge_verified(cfg, issue, evidence, pr):
     )
 
 
+def finished_issue(issue, evidence=()):
+    """Job recovery must not reopen closed or completed stories."""
+    return (issue["state"] == "closed" or state(issue) in {"merged", "accepted"}
+            or bool(evidence and evidence[-1]["to"] in {"merged", "accepted"}))
+
+
+def rejection_body(record):
+    return (
+        f"Lifecycle transition {record['from']} → {record['to']} was rejected. "
+        "The story stays at its current status because the required permission "
+        "or verified owner-merge evidence is missing. Owner: reconcile the story "
+        "before retrying."
+    )
+
+
+def confirm_rejection(cfg, client, path, entry):
+    """Reconcile an attempted append before considering any retry, including legacy state."""
+    record = entry["record"]
+    body = rejection_body(record)
+    marker = f"<!-- agentic-rejection:{record['key']} -->"
+    try:
+        if entry.get("rejection_attempted"):
+            comments = client.comments(record["issue"])
+            entry["rejection_confirmed"] = any(
+                c.get("user", {}).get("login") == cfg["actors"][client.role]
+                and c.get("body") == (body + "\n" + marker if entry.get("rejection_marker") else body)
+                for c in comments
+            )
+        else:
+            entry.update(rejection_attempted=True, rejection_marker=True)
+            save(path, entry)
+            try:
+                client.request("POST", f"/issues/{record['issue']}/comments",
+                               {"body": body + "\n" + marker})
+            except Unavailable as exc:
+                if not isinstance(exc, Uncertain):
+                    entry["rejection_attempted"] = False
+                raise
+            entry["rejection_confirmed"] = True
+    except Unavailable:
+        pass
+    save(path, entry)
+    return entry.get("rejection_confirmed", False)
+
+
 def reject_transition(cfg, client, path, entry):
     record = entry["record"]
     entry.update(status="conflict", error="transition_not_allowed")
-    message = f"Lifecycle transition {record['from']} → {record['to']} rejected by policy"
-    if not entry.get("rejection_attempted"):
-        entry["rejection_attempted"] = True
-        save(path, entry)
-        try:
-            client.request("POST", f"/issues/{record['issue']}/comments", {"body": (
-                f"Lifecycle transition {record['from']} → {record['to']} was rejected. "
-                "The story stays at its current status because the required permission "
-                "or verified owner-merge evidence is missing. Owner: reconcile the story "
-                "before retrying."
-            )})
-        except Unavailable as exc:
-            if not isinstance(exc, Uncertain):
-                entry["rejection_attempted"] = False
-            save(path, entry)
-            raise ValueError(message + "; issue comment could not be confirmed") from None
     save(path, entry)
-    raise ValueError(message)
+    confirmed = confirm_rejection(cfg, client, path, entry)
+    message = f"Lifecycle transition {record['from']} → {record['to']} rejected by policy"
+    if not confirmed:
+        message += "; issue comment could not be confirmed"
+    raise TransitionRejected(message)
 
 
 def flush(cfg, client):
@@ -923,9 +960,15 @@ def flush(cfg, client):
         entries = [(p, read(p)) for p in folder.glob("*.json")]
         entries.sort(key=lambda x: (stamp(x[1]["record"]["timestamp"]), x[0].name))
         blocked_issues = set()
+        rejections = []
         supplied_client = client
         for path, entry in entries:
             if entry["status"] in {"synced", "superseded"}:
+                continue
+            if entry["status"] == "conflict" and entry.get("rejection_confirmed"):
+                continue
+            record = entry["record"]
+            if record["issue"] in blocked_issues:
                 continue
             expected_role = entry.get("role", "runner")
             try:
@@ -935,21 +978,43 @@ def flush(cfg, client):
                     else GitHub(cfg, expected_role)
                 )
             except Unavailable:
-                entry["status"] = "unsynced"
+                if entry["status"] != "conflict":
+                    entry["status"] = "unsynced"
+                blocked_issues.add(record["issue"])
                 save(path, entry)
-                continue
-            record = entry["record"]
-            if record["issue"] in blocked_issues:
                 continue
             if record["repository"] != cfg["repository"]:
                 raise ValueError("Wrong outbox repository")
+            rejecting = (entry["status"] == "conflict"
+                         and entry.get("error") == "transition_not_allowed")
             try:
+                remote_issue = client.issue(record["issue"])
+                # Verified owner-merge backfill is informational, not job recovery.
+                backfill = (record["to"] == "merged" and record["pr"] is not None
+                            and record["job"] == f"pr-{record['pr']}")
+                job_record = expected_role == "runner" and not backfill
+                if job_record and finished_issue(remote_issue):
+                    entry.update(status="superseded", error="finished_issue")
+                    save(path, entry)
+                    continue
                 remote = records(cfg, client.comments(record["issue"]), record["issue"])
+                if job_record and finished_issue(remote_issue, remote):
+                    entry.update(status="superseded", error="finished_issue")
+                    save(path, entry)
+                    continue
+                if rejecting:
+                    if not confirm_rejection(cfg, client, path, entry):
+                        blocked_issues.add(record["issue"])
+                    continue
                 match = next((r for r in remote if r["key"] == record["key"]), None)
                 if match:
                     entry.update(record=match, status="synced")
                 else:
                     remote_issue = client.issue(record["issue"])
+                    if job_record and finished_issue(remote_issue, remote):
+                        entry.update(status="superseded", error="finished_issue")
+                        save(path, entry)
+                        continue
                     current = state(remote_issue)
                     # A PR-open event may arrive after the runner handed the
                     # story to the owner. Guard transport too, so queued intents
@@ -1066,10 +1131,20 @@ def flush(cfg, client):
                     client.notify(record["issue"])
                     entry["notified"] = True
                 save(path, entry)
+            except TransitionRejected as exc:
+                rejections.append(str(exc))
+                blocked_issues.add(record["issue"])
             except Unavailable:
+                if rejecting:
+                    blocked_issues.add(record["issue"])
+                    continue
                 entry["status"] = "unsynced"
                 save(path, entry)
+                if rejections:
+                    raise TransitionRejected("; ".join(rejections)) from None
                 return
+        if rejections:
+            raise TransitionRejected("; ".join(rejections))
 
 
 def latest_event(cfg, events, target, role):

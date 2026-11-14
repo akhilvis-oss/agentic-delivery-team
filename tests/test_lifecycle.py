@@ -1330,7 +1330,8 @@ def test_new_owner_approval_supersedes_stale_phase_without_replaying_it(tmp_path
     h.event(1, "approved", "owner")
     h.approve()
     core.flush(cfg, client)
-    assert core.read(path)["status"] == "superseded"
+    assert core.read(path)["status"] == "conflict"
+    assert core.read(path)["rejection_confirmed"] is True
     assert core.state(h.issues[1]) == "approved"
 
 
@@ -1968,7 +1969,12 @@ def test_new_same_second_stop_invalidates_legacy_backfill_cache(tmp_path):
                assignment={"lifecycle": {"issue": 1, "event": 101}},
                review={"status": "ready_for_integration", "findings": []},
                integration={"reason": "owner_merge_required"})
-    core.sync_job(cfg["config_path"], job, hub.client())
+    # Model delayed visibility of a trusted stop published before closure.
+    # Closed stories no longer permit a local job to publish a new stop.
+    record = core.job_records(cfg, job)[0]
+    record.update({"from": "needs-owner", "actor": cfg["actors"]["runner"]})
+    hub.comments_by_issue[1].append(dict(
+        user={"login": cfg["actors"]["runner"]}, body=core.record_body(record)))
     assert hub.issues[1]["updated_at"] == WHEN
     service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
     assert core.state(hub.issues[1]) == "merged"
@@ -1979,12 +1985,12 @@ def test_owner_merge_with_known_pr_never_scans_collection(tmp_path, monkeypatch)
     core.bind_state(cfg)
     hub = Hub(cfg)
     pr = owner_merge_fixture(cfg, hub)
-    hub.issues[1]["state"] = "closed"
     job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
                assignment={"lifecycle": {"issue": 1, "event": 101}},
                review={"status": "ready_for_integration", "findings": []},
                integration={"reason": "owner_merge_required", "pr": 7})
     core.sync_job(cfg["config_path"], job, hub.client())
+    hub.issues[1]["state"] = "closed"
     client = hub.client()
     monkeypatch.setattr(client, "pages", lambda _: pytest.fail("must not scan closed PRs"))
     service.backfill_owner_merge(cfg, client, hub.issues[1])
@@ -1997,11 +2003,11 @@ def test_unmerged_known_pr_backfill_is_not_polled_repeatedly(tmp_path):
     hub = Hub(cfg)
     pr = owner_merge_fixture(cfg, hub)
     pr["merged"] = False
-    hub.issues[1]["state"] = "closed"
     job = dict(id="known-pr-stop", round=1, status="needs_owner", head_commit=pr["head"]["sha"],
                assignment={"lifecycle": {"issue": 1, "event": 101}},
                integration={"reason": "owner_merge_required", "pr": 7})
     core.sync_job(cfg["config_path"], job, hub.client())
+    hub.issues[1]["state"] = "closed"
     service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
     calls = list(hub.calls)
     service.backfill_owner_merge(cfg, hub.client(), hub.issues[1])
@@ -2013,9 +2019,9 @@ def test_rejected_transition_fails_and_comments_once(tmp_path):
     hub = Hub(cfg)
     hub.issue(state="draft")
     core.queue(cfg, core.public_record(cfg, 1, "job", 0, "merged"), role="workflow")
-    for _ in range(2):
-        with pytest.raises(ValueError, match="draft → merged rejected by policy"):
-            core.flush(cfg, hub.client("workflow"))
+    with pytest.raises(ValueError, match="draft → merged rejected by policy"):
+        core.flush(cfg, hub.client("workflow"))
+    core.flush(cfg, hub.client("workflow"))
     assert len(hub.comments_by_issue[1]) == 1
     assert "draft → merged" in hub.comments_by_issue[1][0]["body"]
     assert core.state(hub.issues[1]) == "draft"

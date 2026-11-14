@@ -278,14 +278,12 @@ def test_continuation_has_exactly_one_correction(tmp_path, monkeypatch, disagree
     assert job["round"] == 2 and len(job["review_history"]) == 2
     # A later poll must not turn budget exhaustion into an automatic primary build.
     # A disagreement without a new commit left an invalid queued review transition.
-    # Rejections now fail explicitly rather than silently retaining that intent.
+    # Service polling contains that rejection while preserving its evidence.
+    service.poll(cfg, hub.client(), clock=lambda: 300)
     if disagreement:
-        with pytest.raises(ValueError, match="in-progress → in-review rejected by policy"):
-            service.poll(cfg, hub.client(), clock=lambda: 300)
         assert any("in-progress → in-review was rejected" in c["body"]
                    for c in hub.comments_by_issue[1])
-    else:
-        service.poll(cfg, hub.client(), clock=lambda: 300)
+        assert "Rejected transitions: " in service.status(cfg)
     assert calls == ["worker", "reviewer", "worker", "reviewer"]
     assert len(service.jobs(cfg)) == 2  # original stop and owner-approved continuation
     claims = [core.read(p) for p in (Path(cfg["state_dir"]) / "claims").glob("*.json")]
