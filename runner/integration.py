@@ -27,13 +27,17 @@ REASONS = {
     "gate_category_higher": "The trusted base rules require a higher review category than declared.",
     "required_check_failed": "A required check failed; inspect the pull request checks before correcting.",
     "merge_conditions_missing": "Merge evidence is missing or contradicted; owner reconciliation is required.",
-    "owner_merge_required": "Control-critical changes and releases require the owner to merge.",
+    "owner_merge_required": "This reviewed pull request needs your merge.",
     "auto_merge_disable_uncertain": "Auto-merge cancellation could not be confirmed; the owner must inspect the pull request.",
 }
 
 
 class EvidenceMissing(ValueError):
     pass
+
+
+class OwnerMergeRequired(RuntimeError):
+    """GitHub definitively refused repository auto-merge; no write occurred."""
 
 
 def options(config):
@@ -46,6 +50,9 @@ def options(config):
             or value.get("declared_tier") not in TIERS
             or not isinstance(value.get("public_evidence", ""), str)):
         raise ValueError("Standalone lifecycle integration needs a declared tier and public evidence")
+    if (not isinstance(value.get("checks_name", "checks"), str)
+            or not value.get("checks_name", "checks").strip()):
+        raise ValueError("Checks name must be a nonempty string")
     second = value.get("second_reviewer")
     if (not isinstance(value.get("release_paths", []), list)
             or any(not isinstance(p, str) or not p for p in value.get("release_paths", []))):
@@ -97,6 +104,16 @@ def client_for(core, cfg, config=None):
                 with self.opener.open(req, timeout=30) as response:
                     result = json.loads(response.read())
                 errors = result.get("errors", [])
+                if enable and errors and all(
+                    e.get("type") in {"UNPROCESSABLE", "FORBIDDEN"}
+                    and re.search(
+                        r"auto[ -]?merge (?:is )?(?:not allowed|disabled|not enabled) "
+                        r"(?:for|on|in) (?:this |the )?repository"
+                        r"|repository (?:does not allow|has disabled) auto[ -]?merge",
+                        e.get("message", ""), re.I)
+                    for e in errors
+                ):
+                    raise OwnerMergeRequired()
                 if enable and errors and all(e.get("type") == "UNPROCESSABLE"
                                   and "clean status" in e.get("message", "").lower() for e in errors):
                     return False
@@ -234,7 +251,10 @@ def bound_pr(client, cfg, config, job, delivery):
 def category(client, cfg, pr, gate):
     # Config comes from the immutable target BASE, never the story checkout.
     encoded = client.request("GET", "/contents/.github/review-gate.json?ref=" + pr["base"]["sha"])
-    rules = json.loads(base64.b64decode(encoded["content"], validate=False))
+    with tempfile.TemporaryDirectory(prefix="trusted-gate-") as scratch:
+        config_path = Path(scratch) / "review-gate.json"
+        config_path.write_bytes(base64.b64decode(encoded["content"], validate=False))
+        rules = gate.load_config(config_path)
     if rules["repo_url"] != "https://github.com/" + cfg["repository"] or rules["tiers"]["order"] != TIERS:
         raise ValueError("Unsupported trusted rules")
     def api(path):
@@ -268,7 +288,7 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     workflow = client.request("GET", "/actions/workflows/" + urllib.parse.quote(Path(workflow_path).name))
     checks = []
     for check in runs:
-        if check["name"] != "checks":
+        if check["name"] != opts.get("checks_name", "checks"):
             continue
         match = re.fullmatch(re.escape("https://github.com/" + cfg["repository"])
                              + r"/actions/runs/([1-9]\d*)/job/[1-9]\d*", check.get("details_url", ""))
@@ -369,8 +389,11 @@ def advance(runner, config, path, job, client=None):
             try:
                 delivery["reason_notice_attempted"] = True
                 persist()
+                message = REASONS[reason]
+                if reason == "owner_merge_required" and delivery.get("pr"):
+                    message += f"\nhttps://github.com/{cfg['repository']}/pull/{delivery['pr']}"
                 client.request("POST", f"/issues/{job['github_number']}/comments", {
-                    "body": REASONS[reason] + "\nReviewed head: " + job.get("reviewed_head", "unavailable")})
+                    "body": message + "\nReviewed head: " + job.get("reviewed_head", "unavailable")})
             except Exception:
                 job["lifecycle_unsynced"] = True
                 runner.save(path, job)
@@ -501,7 +524,17 @@ def advance(runner, config, path, job, client=None):
             return
         if delivery["stage"] == "auto_merge_enabled":
             return
-        enabled = write("auto_merge", lambda: client.enable_auto_merge(fresh))
+        if client.request("GET", "/")["allow_auto_merge"] is False:
+            stop("owner_merge_required", True)
+            return
+        try:
+            enabled = write("auto_merge", lambda: client.enable_auto_merge(fresh))
+        except OwnerMergeRequired:
+            # A definitive refusal means the mutation did not enable auto-merge.
+            # Clear the intent before stopping so cancellation is unnecessary.
+            delivery.pop("intent")
+            stop("owner_merge_required", True)
+            return
         delivery["stage"] = "auto_merge_enabled" if enabled else "direct_merge_recheck"
         persist()
         if not enabled:

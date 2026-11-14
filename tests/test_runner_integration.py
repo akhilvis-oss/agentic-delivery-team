@@ -147,6 +147,8 @@ class Client:
         self.gate_state = "pass"
         self.check_state = "success"
         self.minimum = "standard"
+        self.allow_auto_merge = True
+        self.checks_name = "checks"
         self.pr = None
         self.auto = True
         self.reads = 0
@@ -203,6 +205,8 @@ class Client:
             if path.endswith("/merge"):
                 return {"merged": True}
             return {"html_url": "https://github.com/example/kit/issues/1#issuecomment-11"}
+        if path == "/":
+            return {"allow_auto_merge": self.allow_auto_merge}
         if path == "/pulls/9":
             self.reads += 1
             if self.reads == self.drift_on_read:
@@ -211,14 +215,16 @@ class Client:
         if path.startswith("/contents/"):
             rules = runner.read(fixtures.ROOT / ".github/review-gate.json")
             rules["repo_url"] = "https://github.com/example/kit"
-            rules["tiers"]["rules"] = [{"tier": self.minimum, "patterns": ["*"], "reason": "synthetic"}]
+            rules["tiers"]["rules"] = [
+                *[r for r in rules["tiers"]["rules"] if r["tier"] == "control-critical"],
+                {"tier": self.minimum, "patterns": ["*"], "reason": "synthetic"}]
             return {"content": base64.b64encode(json.dumps(rules).encode()).decode()}
         if path.startswith("/pulls/9/files"):
             return [{"id": 1, "filename": "delivery.txt", "status": "added"}]
-        if path.startswith(f"/commits/{self.job['base_commit']}/check-runs?"):
+        if path.startswith(f"/commits/{self.job['head_commit']}/check-runs?filter=all&"):
             assert "filter=all" in path
             checks = [] if self.gate_state == "unavailable" else [{
-                "id": 11, "name": "review-gate", "head_sha": self.job["base_commit"],
+                "id": 11, "name": "review-gate", "head_sha": self.job["head_commit"],
                 "status": "in_progress" if self.gate_state == "pending" else "completed",
                 "conclusion": "success" if self.gate_state == "pass" else "failure",
                 "app": {"slug": "github-actions"},
@@ -228,11 +234,11 @@ class Client:
             return {"id": 7, "path": ".github/workflows/pr-review-gate.yml"}
         if path == "/actions/runs/7":
             return {"workflow_id": 7, "path": ".github/workflows/pr-review-gate.yml",
-                    "event": "pull_request_target", "head_sha": self.job["base_commit"],
+                    "event": "pull_request_target", "head_sha": self.job["head_commit"],
                     "pull_requests": [deepcopy(self.pr)]}
         if "/check-runs?" in path:
             return {"total_count": 1, "check_runs": [{
-                "id": 10, "name": "checks", "head_sha": self.job["head_commit"],
+                "id": 10, "name": self.checks_name, "head_sha": self.job["head_commit"],
                 "status": "in_progress" if self.check_state == "pending" else "completed",
                 "conclusion": self.check_state, "app": {"slug": "github-actions"},
                 "details_url": "https://github.com/example/kit/actions/runs/5/job/6"}]}
@@ -884,3 +890,107 @@ def test_workflow_completed_merge_is_reconciled_without_more_writes(authorized_d
     integration.advance(runner.self_module(), config, path, recovered, client)
     assert recovered["integration"]["stage"] == "merged"
     assert client.writes == writes
+
+
+@pytest.mark.parametrize("name,expected", [("offline", "auto_merge_enabled"), ("checks", "checking"),
+                                          ("other", "checking")])
+def test_custom_build_check_name(delivery, name, expected):
+    config, _, job, client = delivery
+    config["integration"]["checks_name"] = "offline"
+    client.checks_name = name
+    advance(delivery)
+    assert job["integration"]["stage"] == expected
+    assert any(w[0] == "AUTO" for w in client.writes) == (name == "offline")
+
+
+@pytest.mark.parametrize("name", [None, "", " ", 7, False])
+def test_build_check_name_must_be_nonempty(delivery, name):
+    config, _, _, _ = delivery
+    config["integration"]["checks_name"] = name
+    with pytest.raises(ValueError, match="Checks name"):
+        integration.options(config)
+
+
+def auto_merge_transport(result):
+    import io
+    from types import SimpleNamespace
+    core = runner.lifecycle_api()
+
+    class Base:
+        def __init__(self, cfg):
+            self.token = "synthetic"
+            self.opener = SimpleNamespace(
+                open=lambda *args, **kwargs: io.BytesIO(json.dumps(result).encode()))
+
+        def ensure_actor(self):
+            pass
+
+    return integration.client_for(SimpleNamespace(
+        GitHub=Base, Unavailable=core.Unavailable, Uncertain=core.Uncertain), {})
+
+
+@pytest.mark.parametrize("mode", ["disabled", "rejected"])
+def test_auto_merge_unavailable_needs_owner_once(delivery, monkeypatch, mode):
+    _, path, job, client = delivery
+    if mode == "disabled":
+        client.allow_auto_merge = False
+        monkeypatch.setattr(client, "enable_auto_merge", lambda pr: pytest.fail("disabled"))
+    else:
+        transport = auto_merge_transport({"errors": [{
+            "type": "UNPROCESSABLE", "message": "Auto merge is not allowed for this repository"}]})
+        monkeypatch.setattr(client, "enable_auto_merge", transport.enable_auto_merge)
+    advance(delivery)
+    assert job["status"] == "needs_owner"
+    assert job["integration"]["stage"] == "owner"
+    assert job["blocked_reason"]["reason_code"] == "owner_merge_required"
+    assert "intent" not in job["integration"]
+    assert not any(w[0] in {"PUT", "DISABLE", "AUTO"} for w in client.writes)
+    notices = [w for w in client.writes if w[1] == "/issues/1/comments"
+               and "needs your merge" in w[2]["body"]]
+    assert len(notices) == 1
+    assert "https://github.com/example/kit/pull/9" in notices[0][2]["body"]
+    writes = deepcopy(client.writes)
+    # Exercise recovery from persisted state as well as repeated polling.
+    restored = runner.read(path)
+    integration.advance(runner.self_module(), delivery[0], path, restored, client)
+    advance(delivery)
+    assert client.writes == writes
+
+
+@pytest.mark.parametrize("message", ["Permission denied", "Other validation failure",
+                                     "Auto merge is not enabled for this pull request"])
+def test_other_auto_merge_rejections_keep_retryable_reason(delivery, monkeypatch, message):
+    _, _, job, client = delivery
+    transport = auto_merge_transport({"errors": [{"type": "UNPROCESSABLE", "message": message}]})
+    monkeypatch.setattr(client, "enable_auto_merge", transport.enable_auto_merge)
+    advance(delivery)
+    assert job["status"] == "blocked"
+    assert job["blocked_reason"]["reason_code"] == "publication_failed"
+    assert job["integration"]["reason"] != "owner_merge_required"
+
+
+def test_category_normalizes_trusted_base_config(delivery, monkeypatch):
+    _, _, job, client = delivery
+    client.check_state = "pending"
+    advance(delivery)
+    client.minimum = "domain-critical"
+    client.pr["body"] = client.pr["body"].replace("Tier: standard", "Tier: domain-critical") + (
+        "\n## Numeric verification\nHand-worked: synthetic.\n"
+        "Point-in-time: synthetic.\nMissing data: synthetic.\n")
+    original = client.request
+    reads = []
+
+    def request(method, path, data=None):
+        result = original(method, path, data)
+        if path.startswith("/contents/"):
+            reads.append(path)
+            rules = json.loads(base64.b64decode(result["content"]))
+            rules.pop("domain_evidence", None)
+            result["content"] = base64.b64encode(json.dumps(rules).encode()).decode()
+        return result
+
+    monkeypatch.setattr(client, "request", request)
+    errors, minimum = integration.category(
+        client, {"repository": "example/kit"}, client.pr, integration.load_gate())
+    assert errors == [] and minimum == "domain-critical"
+    assert reads == ["/contents/.github/review-gate.json?ref=" + job["base_commit"]]
