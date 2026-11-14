@@ -325,6 +325,7 @@ def public_record(
     continuation=False,
     stop_save_failed=False,
     conflict_files=None,
+    stop_details=None,
 ):
     if (
         type(issue) is not int
@@ -441,11 +442,17 @@ def public_record(
             raise ValueError("Invalid conflict file names")
         record["conflict_files"] = conflict_files
         record["key"] = key([record["key"], conflict_files])
+    if stop_details is not None:
+        if target not in {"blocked", "needs-owner", "needs-primary"}:
+            raise ValueError("Stop details require a stopped task")
+        record["stop_details"] = public_stop_details(cfg, stop_details)
+        record["key"] = key([record["key"], record["stop_details"]])
     return record
 
 
-# Fixed public prose only. Never render worker summaries, errors, logs or argv.
+# Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
     "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
     "continuation_commit_unrecorded": "The named commit is not verified saved work from a permitted stop on this issue. Owner: use the commit from a valid continuation comment, or remove the section and re-approve to restart fresh.",
@@ -503,6 +510,89 @@ for _check, _label in {
         )
 
 
+def public_quote(cfg, text, limit):
+    """Sanitize before truncating; never trust exemptions in agent-supplied prose."""
+    spec = importlib.util.spec_from_file_location(
+        "_agentic_private_content", Path(__file__).resolve().parents[1] / "scripts/check_private_content.py")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    text = text.replace(check.ALLOW_MARKER, "[removed: exemption]")
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "[removed: control character]", text)
+    for name, pattern in check.CHECKS:
+        if name == "home-directory path":
+            # Remove the rest of the path too, not just the home directory.
+            pattern = re.compile(pattern.pattern + r"[^\s\"'<>]*")
+        elif name == "private key":
+            # The scanner detects the header, but the whole key is private.
+            # An incomplete block consumes the remaining text to fail closed.
+            pattern = re.compile(
+                pattern.pattern + r".*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
+        text = pattern.sub("[removed: local path]" if name == "home-directory path"
+                           else "[removed: " + name + "]", text)
+    text = re.sub(r"(?<![\w])(?:/(?:[^\s/]+/)*[^\s<>\"']+|[A-Za-z]:\\[^\s]+|~/[^\s]+)",
+                  "[removed: local path]", text)
+    parts = re.split(r"(\[removed: [^\]\n]+\])", text)
+    identities = "|".join(re.escape(name) for name in sorted(cfg["identity_roles"], key=len, reverse=True))
+    if identities:
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(identities, "[removed: account name]", parts[i], flags=re.I)
+    text = "".join(parts)
+    text = re.sub(r"(?im)^.*(?:provider response|traceback|stdout|stderr|prompt text|private log).*$",
+                  "[removed: log or prompt text]", text)
+    # The scanner is the final authority, including any future added checks.
+    flagged = {number: name for number, name in check.scan_text(text)}
+    text = "\n".join("[removed: " + flagged[n] + "]" if n in flagged else line
+                     for n, line in enumerate(text.split("\n"), 1))
+    # Neutralize HTML, including lifecycle record delimiters, idempotently.
+    text = text.replace("<", "[less-than]").replace(">", "[greater-than]")
+    marker = " [truncated]"
+    return text if len(text) <= limit else text[:limit - len(marker)] + marker
+
+
+def public_stop_details(cfg, details):
+    if (not isinstance(details, dict)
+            or "summary" in details and not isinstance(details["summary"], str)
+            or type(details.get("more", 0)) is not int or details.get("more", 0) < 0):
+        raise ValueError("Invalid public stop details")
+    if "findings" in details and (
+            not isinstance(details["findings"], list) or any(
+                not isinstance(f, dict) or not isinstance(f.get("detail"), str)
+                or f.get("severity") not in {"P0", "P1", "P2"}
+                or "criterion" in f and not isinstance(f["criterion"], str)
+                for f in details["findings"])):
+        raise ValueError("Invalid public findings")
+    if "refusal" in details:
+        refusal = details["refusal"]
+        if (not isinstance(refusal, dict) or not isinstance(refusal.get("reason"), str)
+                or not isinstance(refusal.get("paths"), list)
+                or type(refusal.get("more", 0)) is not int or refusal.get("more", 0) < 0
+                or any(not isinstance(p, str) for p in refusal["paths"])):
+            raise ValueError("Invalid public refusal")
+    result = {}
+    if "summary" in details:
+        result["summary"] = public_quote(cfg, details["summary"], 1500)
+    if "findings" in details:
+        result["findings"] = [dict(
+            severity=f["severity"] if f["severity"] in {"P0", "P1", "P2"} else "unspecified",
+            criterion=public_quote(cfg, f.get("criterion") or ", ".join(
+                dict.fromkeys(re.findall(r"\bAC-[0-9]+\b", f["detail"])))
+                or "Criterion not supplied", 100),
+            detail=public_quote(cfg, f["detail"], 600)) for f in details["findings"][:10]]
+        result["more"] = details.get("more", 0) + max(0, len(details["findings"]) - 10)
+    if "refusal" in details:
+        refusal = details["refusal"]
+        paths, remaining = [], 6000
+        for name in refusal["paths"]:
+            if remaining < 20:
+                break
+            name = public_quote(cfg, name, min(600, remaining))
+            paths.append(name)
+            remaining -= len(name) + 4
+        result["refusal"] = dict(reason=public_quote(cfg, refusal["reason"], 100), paths=paths,
+                                 more=refusal.get("more", 0) + len(refusal["paths"]) - len(paths))
+    return result
+
+
 def safe_question(cfg, question):
     """Only an explicitly supplied public question may leave the builder result.
 
@@ -519,6 +609,8 @@ def safe_question(cfg, question):
     if re.search(r"(?i)(?:token|password|secret|api.key|account|login)\s*[:=]|\b(?:tokens?|passwords?|secrets?|api[ ._-]?keys?|accounts?|logins?|credentials?)\b|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-|AKIA[A-Z0-9]{16}|Bearer\s)", question):
         return False
     if re.search(r"(?im)\b(?:provider response|traceback|stdout|stderr|private key)\b", question):
+        return False
+    if public_quote(cfg, question, 2000) != question:
         return False
     if any(name.lower() in question.lower() for name in cfg["identity_roles"]):
         return False
@@ -549,6 +641,21 @@ def record_body(record):
             explanation += f"\nFailing tests: {failures['count']}. First failures: "
             explanation += ", ".join(failures["names"]) or "names unavailable"
             explanation += ". Owner: arrange a fix, then re-approve.\n"
+    details = record.get("stop_details", {})
+    if "summary" in details:
+        explanation += "\nBuilder stop summary (quoted):\n" + "\n".join(
+            "> " + line for line in details["summary"].split("\n")) + "\n"
+    for finding in details.get("findings", []):
+        explanation += "\nOpen finding: " + finding["severity"] + " — " + finding["criterion"] + "\n"
+        explanation += "\n".join("> " + line for line in finding["detail"].split("\n")) + "\n"
+    if details.get("more"):
+        explanation += f"\nand {details['more']} more\n"
+    if "refusal" in details:
+        explanation += "\nCommit refusal: " + details["refusal"]["reason"] + "\nRefused repository-relative paths:\n"
+        explanation += "\n".join("- " + json.dumps(name, ensure_ascii=False)
+                                 for name in details["refusal"]["paths"]) + "\n"
+        if details["refusal"].get("more"):
+            explanation += f"and {details['refusal']['more']} more refused paths [truncated]\n"
     tail = ""
     if record.get("conflict_files"):
         explanation += "\nConflicting files (repository-relative):\n" + "\n".join(
@@ -561,10 +668,10 @@ def record_body(record):
                 + "\nPaste this into the story and re-approve to continue from this work once #110 is in place; "
                   "without it, re-approval starts fresh.")
     return (
-        "Task lifecycle record (metadata only; no approval implied).\n"
+        "Task lifecycle record (public details; no approval implied).\n"
         + explanation
         + PREFIX
-        + json.dumps(record, sort_keys=True)
+        + json.dumps(record, sort_keys=True, ensure_ascii=False)
         + SUFFIX
         + tail
     )
@@ -605,6 +712,7 @@ def records(cfg, comments, expected_issue=None):
                 continuation=item.get("continuation", False),
                 stop_save_failed=item.get("stop_save_failed", False),
                 conflict_files=item.get("conflict_files"),
+                stop_details=item.get("stop_details"),
             )
             if body.split(SUFFIX, 1)[1] != record_body(expected).split(SUFFIX, 1)[1]:
                 continue
@@ -1241,6 +1349,7 @@ def job_records(cfg, job):
             reason = "execution_failed"
     question = None
     failures = None
+    details = None
     if target in {"blocked", "needs-owner", "needs-primary"}:
         worker = job.get("worker", {})
         supplied = worker.get("owner_question")
@@ -1249,6 +1358,14 @@ def job_records(cfg, job):
                 question, reason = supplied, "owner_question"
             else:
                 reason = "question_withheld"
+        details = {}
+        if worker.get("status") == "blocked" and isinstance(worker.get("summary"), str):
+            details["summary"] = worker["summary"]
+        if review.get("findings"):
+            details["findings"] = review["findings"]
+        if job.get("commit_refusals"):
+            details["refusal"] = job["commit_refusals"][-1]
+            reason = "commit_refused"
         failures = safe_failures(worker.get("failed_tests"))
         results = (job.get("verification_runs") or [{}])[-1].get("results", [])
         failed = [r for r in results if r.get("status") == "failed"]
@@ -1273,6 +1390,7 @@ def job_records(cfg, job):
             pr=integration.get("pr") if reason == "owner_merge_required" else None,
             owner_question=question,
             failed_tests=failures,
+            stop_details=details,
             continuation=job.get("continuation", False),
             stop_save_failed=job.get("stop_save_failed", False),
         )

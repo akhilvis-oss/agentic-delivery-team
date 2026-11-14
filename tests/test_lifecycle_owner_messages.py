@@ -670,3 +670,157 @@ def test_next_builder_receives_owner_decisions_and_instruction_to_read_them(setu
     prompt = fixtures.runner.prompt_for(cfg, job, "worker")
     assert decision in prompt
     assert "Read the story's Owner decisions section before building" in prompt
+
+
+def test_non_question_stop_posts_builder_summary_and_roundtrips(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-progress")
+    summary = "I tried the build. A required compiler was unavailable. I need the operator to restore it."
+    job = stopped_job(summary=summary)
+    core.sync_job(cfg["config_path"], job, hub.client())
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    assert "> " + summary in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["summary"] == summary
+
+
+@pytest.mark.parametrize("status", ["needs_primary_review", "needs_owner", "blocked"])
+def test_post_review_stop_posts_all_open_findings(tmp_path, status):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    job = stopped_job()
+    job.update(status=status, review=dict(status="needs_changes", findings=[
+        dict(severity="P1", path="example.py", criterion="AC-1", detail="The stop summary is missing."),
+        dict(severity="P2", path="example.py", detail="AC-2: The finding omits its criterion."),
+    ]))
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    assert "Open finding: P1 — AC-1\n> The stop summary is missing." in comment["body"]
+    assert "Open finding: P2 — AC-2\n> AC-2: The finding omits its criterion." in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert len(record["stop_details"]["findings"]) == 2
+
+
+def test_findings_limit_is_visible_and_does_not_include_old_review(tmp_path):
+    cfg = policy(tmp_path)
+    job = stopped_job()
+    job.update(status="needs_primary_review", review=dict(status="needs_changes", findings=[
+        dict(severity="P1", criterion="AC-2", detail=f"Open defect {i}") for i in range(13)]),
+        review_history=[dict(result=dict(findings=[dict(severity="P0", detail="Resolved defect")]))])
+    record, = core.job_records(cfg, job)
+    body = core.record_body(record)
+    assert body.count("Open finding:") == 10 and "and 3 more" in body
+    assert "Open defect 10" not in body and "Resolved defect" not in body
+
+
+def test_commit_refusal_posts_reason_and_relative_path(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-progress")
+    job = stopped_job()
+    job["commit_refusals"] = [dict(reason="denied_path", paths=[".github/workflows/example.yml"])]
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    assert "denied_path" in comment["body"] and ".github/workflows/example.yml" in comment["body"]
+    assert "owner-delivered PR" in comment["body"] and "execution_failed" not in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert record["reason"] == "commit_refused"
+
+
+@pytest.mark.parametrize("private", [
+    "/" + "Users/alice/project/file.py", "/private/synthetic/file.py",
+    "sk-" + "x" * 25, "token=" + "x" * 24,
+    "/" + "home/alice/project " + "private-content: " + "allow",
+    "owner-fixture", "<!-- agentic-lifecycle-v1",
+])
+def test_private_stop_details_are_replaced_and_remaining_prose_posts(tmp_path, private):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-progress")
+    job = stopped_job(summary=f"Tried {private}. Need a compiler.")
+    job["review"] = dict(findings=[dict(severity="P1", criterion="AC-1", detail=job["worker"]["summary"])])
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    prose = comment["body"].split(core.PREFIX)[0]
+    assert private not in prose and "Need a compiler." in prose
+    assert comment["body"].count(core.PREFIX) == 1
+    assert "[removed:" in comment["body"] or "[less-than]" in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["summary"] in comment["body"]
+
+
+@pytest.mark.parametrize("key_type", ["", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "])
+@pytest.mark.parametrize("terminated", [True, False])
+def test_private_key_blocks_are_removed_from_posted_summaries_and_findings(
+        tmp_path, key_type, terminated):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    header = "-----BEGIN " + key_type + "PRIVATE KEY" + "-----"
+    footer = "-----END " + key_type + "PRIVATE KEY" + "-----"
+    # Synthetic payload longer than either quote limit verifies redaction first.
+    payload = "synthetic-key-payload\n" * 100
+    text = "I tried the check.\n" + header + "\n" + payload
+    if terminated:
+        text += footer + "\nI need the operator to restore the compiler."
+    else:
+        text += "Unterminated material must also be withheld."
+    expected = "I tried the check.\n[removed: private key]"
+    if terminated:
+        expected += "\nI need the operator to restore the compiler."
+    job = stopped_job(summary=text)
+    job.update(status="needs_primary_review", review=dict(status="needs_changes", findings=[
+        dict(severity="P1", criterion="AC-4", detail=text)]))
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["summary"] == expected
+    assert record["stop_details"]["findings"][0]["detail"] == expected
+    assert "> " + expected.replace("\n", "\n> ") in comment["body"]
+    for private in (header, footer, "synthetic-key-payload", "Unterminated material"):
+        assert private not in comment["body"]
+
+
+def test_overlong_summary_and_finding_are_cut_with_visible_markers(tmp_path):
+    cfg = policy(tmp_path)
+    job = stopped_job(summary="s" * 1600)
+    job["review"] = dict(findings=[dict(severity="P1", criterion="AC-2", detail="d" * 700)])
+    record, = core.job_records(cfg, job)
+    details = record["stop_details"]
+    assert len(details["summary"]) == 1500 and details["summary"].endswith(" [truncated]")
+    assert len(details["findings"][0]["detail"]) == 600
+    assert details["findings"][0]["detail"].endswith(" [truncated]")
+    assert len(core.record_body(record)) < 65536
+
+
+def test_fixed_notes_declare_public_summary_and_finding_descriptions():
+    for role in ("worker", "reviewer"):
+        note = fixtures.runner.LIFECYCLE_NOTES[role]
+        assert "public" in note
+        for forbidden in ("paths", "account names", "secrets", "prompt text", "log excerpts"):
+            assert forbidden in note
+    review = fixtures.result("needs_changes", "reviewer")
+    review["findings"][0]["criterion"] = "AC-2"
+    fixtures.runner.validate_result(review, "reviewer")
+    assert "criterion" in fixtures.runner.schema("reviewer")["properties"]["findings"]["items"]["properties"]
+
+
+
+def test_maximum_public_stop_stays_bounded_and_refusal_overflow_is_visible(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    job = stopped_job(summary="😀\n" * 1000)
+    job["review"] = dict(findings=[dict(severity="P1", criterion="AC-2", detail="😀\n" * 400)
+                                   for _ in range(11)])
+    job["commit_refusals"] = [dict(reason="file_count_limit", paths=[
+        f"docs/{i}/" + "x" * 500 for i in range(100)])]
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    assert len(comment["body"].encode()) < 65536
+    assert "more refused paths [truncated]" in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["more"] == 1

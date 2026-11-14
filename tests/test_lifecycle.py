@@ -664,7 +664,7 @@ def test_runner_phases_pushback_and_minor_followup_privacy(tmp_path, monkeypatch
         value["findings"][0].update(
             severity="P1" if job["round"] == 1 else "P2",
             path="/workspace/private.bin",
-            detail="PRIVATE-AGENT-OUTPUT",
+            detail="AC-1: The implementation still needs correction.",
         )
         return value
 
@@ -675,7 +675,8 @@ def test_runner_phases_pushback_and_minor_followup_privacy(tmp_path, monkeypatch
     assert len(job["review_history"]) == 2
     public = json.dumps(h.comments_by_issue) + json.dumps(h.issues)
     assert (
-        "PRIVATE-AGENT-OUTPUT" not in public and "/workspace/private.bin" not in public
+        "AC-1: The implementation still needs correction." in public
+        and "/workspace/private.bin" not in public
     )
     assert any("Minor follow-up" in i.get("title", "") for i in h.issues.values())
     records = core.records(cfg, h.comments_by_issue[1], 1)
@@ -769,7 +770,7 @@ def test_worker_check_stop_is_immediate_public_and_not_replayed(
         fixtures.deliver(config)
         value = fixtures.result("blocked")
         value.update(blocked_check="story_tests", blocked_cause=cause,
-                     summary="MISLEADING-CAUSE /private/secret/tool LOG-SECRET")
+                     summary="I tried the checks using /private/secret/tool. I need the operator to resolve the check.")
         return value
 
     monkeypatch.setattr(runner, "execute", execute)
@@ -790,7 +791,7 @@ def test_worker_check_stop_is_immediate_public_and_not_replayed(
         assert "still failing" not in body
     else:
         assert "couldn't run" not in body
-    assert "MISLEADING-CAUSE" not in body
+    assert "I tried the checks using [removed: local path] I need the operator to resolve the check." in body
     assert "owner:" in body and "authorize a new task" in body
     assert "/private/secret" not in body and "LOG-SECRET" not in body
     before = list(h.comments_by_issue[1])
@@ -1694,7 +1695,9 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
     ref = "refs/agentic/continue/" + job["id"]
     for comment in h.comments_by_issue[1]:
         assert str(tmp_path) not in comment["body"]
-        assert "credentials.txt" not in comment["body"]
+        if "credentials.txt" in comment["body"]:
+            assert delivery == "refused" or delivery.endswith("-refused")
+            assert "denied_path" in comment["body"] and "owner-delivered PR" in comment["body"]
     if delivery in {"saved", "review-blocked", "runner-blocked"} or delivery.endswith("-saved"):
         head = job["head_commit"]
         assert len(head) == 40 and head != job["base_commit"]
@@ -1790,7 +1793,11 @@ def test_stop_recovers_durable_boundaries_without_worker_replay(tmp_path, monkey
     record, = [r for r in core.records(cfg, h.comments_by_issue[1], 1) if r["to"] == "needs-owner"]
     body = next(c["body"] for c in h.comments_by_issue[1] if record["key"] in c["body"])
     assert str(tmp_path) not in json.dumps(h.comments_by_issue)
-    assert "credentials.txt" not in json.dumps(h.comments_by_issue)
+    if boundary == "refused":
+        assert "credentials.txt" in body and "denied_path" in body
+        assert "owner-delivered PR" in body
+    else:
+        assert "credentials.txt" not in json.dumps(h.comments_by_issue)
     if boundary in {"refused", "prepared"}:
         assert job["stop_save_failed"]
         assert "couldn't be saved" in body
