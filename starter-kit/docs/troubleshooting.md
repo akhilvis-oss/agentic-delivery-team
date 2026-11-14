@@ -248,3 +248,36 @@ authorizing a new task ID. Never reset the blocked job to queued or replay it.
 
 ### Too many emails from bots
 **Owner.** In GitHub **Settings → Notifications**, send notifications to a separate address, or filter on the mailing-list header for the repository. Everything that needs the owner also appears in the stand-up.
+
+### A lifecycle stop needs an explanation
+Read the issue's stop comment. Builder summaries and open review findings are
+public quotes, checked for private content before posting; raw logs and receipts
+stay private. Builders must explain what they tried, what failed and what they
+need without paths, account names, secrets, prompt text or log excerpts. Reviewers
+follow the same rules and identify the related acceptance criterion. Older
+reviewers without a criterion receive “Criterion not supplied” unless their
+finding already names an `AC-N`.
+
+Examples of the public details and next actions:
+
+- Non-question builder stop: **Builder stop summary (quoted):**
+  > I tried the build. A required compiler was unavailable. I need the operator to restore it.
+
+  Restore the prerequisite, then re-approve.
+- Review stop, including `needs-primary`: **Open finding: P1 — AC-2**
+  > The stop comment omits the reviewer's description.
+
+  Arrange correction of the listed findings before re-approving.
+- Thirteen open findings: the first ten appear, followed by **and 3 more**.
+  Arrange further correction; only findings from the latest review are open.
+- Refused commit: **Commit refusal: denied_path**, with the refused
+  repository-relative path, for example `.github/workflows/example.yml`.
+  This kind of change needs an **owner-delivered PR**; re-approval alone cannot
+  authorize a refused path. Extremely large refusal lists use a shared size
+  budget and a visible truncation marker and remaining-path count.
+- Private content: a summary becomes **I tried [removed: local path]. Need a compiler.**
+  The visible placeholder replaces flagged content; the remaining explanation
+  still appears. Do not paste private material back into the issue.
+- Over-long text: a summary ends with **[truncated]** within 1,500 characters;
+  each finding description ends with the same marker within 600 characters.
+  Use the visible explanation and next step; never publish the raw receipt.

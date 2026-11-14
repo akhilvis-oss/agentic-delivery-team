@@ -700,8 +700,9 @@ def schema(role, lifecycle=False, pool=False):
     if role == "reviewer":
         finding = {key: {"type": "string"} for key in ("severity", "path", "detail")}
         finding["severity"]["enum"] = ["P0", "P1", "P2"]
+        finding["criterion"] = {"type": "string"}
         fields["findings"] = {"type": "array", "items": {"type": "object", "properties": finding,
-                              "required": list(finding), "additionalProperties": False}}
+                              "required": ["severity", "path", "detail"], "additionalProperties": False}}
     if role == "worker":
         fields["owner_question"] = {"anyOf": [{"type": "null"}, {"type": "string"}]}
         fields["failed_tests"] = {"anyOf": [{"type": "null"}, {
@@ -775,7 +776,8 @@ def validate_result(result, role):
         if not isinstance(result["findings"], list):
             raise ValueError("Invalid findings")
         for finding in result["findings"]:
-            if (not isinstance(finding, dict) or set(finding) != {"severity", "path", "detail"}
+            if (not isinstance(finding, dict) or (set(finding) - {"severity", "path", "detail", "criterion"}
+                                                       or not {"severity", "path", "detail"} <= set(finding))
                     or any(not isinstance(v, str) for v in finding.values())
                     or finding["severity"] not in {"P0", "P1", "P2"}):
                 raise ValueError("Invalid finding")
@@ -875,6 +877,9 @@ LIFECYCLE_NOTES = {
         "must-ask item or owner question, set status to blocked and put the exact question "
         "in owner_question (null otherwise). This field is intended for the public issue: "
         "use plain language with no paths, account names, logs, tokens or provider replies. "
+        "When stopping, summary must explain what you tried, what failed and what you need. "
+        "The stop summary is public (at most 1,500 characters): do not include paths, "
+        "account names, secrets, prompt text or log excerpts. "
         "For failing tests, set failed_tests to a count and the first few bare test function "
         "names, without paths or parameter values (null otherwise)."
     ),
@@ -885,7 +890,10 @@ LIFECYCLE_NOTES = {
         "Instructions to leave changes uncommitted apply only to the worker handoff. "
         "In review-only jobs, review the supplied existing commits; no worker phase runs. "
         "Judge the work in the exact commit range against the assignment. "
-        "Do not modify files or history."
+        "Do not modify files or history. Finding descriptions are public (at most 600 "
+        "characters each): do not include paths, account names, secrets, prompt text or "
+        "log excerpts. Set criterion to the related acceptance criterion (for example AC-1) "
+        "for every finding; detail explains the finding."
     ),
 }
 
