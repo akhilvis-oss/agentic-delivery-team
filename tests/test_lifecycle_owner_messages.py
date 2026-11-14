@@ -752,6 +752,38 @@ def test_private_stop_details_are_replaced_and_remaining_prose_posts(tmp_path, p
     assert record["stop_details"]["summary"] in comment["body"]
 
 
+@pytest.mark.parametrize("key_type", ["", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "])
+@pytest.mark.parametrize("terminated", [True, False])
+def test_private_key_blocks_are_removed_from_posted_summaries_and_findings(
+        tmp_path, key_type, terminated):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    header = "-----BEGIN " + key_type + "PRIVATE KEY" + "-----"
+    footer = "-----END " + key_type + "PRIVATE KEY" + "-----"
+    # Synthetic payload longer than either quote limit verifies redaction first.
+    payload = "synthetic-key-payload\n" * 100
+    text = "I tried the check.\n" + header + "\n" + payload
+    if terminated:
+        text += footer + "\nI need the operator to restore the compiler."
+    else:
+        text += "Unterminated material must also be withheld."
+    expected = "I tried the check.\n[removed: private key]"
+    if terminated:
+        expected += "\nI need the operator to restore the compiler."
+    job = stopped_job(summary=text)
+    job.update(status="needs_primary_review", review=dict(status="needs_changes", findings=[
+        dict(severity="P1", criterion="AC-4", detail=text)]))
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    record, = core.records(cfg, [comment], 1)
+    assert record["stop_details"]["summary"] == expected
+    assert record["stop_details"]["findings"][0]["detail"] == expected
+    assert "> " + expected.replace("\n", "\n> ") in comment["body"]
+    for private in (header, footer, "synthetic-key-payload", "Unterminated material"):
+        assert private not in comment["body"]
+
+
 def test_overlong_summary_and_finding_are_cut_with_visible_markers(tmp_path):
     cfg = policy(tmp_path)
     job = stopped_job(summary="s" * 1600)

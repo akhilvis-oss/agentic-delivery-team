@@ -522,6 +522,11 @@ def public_quote(cfg, text, limit):
         if name == "home-directory path":
             # Remove the rest of the path too, not just the home directory.
             pattern = re.compile(pattern.pattern + r"[^\s\"'<>]*")
+        elif name == "private key":
+            # The scanner detects the header, but the whole key is private.
+            # An incomplete block consumes the remaining text to fail closed.
+            pattern = re.compile(
+                pattern.pattern + r".*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
         text = pattern.sub("[removed: local path]" if name == "home-directory path"
                            else "[removed: " + name + "]", text)
     text = re.sub(r"(?<![\w])(?:/(?:[^\s/]+/)*[^\s<>\"']+|[A-Za-z]:\\[^\s]+|~/[^\s]+)",
