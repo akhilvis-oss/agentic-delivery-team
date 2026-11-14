@@ -500,10 +500,11 @@ def backfill_owner_merge(cfg, client, issue):
 
 
 def publish_poll(cfg, client, issues, at):
-    """One discoverable, pinned comment; durable intents prevent duplicate POSTs.
+    """Publish a discoverable, pinned comment on a best-effort basis.
 
     This runs before builder execution so long builds are visible from GitHub.
-    PATCH and pin are idempotent; an ambiguous create must reconcile by marker.
+    PATCH and pin are idempotent. After a complete listing without a marker,
+    retry even an ambiguous create: duplicate status artifacts are harmless.
     """
     root = Path(cfg["state_dir"])
     path = root / "public-heartbeat.json"
@@ -517,21 +518,11 @@ def publish_poll(cfg, client, issues, at):
     if targets:
         number = max(targets, key=lambda i: i["number"])["number"]
     else:
-        if journal.get("issue_attempted"):
-            raise core.Unavailable("Service status issue needs reconciliation")
-        journal["issue_attempted"] = True
-        core.save(path, journal)
-        try:
-            issue = client.request("POST", "/issues", {
-                "title": "Lifecycle service status",
-                "body": "The pinned comment shows the service's last poll. "
-                        "If it stops updating, ask the operator to restore the service.\n" + marker,
-            })
-        except core.Unavailable as exc:
-            if not isinstance(exc, core.Uncertain):
-                journal["issue_attempted"] = False
-                core.save(path, journal)
-            raise
+        issue = client.request("POST", "/issues", {
+            "title": "Lifecycle service status",
+            "body": "The pinned comment shows the service's last poll. "
+                    "If it stops updating, ask the operator to restore the service.\n" + marker,
+        })
         number = issue["number"]
     comment_marker = "<!-- agentic-last-poll-v1 -->"
     comments = [c for c in client.comments(number)
@@ -542,20 +533,12 @@ def publish_poll(cfg, client, issues, at):
         comment = min(comments, key=lambda c: c["id"])
         client.request("PATCH", f"/issues/comments/{comment['id']}", {"body": body})
     else:
-        if journal.get("comment_attempted_for") == number:
-            raise core.Unavailable("Service status comment needs reconciliation")
-        journal["comment_attempted_for"] = number
-        core.save(path, journal)
-        try:
-            comment = client.request("POST", f"/issues/{number}/comments", {"body": body})
-        except core.Unavailable as exc:
-            if not isinstance(exc, core.Uncertain):
-                journal.pop("comment_attempted_for", None)
-                core.save(path, journal)
-            raise
+        comment = client.request("POST", f"/issues/{number}/comments", {"body": body})
     if not comment.get("pin"):
         client.request("PUT", f"/issues/comments/{comment['id']}/pin")
     journal.update(issue=number, comment=comment["id"], last_poll=at)
+    journal.pop("issue_attempted", None)
+    journal.pop("comment_attempted_for", None)
     core.save(path, journal)
 
 
@@ -626,7 +609,14 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
         flush_outbox(cfg, client)
         all_issues = client.pages("/issues?state=all")
-        publish_poll(cfg, client, all_issues, clock())
+        heartbeat_failure = root / "public-heartbeat-failure.json"
+        try:
+            publish_poll(cfg, client, all_issues, clock())
+        except Exception as exc:
+            # Status publication is advisory; no message or agent text is saved.
+            core.save(heartbeat_failure, {"exception_class": type(exc).__name__})
+        else:
+            heartbeat_failure.unlink(missing_ok=True)
         issues = [
             i
             for i in all_issues
@@ -1223,7 +1213,8 @@ def run_loop(cfg, client, action):
                 standup.run_once(
                     digest_cfg, core.GitHub(digest_cfg["lifecycle"], "product")
                 )
-            if serving and heartbeat(cfg) != previous_poll:
+            if (serving and heartbeat(cfg) != previous_poll
+                    and not (root / "public-heartbeat-failure.json").exists()):
                 report_recovery(cfg, client, failure, restart)
                 failure = restart = None
                 wait = min(cfg["poll_seconds"], 600)
