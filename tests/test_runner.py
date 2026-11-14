@@ -901,3 +901,29 @@ def test_agent_programs_preflight_before_version_probe(setup, monkeypatch, tmp_p
     monkeypatch.setattr(runner.subprocess, 'run', lambda *a, **kw: pytest.fail('no version probe'))
     with pytest.raises(runner.Blocked, match=key + ' program missing or not executable'):
         REAL_CHECK_CLI(cfg)
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+@pytest.mark.parametrize("lifecycle", [False, True])
+@pytest.mark.parametrize("pool", [False, True])
+def test_every_output_schema_object_obeys_strict_mode(role, lifecycle, pool):
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                assert set(node["required"]) == set(node["properties"])
+                assert node.get("additionalProperties") is False
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    spec = runner.schema(role, lifecycle=lifecycle, pool=pool)
+    walk(spec)
+    if role == "reviewer":
+        assert spec["properties"]["findings"]["items"]["properties"]["criterion"] == {"type": "string"}
+
+
+def test_reviewer_note_explains_empty_criterion():
+    assert ("Set criterion to the AC ID the finding relates to, or an empty string if none."
+            in runner.LIFECYCLE_NOTES["reviewer"])
