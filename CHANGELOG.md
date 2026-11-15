@@ -2,6 +2,11 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## v0.5.6 (2026-11-15): Self-contained hosted lifecycle guard
+- Fixed the hosted guard failing on stop summaries, review findings and builder questions: shared private-content rules now ship inside the lifecycle sparse checkout (#141).
+- Missing rules stop the guard with a plain message before records are checked. The private-content CLI retains its rules, output and exit codes.
+- Added sparse-checkout regression coverage and an upgrade file inventory for adopters. Upgrade the complete lifecycle package and private-content script together; workflow sparse paths stay the same.
+
 ## v0.5.5 (2026-11-15): Readable stops, saved work, a service that stays up
 - **Stops explain themselves** on the issue: reason, next step, the builder's quoted question or stop summary, open review findings, failing test names and refused files, with paths, tokens, account names and @-mentions removed (#96, #105, #131).
 - **Saved work and "Continue from":** stops save the builder's work under a named reference; re-approving with the posted block continues from it, at most twice per story (#106, #110). Automatic continuations are delivered (#116).
