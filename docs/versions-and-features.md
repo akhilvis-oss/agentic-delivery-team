@@ -7,7 +7,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 ```json
 {
   "kit": "agentic-delivery-team",
-  "version": "v0.5.4",
+  "version": "v0.5.6",
   "features": {
     "review_gate": true,
     "product_files": true,
@@ -19,7 +19,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 }
 ```
 
-"Where is this project?" then has a one-line answer, for example: *v0.5.4, everything on except the lifecycle and stand-up.*
+"Where is this project?" then has a one-line answer, for example: *v0.5.6, everything on except the lifecycle and stand-up.*
 
 ## Features
 

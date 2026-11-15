@@ -12,11 +12,24 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# Isolated direct execution omits the script's directory from sys.path.
+# Add only the trusted checkout root, never a configured or working directory.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+try:
+    from lifecycle import private_content as check
+except (ImportError, OSError, SyntaxError):
+    raise SystemExit(
+        "Lifecycle guard unavailable: cannot load lifecycle/private_content.py; "
+        "restore the lifecycle package from the same kit release."
+    ) from None
 
 PREFIX = "<!-- agentic-lifecycle-v1\n"
 SUFFIX = "\n-->"
@@ -520,10 +533,6 @@ def inert_mentions(text):
 
 def public_quote(cfg, text, limit):
     """Sanitize before truncating; never trust exemptions in agent-supplied prose."""
-    spec = importlib.util.spec_from_file_location(
-        "_agentic_private_content", Path(__file__).resolve().parents[1] / "scripts/check_private_content.py")
-    check = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(check)
     text = text.replace(check.ALLOW_MARKER, "[removed: exemption]")
     text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "[removed: control character]", text)
     for name, pattern in check.CHECKS:
