@@ -929,17 +929,53 @@ def auto_merge_transport(result):
         GitHub=Base, Unavailable=core.Unavailable, Uncertain=core.Uncertain), {})
 
 
-@pytest.mark.parametrize("mode", ["disabled", "rejected"])
+@pytest.mark.parametrize("repository", [{}, {"allow_auto_merge": True}])
+def test_auto_merge_enabled_with_unknown_or_allowed_repository_setting(delivery, monkeypatch, repository):
+    _, path, job, client = delivery
+    original = client.request
+
+    def request(method, path, data=None):
+        if method == "GET" and path == "/":
+            return deepcopy(repository)
+        return original(method, path, data)
+
+    monkeypatch.setattr(client, "request", request)
+    advance(delivery)
+    assert job["integration"]["stage"] == "auto_merge_enabled"
+    assert [w for w in client.writes if w[0] == "AUTO"] == [
+        ("AUTO", job["reviewed_head"], None)]
+    assert runner.read(path)["integration"]["stage"] == "auto_merge_enabled"
+    writes = deepcopy(client.writes)
+    integration.advance(runner.self_module(), delivery[0], path, runner.read(path), client)
+    assert client.writes == writes
+
+
+@pytest.mark.parametrize("mode", ["disabled", "rejected", "missing_rejected"])
 def test_auto_merge_unavailable_needs_owner_once(delivery, monkeypatch, mode):
     _, path, job, client = delivery
+    attempts = []
+    if mode == "missing_rejected":
+        original = client.request
+
+        def request(method, path, data=None):
+            if method == "GET" and path == "/":
+                return {}
+            return original(method, path, data)
+
+        monkeypatch.setattr(client, "request", request)
     if mode == "disabled":
         client.allow_auto_merge = False
         monkeypatch.setattr(client, "enable_auto_merge", lambda pr: pytest.fail("disabled"))
     else:
         transport = auto_merge_transport({"errors": [{
             "type": "UNPROCESSABLE", "message": "Auto merge is not allowed for this repository"}]})
-        monkeypatch.setattr(client, "enable_auto_merge", transport.enable_auto_merge)
+        def enable(pr):
+            attempts.append(pr["head"]["sha"])
+            return transport.enable_auto_merge(pr)
+
+        monkeypatch.setattr(client, "enable_auto_merge", enable)
     advance(delivery)
+    assert attempts == ([] if mode == "disabled" else [job["reviewed_head"]])
     assert job["status"] == "needs_owner"
     assert job["integration"]["stage"] == "owner"
     assert job["blocked_reason"]["reason_code"] == "owner_merge_required"
