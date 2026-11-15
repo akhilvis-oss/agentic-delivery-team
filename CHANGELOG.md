@@ -2,6 +2,15 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## v0.5.5 (2026-11-15): Readable stops, saved work, a service that stays up
+- **Stops explain themselves** on the issue: reason, next step, the builder's quoted question or stop summary, open review findings, failing test names and refused files, with paths, tokens, account names and @-mentions removed (#96, #105, #131).
+- **Saved work and "Continue from":** stops save the builder's work under a named reference; re-approving with the posted block continues from it, at most twice per story (#106, #110). Automatic continuations are delivered (#116).
+- **Merges recorded and cleaned up:** an owner merge after "needs your merge" is recorded as `merged`, and worktrees, branches and saved references are removed, including after squash merges (#113, #120). One-click approval always counts (#120).
+- **Service resilience:** temporary GitHub errors are retried with back-off; other errors exit for launchd to restart and are reported; finished stories are never resumed; a rejected record or a broken status comment can't stop work (#114, #122, #124, #131).
+- **Delivery never waits forever:** the review check is found on the pull request head, the build-check name is configurable (`checks_name`), and repositories without auto-merge stop for the owner's merge (#132).
+- **Fixed:** reviews failing under Codex strict mode, now tested for every output format (#129); a crash loop after resuming old jobs (#122, #124); API-limit risks in status and catch-up scans (#119, #124).
+- **Breaking:** both private runner templates (main and continuation) must set `integration` explicitly; `.github/task-lifecycle.json` gains `needs-owner` → `merged` for the workflow and runner roles; `starter-kit/*` is control-critical (#133).
+
 ## v0.5.4 (2026-11-12): Fresh story bases and bounded check corrections
 - Lifecycle dispatch fetches each story's target branch with the Runner App and pins the fetched commit before creating its worktree. Failed fetches wait for retry without falling back to a stale local branch; recovery preserves existing job bases.
 - Workers can correct check failures caused by their own changes within a configured attempt limit (default three). Unavailable tools and unrelated failures still stop immediately; the runner's required checks remain authoritative.

@@ -59,3 +59,12 @@ This level needs separate GitHub identities for the automation, never your own t
 Follow [the lifecycle and digest guide](v04-lifecycle-digest.md). It covers labels, the guard workflow, identities, local polling and limits.
 
 > **Status:** released in [v0.4.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.4.0) after a combined live trial. Bot tokens currently use the macOS Keychain.
+
+## Upgrading
+
+Upgrade every piece together, from one release tag:
+1. Read that release's notes. They list each breaking change and the steps it needs.
+2. Replace the repository files (gate, lifecycle code and workflow, templates you copied) in one pull request and merge it yourself.
+3. Update your private configuration as the notes describe, then re-pin the lifecycle service to the tag.
+
+For example, v0.5.5 requires an explicit `integration` setting in both private runner templates, and a new `needs-owner` → `merged` rule in `.github/task-lifecycle.json`.

@@ -15,9 +15,16 @@ Where the kit is heading. Plans change with feedback; each item links to its iss
 - Fetch each story's target branch before creating its worktree ([#97](https://github.com/akhilvis-oss/agentic-delivery-team/issues/97)), pin the fetched commit and preserve it during recovery; failed fetches wait without a stale local fallback.
 - Bounded worker corrections for check failures caused by the worker's changes, with fixed stop reasons and owner next steps ([#101](https://github.com/akhilvis-oss/agentic-delivery-team/issues/101)). Missing tools and unrelated failures still stop immediately.
 
-## v0.5.5: Parallel stories and readable stand-ups (next)
-- **Lifecycle with the agent pool** ([#76](https://github.com/akhilvis-oss/agentic-delivery-team/issues/76)): approved stories go to free slots and run in parallel when they don't overlap.
-- **Readable stand-ups** ([#68](https://github.com/akhilvis-oss/agentic-delivery-team/issues/68)): ignore pre-lifecycle issues, optional titles, a one-line summary.
+## v0.5.5: Readable stops, saved work, a service that stays up (released)
+[Released v0.5.5](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.5): stops explain themselves on the issue, stopped work is saved and can be continued, merges are recorded and cleaned up, and the service stays up through GitHub errors. See the [changelog](CHANGELOG.md).
+
+## Next: a safety net, then a consolidated lifecycle
+A review on 14 November traced the failures since v0.5.3 to a few design causes. The next steps build on the current code and cut its paths down:
+- **Safety net** ([design note](docs/design/safety-net.md)): recorded GitHub responses as test fixtures, and a live smoke test that runs one tiny story with the real agent on candidate code before it is used.
+- **Consolidated lifecycle:** one way to continue a stopped story, four kinds of stop, a queue with dependencies, a readiness pass after approval, and guards so finished stories never reopen and one story's error can't stop another.
+- **Delivery policy:** tier chosen from the gate's rules or the story ([#115](https://github.com/akhilvis-oss/agentic-delivery-team/issues/115)), per-criterion review evidence, protected tests ([#80](https://github.com/akhilvis-oss/agentic-delivery-team/issues/80)), failed checks back to the builder ([#59](https://github.com/akhilvis-oss/agentic-delivery-team/issues/59)), and a verified direct merge where auto-merge isn't available.
+- **One-command adoption and upgrade** ([#95](https://github.com/akhilvis-oss/agentic-delivery-team/issues/95)), with environment profiles per project ([#99](https://github.com/akhilvis-oss/agentic-delivery-team/issues/99)).
+- Later in this track: parallel stories ([#76](https://github.com/akhilvis-oss/agentic-delivery-team/issues/76)) and readable stand-ups ([#68](https://github.com/akhilvis-oss/agentic-delivery-team/issues/68)).
 
 ## v0.6: Set up and run without touching config
 For owners who only talk to their product agent.
