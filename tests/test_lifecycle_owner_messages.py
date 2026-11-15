@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from lifecycle import core, product, service
-from test_lifecycle import Hub, policy
+from test_lifecycle import Hub, configured_service, policy
 import test_runner as fixtures
 
 setup = fixtures.setup
@@ -61,6 +61,8 @@ def test_builder_question_is_quoted_verbatim_and_survives_retry(tmp_path):
     "Should I reuse API key synthetic-fixture?",
     "Should I use login customer-fixture?",
     "Should I reuse credentials from customer-fixture?",
+    "Ask @" + "ghp_" + "x" * 30 + "?",
+    "Ask @" + "sk-" + "x" * 25 + "?",
 ])
 def test_private_question_is_withheld_in_full(tmp_path, question):
     cfg = policy(tmp_path)
@@ -591,8 +593,9 @@ def test_heartbeat_ambiguous_issue_create_recovers_without_duplicate(tmp_path):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     hub.fail_write = "after"
-    with pytest.raises(core.Uncertain):
-        service.poll(cfg, hub.client(), clock=lambda: 100)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    assert core.read(Path(cfg["state_dir"]) / "public-heartbeat-failure.json") == {
+        "exception_class": "Uncertain"}
     hub.fail_write = None
     service.poll(cfg, hub.client(), clock=lambda: 200)
     assert len(hub.issues) == 1 and len(hub.client().comments(1)) == 1
@@ -610,15 +613,14 @@ def test_heartbeat_comment_create_recovers_without_duplicate(tmp_path, monkeypat
         return request(method, path, data)
 
     monkeypatch.setattr(client, "request", fail_comment)
-    with pytest.raises(core.Unavailable):
-        service.poll(cfg, client, clock=lambda: 100)
+    service.poll(cfg, client, clock=lambda: 100)
     hub.fail_write = None
     monkeypatch.setattr(client, "request", request)
     service.poll(cfg, client, clock=lambda: 200)
     assert len(hub.issues) == 1 and len(client.comments(1)) == 1
 
 
-def test_heartbeat_uncertain_absent_create_is_not_repeated(tmp_path, monkeypatch):
+def test_heartbeat_uncertain_absent_create_is_retried(tmp_path, monkeypatch):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     client = hub.client()
@@ -629,11 +631,9 @@ def test_heartbeat_uncertain_absent_create_is_not_repeated(tmp_path, monkeypatch
         raise core.Uncertain("synthetic lost reply without creation")
 
     monkeypatch.setattr(client, "request", lost)
-    with pytest.raises(core.Uncertain):
-        service.poll(cfg, client, clock=lambda: 100)
-    with pytest.raises(core.Unavailable, match="reconciliation"):
-        service.poll(cfg, client, clock=lambda: 200)
-    assert len(calls) == 1
+    service.poll(cfg, client, clock=lambda: 100)
+    service.poll(cfg, client, clock=lambda: 200)
+    assert len(calls) == 2
 
 
 def test_heartbeat_is_published_before_builder_processing(tmp_path, monkeypatch):
@@ -647,6 +647,123 @@ def test_heartbeat_is_published_before_builder_processing(tmp_path, monkeypatch)
     monkeypatch.setattr(service, "runner_module", after_heartbeat)
     with pytest.raises(RuntimeError, match="builder boundary"):
         service.poll(cfg, hub.client(), clock=lambda: 100)
+
+
+@pytest.mark.parametrize("error", [core.Unavailable, core.Uncertain, RuntimeError])
+def test_any_heartbeat_failure_records_class_and_still_dispatches(tmp_path, monkeypatch, error):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    publish = service.publish_poll
+
+    def fail(*args):
+        raise error("synthetic private detail must not be recorded")
+
+    monkeypatch.setattr(service, "publish_poll", fail)
+    assert service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100) == [
+        "issue-1-event-101"]
+    receipt = Path(cfg["state_dir"]) / "public-heartbeat-failure.json"
+    assert core.read(receipt) == {"exception_class": error.__name__}
+    monkeypatch.setattr(service, "publish_poll", publish)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    assert not receipt.exists()
+    assert core.read(Path(cfg["state_dir"]) / "public-heartbeat.json")["last_poll"] == 200
+
+
+@pytest.mark.parametrize("artifact", ["issue", "comment"])
+def test_deleted_heartbeat_with_legacy_intent_recreates_and_dispatches(
+        tmp_path, monkeypatch, artifact):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    client = hub.client()
+    service.publish_poll(cfg, client, client.pages("/issues?state=all"), 0)
+    path = Path(cfg["state_dir"]) / "public-heartbeat.json"
+    journal = core.read(path)
+    number = journal["issue"]
+    # Reproduce state written by the old service, including its sticky intents.
+    journal.update(issue_attempted=True, comment_attempted_for=number)
+    core.save(path, journal)
+    hub.comments_by_issue[number].clear()
+    if artifact == "issue":
+        del hub.issues[number]
+    assert service.poll(cfg, client, run_jobs=False, clock=lambda: 100) == [
+        "issue-1-event-101"]
+    journal = core.read(path)
+    assert journal["last_poll"] == 100
+    assert client.comments(journal["issue"])[0]["pin"]
+    assert "issue_attempted" not in journal and "comment_attempted_for" not in journal
+
+
+@pytest.mark.parametrize("artifact", ["issue", "comment"])
+def test_ambiguous_absent_heartbeat_recreated_on_next_poll(
+        tmp_path, monkeypatch, artifact):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    client = hub.client()
+    request = client.request
+    failures = []
+
+    def lost(method, path, data=None):
+        target = (path == "/issues" if artifact == "issue" else
+                  path.endswith("/comments") and "agentic-last-poll-v1" in (data or {}).get("body", ""))
+        if method == "POST" and target and not failures:
+            failures.append(True)
+            raise core.Uncertain("synthetic lost create without persistence")
+        return request(method, path, data)
+
+    monkeypatch.setattr(client, "request", lost)
+    assert service.poll(cfg, client, run_jobs=False, clock=lambda: 100) == [
+        "issue-1-event-101"]
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 200)
+    journal = core.read(Path(cfg["state_dir"]) / "public-heartbeat.json")
+    assert journal["last_poll"] == 200
+    assert client.comments(journal["issue"])[0]["pin"]
+
+
+def test_duplicate_heartbeat_comments_update_only_oldest(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    client = hub.client()
+    service.poll(cfg, client, clock=lambda: 100)
+    original = hub.comments_by_issue[1][0]
+    duplicate = copy.deepcopy(original)
+    duplicate["id"] += 10
+    hub.comments_by_issue[1].insert(0, duplicate)
+    before = copy.deepcopy(duplicate)
+    service.poll(cfg, client, clock=lambda: 200)
+    assert duplicate == before
+    assert "00:03:20" in original["body"]
+    assert len(client.comments(1)) == 2
+
+
+@pytest.mark.parametrize("field", ["summary", "finding", "question"])
+@pytest.mark.parametrize("mention", ["@someone", "@org/team"])
+def test_agent_mentions_are_posted_inert(tmp_path, field, mention):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="in-review")
+    text = "Please ask " + mention + " about the check."
+    job = stopped_job(**({"owner_question": text} if field == "question" else {"summary": text}))
+    if field == "finding":
+        job["worker"].pop("summary")
+        job["review"] = dict(findings=[dict(severity="P1", criterion="AC-1", detail=text)])
+    core.sync_job(cfg["config_path"], job, hub.client())
+    comment, = hub.client().comments(1)
+    expected = text.replace("@", "@\u200d")
+    assert "> " + expected in comment["body"]
+    assert mention not in comment["body"]
+    record, = core.records(cfg, [comment], 1)
+    if field == "question":
+        assert record["owner_question"] == expected
+    elif field == "summary":
+        assert record["stop_details"]["summary"] == expected
+    else:
+        assert record["stop_details"]["findings"][0]["detail"] == expected
+
+
+def test_public_quote_mentions_are_idempotent_and_email_keeps_meaning(tmp_path):
+    cfg = policy(tmp_path)
+    text = "Contact person@example.invalid or @someone and @org/team. Also .@other and a@org/team."
+    expected = ("Contact person@example.invalid or @\u200dsomeone and @\u200dorg/team. "
+                "Also .@\u200dother and a@\u200dorg/team.")
+    assert core.public_quote(cfg, text, 2000) == expected
+    assert core.public_quote(cfg, expected, 2000) == expected
 
 
 def test_optional_result_fields_accept_legacy_and_block_commit_on_question():

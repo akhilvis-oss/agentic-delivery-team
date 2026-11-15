@@ -1161,7 +1161,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
             id=1,
             name="review-gate",
             app={"slug": "github-actions"},
-            head_sha=pr["base"]["sha"],
+            head_sha=pr["head"]["sha"],
             details_url="https://github.com/example/project/actions/runs/90/job/91",
             status="completed",
             conclusion="success",
@@ -1177,7 +1177,7 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
                 workflow_id=7,
                 path=".github/workflows/pr-review-gate.yml",
                 event="pull_request",
-                head_sha=pr["base"]["sha"],
+                head_sha=pr["head"]["sha"],
                 pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
             )
         return original(method, path, data)
@@ -1204,7 +1204,7 @@ def gate_evidence(tmp_path):
         id=1,
         name="review-gate",
         app={"slug": "github-actions"},
-        head_sha=pr["base"]["sha"],
+        head_sha=pr["head"]["sha"],
         details_url="https://github.com/example/project/actions/runs/90/job/91",
         status="completed",
         conclusion="success",
@@ -1213,7 +1213,7 @@ def gate_evidence(tmp_path):
         workflow_id=7,
         path=".github/workflows/pr-review-gate.yml",
         event="pull_request_target",
-        head_sha=pr["base"]["sha"],
+        head_sha=pr["head"]["sha"],
         pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
     )
     checks = [check]
@@ -1221,7 +1221,7 @@ def gate_evidence(tmp_path):
 
     def request(method, path, data=None):
         if "/check-runs" in path:
-            assert path == f"/commits/{pr['base']['sha']}/check-runs?filter=all&per_page=100&page=1"
+            assert path == f"/commits/{pr['head']['sha']}/check-runs?filter=all&per_page=100&page=1"
             return {"total_count": len(checks), "check_runs": checks}
         if path == "/actions/workflows/pr-review-gate.yml":
             return {"id": 7, "path": run["path"]}
@@ -1246,7 +1246,7 @@ def test_trusted_gate_binds_workflow_and_exact_head(gate_evidence):
 
 
 @pytest.mark.parametrize("mutation", ["head", "number", "base", "check_sha", "run_sha", "event", "workflow", "app"])
-def test_base_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutation):
+def test_head_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutation):
     cfg, client, pr, check, run, _, _ = gate_evidence
     binding = run["pull_requests"][0]
     binding["base"] = {"sha": pr["base"]["sha"]}
@@ -1255,9 +1255,9 @@ def test_base_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutati
     elif mutation == "number":
         binding["number"] = 8
     elif mutation == "check_sha":
-        check["head_sha"] = pr["head"]["sha"]
+        check["head_sha"] = pr["base"]["sha"]
     elif mutation == "run_sha":
-        run["head_sha"] = pr["head"]["sha"]
+        run["head_sha"] = pr["base"]["sha"]
     elif mutation == "event":
         run["event"] = "pull_request"
     elif mutation == "workflow":
@@ -1273,13 +1273,13 @@ def test_base_gate_still_rejects_unbound_or_untrusted_runs(gate_evidence, mutati
     ("completed", "cancelled", "fail"),
     ("in_progress", None, "pending"),
 ])
-def test_base_gate_selects_latest_matching_pr_run(gate_evidence, status, conclusion, expected):
+def test_head_gate_selects_latest_matching_pr_run(gate_evidence, status, conclusion, expected):
     cfg, client, pr, check, run, checks, runs = gate_evidence
     run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
     checks.append({**check, "id": 2, "status": status, "conclusion": conclusion,
                    "details_url": "https://github.com/example/project/actions/runs/92/job/93"})
     runs["92"] = copy.deepcopy(run)
-    # A newer check on the same base for a different PR must not mask this PR.
+    # A newer check on the same head for a different PR must not mask this PR.
     checks.append({**check, "id": 3,
                    "details_url": "https://github.com/example/project/actions/runs/94/job/95"})
     runs["94"] = copy.deepcopy(run)
@@ -1288,7 +1288,7 @@ def test_base_gate_selects_latest_matching_pr_run(gate_evidence, status, conclus
 
 
 @pytest.mark.parametrize("collection", ["complete", "partial", "duplicate", "drift"])
-def test_base_gate_collection_is_complete_across_pages(gate_evidence, collection):
+def test_head_gate_collection_is_complete_across_pages(gate_evidence, collection):
     cfg, client, pr, check, run, _, _ = gate_evidence
     run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
     original = client.request
@@ -1297,11 +1297,11 @@ def test_base_gate_collection_is_complete_across_pages(gate_evidence, collection
     def request(method, path, data=None):
         if "/check-runs?" not in path:
             return original(method, path, data)
-        assert path.startswith(f"/commits/{pr['base']['sha']}/check-runs?filter=all&")
+        assert path.startswith(f"/commits/{pr['head']['sha']}/check-runs?filter=all&")
         page = int(path.rsplit("=", 1)[-1])
         seen.append(page)
         if page == 1:
-            # Other checks sharing the base precede this PR's gate.
+            # Other checks sharing the head precede this PR's gate.
             return {"total_count": 101, "check_runs": [
                 {"id": n, "name": "unrelated"} for n in range(1, 101)]}
         row = {**check, "id": 1 if collection == "duplicate" else 101}

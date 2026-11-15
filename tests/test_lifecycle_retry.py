@@ -125,6 +125,29 @@ def test_failed_notice_write_keeps_restart_receipt_for_retry(tmp_path, monkeypat
     assert not path.exists()
 
 
+def test_status_failure_without_journal_keeps_serving_and_recovery_receipts(tmp_path, monkeypatch):
+    cfg, client, sleeps, bodies, _ = simulation(tmp_path, monkeypatch, [None, None, None])
+    path = Path(cfg["state_dir"]) / "service-error.json"
+    core.save(path, dict(exception_class="ValueError", function="poll"))
+    publish = service.publish_poll
+    attempts = []
+
+    def fail_status(*args):
+        attempts.append(True)
+        assert path.exists()
+        if len(attempts) < 3:
+            raise core.Uncertain("synthetic unavailable heartbeat")
+        return publish(*args)
+
+    monkeypatch.setattr(service, "publish_poll", fail_status)
+    with pytest.raises(StopLoop):
+        service.run_loop(cfg, client, "serve")
+    assert len(attempts) == 3 and sleeps == [60, 60, 60]
+    assert bodies[:2] == [[], []]
+    assert "Service restarted after ValueError in poll." in bodies[2][0]
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("error", [core.Unavailable, core.Uncertain])
 def test_standup_failure_is_retried(tmp_path, monkeypatch, error):
     cfg, client, sleeps, bodies, _ = simulation(
