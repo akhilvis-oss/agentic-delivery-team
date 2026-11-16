@@ -186,12 +186,15 @@ def request(opener, credential, method, path, data=None):
 
 
 def mint(cfg, role, *, comments_only=False, integration_enabled=False,
-         fetch_enabled=False, at=None, opener=None):
+         fetch_enabled=False, status_only=False, at=None, opener=None):
     """Return a token and expiry; never a printable credential receipt/cache."""
     if type(integration_enabled) is not bool or (integration_enabled and role != "runner"):
         raise AuthenticationError("Invalid integration authentication opt-in")
     if type(fetch_enabled) is not bool or (fetch_enabled and role != "runner"):
         raise AuthenticationError("Invalid fetch authentication opt-in")
+    if (type(status_only) is not bool or (status_only and role != "runner")
+            or (status_only and (comments_only or integration_enabled or fetch_enabled))):
+        raise AuthenticationError("Invalid status authentication opt-in")
     at = time.time() if at is None else at
     settings = cfg["app_auth"][role]
     validate(settings, role)
@@ -217,6 +220,7 @@ def mint(cfg, role, *, comments_only=False, integration_enabled=False,
         ):
             raise AuthenticationError("Wrong or suspended repository installation")
         permissions = (
+            {"statuses": "write"} if status_only else
             {"issues": "write"} if comments_only else
             dict(INTEGRATION_PERMISSIONS) if integration_enabled else
             {"issues": "write", "contents": "read"} if fetch_enabled else

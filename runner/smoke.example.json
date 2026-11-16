@@ -1,0 +1,52 @@
+{
+  "framework_repository": "<FRAMEWORK_OWNER>/<FRAMEWORK_REPOSITORY>",
+  "repository": "<SCRATCH_OWNER>/<SCRATCH_REPOSITORY>",
+  "agent_name": "<AGENT_NAME>",
+  "lock_dir": "<ABSOLUTE_PRIVATE_SMOKE_LOCK_DIRECTORY>",
+  "timeout_seconds": 1800,
+  "trusted_gate_workflow": ".github/workflows/pr-review-gate.yml",
+  "actors": {
+    "runner": "<SMOKE_RUNNER_BOT_LOGIN>",
+    "owner": "<SMOKE_OWNER_BOT_LOGIN>",
+    "framework_runner": "<FRAMEWORK_RUNNER_BOT_LOGIN>"
+  },
+  "app_auth": {
+    "runner": {
+      "app_id": "<SMOKE_RUNNER_APP_ID_INTEGER>",
+      "keychain_service": "<SMOKE_RUNNER_KEYCHAIN_SERVICE>",
+      "keychain_account": "<SMOKE_RUNNER_KEYCHAIN_ACCOUNT>"
+    },
+    "owner": {
+      "app_id": "<SMOKE_OWNER_APP_ID_INTEGER>",
+      "keychain_service": "<SMOKE_OWNER_KEYCHAIN_SERVICE>",
+      "keychain_account": "<SMOKE_OWNER_KEYCHAIN_ACCOUNT>"
+    },
+    "framework_runner": {
+      "app_id": "<FRAMEWORK_RUNNER_APP_ID_INTEGER>",
+      "keychain_service": "<FRAMEWORK_RUNNER_KEYCHAIN_SERVICE>",
+      "keychain_account": "<FRAMEWORK_RUNNER_KEYCHAIN_ACCOUNT>"
+    }
+  },
+  "runner": {
+    "agent_home": "<ABSOLUTE_SMOKE_AGENT_HOME>",
+    "worker_model": "<WORKER_MODEL>",
+    "reviewer_model": "<REVIEWER_MODEL>",
+    "commit_identity": {"name": "<SMOKE_COMMIT_AUTHOR>", "email": "<SMOKE_COMMIT_EMAIL>"},
+    "agent": {
+      "command": ["<ABSOLUTE_AGENT_EXECUTABLE>", "{role_flags}", "exec", "--ignore-user-config", "--cd", "{worktree}", "--model", "{model}", "--output-schema", "{schema_file}", "--output-last-message", "{output_file}", "-"],
+      "version_command": ["<ABSOLUTE_AGENT_EXECUTABLE>", "--version"],
+      "version_pattern": "<ACCEPTED_AGENT_VERSION_REGEX>",
+      "worker_flags": ["--approve-for-me"],
+      "reviewer_flags": ["--ask-for-approval", "never", "--sandbox", "read-only"],
+      "environment": {"CODEX_HOME": "{agent_home}"}
+    },
+    "verification": {"commands": [["<ABSOLUTE_PYTHON_EXECUTABLE>", "-m", "unittest", "-q"]]},
+    "profile": {
+      "worker_prompt": "Implement the approved smoke story and run its tests. Leave changes uncommitted.",
+      "reviewer_prompt": "Review the exact candidate change against the approved story and verify its tests.",
+      "scope": "Only smoke_add.py and test_smoke_add.py may change. No dependencies, configuration or workflow changes.",
+      "extra_scopes": {},
+      "coordination_files": []
+    }
+  }
+}
