@@ -12,9 +12,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lifecycle import app_tokens, core
 
@@ -1162,9 +1166,17 @@ def main(argv=None):
             "enqueue-only",
             "status",
             "watchdog",
+            "smoke",
         ],
     )
+    parser.add_argument("--candidate")
     args = parser.parse_args(argv)
+    if args.action == "smoke":
+        from lifecycle import smoke
+
+        return smoke.main(args.config, args.candidate)
+    if args.candidate is not None:
+        parser.error("--candidate requires smoke")
     cfg = core.load_config(args.config)
     cfg["config_path"] = str(args.config.resolve())
     if args.action == "status":
