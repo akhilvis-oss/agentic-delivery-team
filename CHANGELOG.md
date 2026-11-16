@@ -3,6 +3,7 @@
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
 ## v0.5.6 (2026-11-15): Self-contained hosted lifecycle guard
+- Delivery attempts auto-merge when GitHub omits `allow_auto_merge`; an explicit disabled setting or a not-allowed refusal still stops for the owner's merge (#144).
 - Fixed the hosted guard failing on stop summaries, review findings and builder questions: shared private-content rules now ship inside the lifecycle sparse checkout (#141).
 - Missing rules stop the guard with a plain message before records are checked. The private-content CLI retains its rules, output and exit codes.
 - Added sparse-checkout regression coverage and an upgrade file inventory for adopters. Upgrade the complete lifecycle package and private-content script together; workflow sparse paths stay the same.
