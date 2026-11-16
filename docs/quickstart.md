@@ -68,3 +68,34 @@ Upgrade every piece together, from one release tag:
 3. Update your private configuration as the notes describe, then re-pin the lifecycle service to the tag.
 
 For example, v0.5.5 requires an explicit `integration` setting in both private runner templates, and a new `needs-owner` → `merged` rule in `.github/task-lifecycle.json`.
+
+### Files to carry by feature
+
+Paths below are release-source paths. Keep your customised policy/config values when
+upgrading; replace code and workflows from the same tag. Directory entries mean
+**every file recursively**, including `__init__.py` and new modules; never copy only
+`core.py`. The service uses a full private release export, not the guard's sparse
+checkout.
+
+| Feature | Release files to carry |
+| --- | --- |
+| Gate | `gate/review_gate.py`, `templates/review-gate.yml`, `templates/review-gate.example.json`, `templates/pull_request_template.md` |
+| Lifecycle guard sparse checkout | `lifecycle/`, `.github/task-lifecycle.json` |
+| Lifecycle guard workflow and policy source | `templates/task-lifecycle.yml`, `templates/task-lifecycle.example.json` |
+| Lifecycle service | `lifecycle/`, `runner/`, `digest/`, `gate/review_gate.py`, `scripts/check_private_content.py`, `templates/task-lifecycle.example.json`, `templates/app-auth.example.json`, `templates/standup.example.json`, `templates/lifecycle-serve.plist.example`, `templates/lifecycle-watchdog.plist.example` |
+| Private-content check | `scripts/check_private_content.py`, `lifecycle/__init__.py`, `lifecycle/private_content.py` |
+| Version record (all features) | `templates/agentic-kit.example.json` |
+
+Install the gate code as `scripts/review_gate.py`, its workflow as
+`.github/workflows/review-gate.yml`, its config as
+`.github/review-gate.json`, and its PR template as `.github/pull_request_template.md`.
+Install the lifecycle workflow as `.github/workflows/task-lifecycle.yml` and populate
+`.github/task-lifecycle.json` from its example. Install the version record as
+`.github/agentic-kit.json`. Private service configuration stays outside the repository;
+copy the runner config/profile examples within `runner/` for both normal and primary
+runners, and use the optional pool and scheduler examples only when enabled.
+
+For v0.5.6, replace the whole `lifecycle/` directory and the private-content script
+together. The guard workflow's sparse paths do not change. If the guard reports that
+`lifecycle/private_content.py` cannot be loaded, restore the complete package from
+the same release before retrying; no records were checked by that failed run.

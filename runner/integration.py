@@ -524,7 +524,7 @@ def advance(runner, config, path, job, client=None):
             return
         if delivery["stage"] == "auto_merge_enabled":
             return
-        if client.request("GET", "/")["allow_auto_merge"] is False:
+        if client.request("GET", "/").get("allow_auto_merge") is False:
             stop("owner_merge_required", True)
             return
         try:

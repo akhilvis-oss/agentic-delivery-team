@@ -2,6 +2,8 @@
 
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -56,3 +58,46 @@ def test_clean_file_passes(tmp_path):
     target = tmp_path / "clean.md"
     target.write_text("Nothing private here.\n")
     assert check.main([str(target)]) == 0
+
+
+def test_cli_and_guard_use_the_same_rules():
+    from lifecycle import core, private_content
+
+    assert check.CHECKS is private_content.CHECKS
+    assert check.scan_text is private_content.scan_text
+    assert core.check is private_content
+
+
+@pytest.mark.parametrize("text, finding", [
+    (HOME, "home-directory path"),
+    (KEY_HEADER, "private key"),
+    (OPENAI, "OpenAI-style key"),
+    # Preserve the existing first-match precedence for overlapping key patterns.
+    ("sk-" + "ant-" + "z" * 30, "OpenAI-style key"),
+    (GITHUB, "GitHub token"),
+    (AWS, "AWS access key"),
+    ("xox" + "b-" + "z" * 20, "Slack token"),
+    (ASSIGNED, "assigned secret"),
+    ("/" + "Users/you/project", None),
+    ("TOKEN = <your token>", None),
+    (HOME + " # " + check.ALLOW_MARKER, None),
+])
+def test_direct_cli_preserves_output_and_exit_codes(tmp_path, text, finding):
+    target = tmp_path / "input.txt"
+    target.write_text(text + "\n")
+    result = subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts/check_private_content.py"), str(target)],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.stderr == ""
+    if finding:
+        assert result.returncode == 1
+        assert result.stdout == (
+            f"FAIL: {target}:1: possible {finding}\n"
+            "1 possible private-content finding(s). Move the value to local, "
+            "uncommitted config, or mark a reviewed placeholder line with '"
+            + check.ALLOW_MARKER + "'.\n"
+        )
+    else:
+        assert result.returncode == 0
+        assert result.stdout == "PASS: no private content found in 1 file(s)\n"
