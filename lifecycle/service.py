@@ -1167,10 +1167,17 @@ def main(argv=None):
             "status",
             "watchdog",
             "smoke",
+            "smoke-watch",
         ],
     )
     parser.add_argument("--candidate")
     args = parser.parse_args(argv)
+    if args.action == "smoke-watch":
+        if args.candidate is not None:
+            parser.error("--candidate requires smoke")
+        from lifecycle import smoke_watch
+
+        return smoke_watch.main(args.config)
     if args.action == "smoke":
         from lifecycle import smoke
 
