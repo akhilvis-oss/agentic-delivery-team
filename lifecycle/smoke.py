@@ -196,6 +196,42 @@ def status_client(cfg):
         "app_auth": {"runner": cfg["app_auth"]["framework_runner"]}})
 
 
+def guard_idle(client, *, clock, sleep):
+    """Wait at most two minutes for scratch issue workflows to drain.
+
+    Actions does not bind issue runs to issue numbers. Admission requires an
+    empty scratch repository, so conservatively include every issue workflow.
+    """
+    deadline = None
+    while True:
+        busy = False
+        for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+            result = client.request("GET", f"/actions/runs?event=issues&status={status}&per_page=1")
+            if (not isinstance(result, dict) or type(result.get("total_count")) is not int
+                    or result["total_count"] < 0 or not isinstance(result.get("workflow_runs"), list)
+                    or len(result["workflow_runs"]) != min(result["total_count"], 1)):
+                raise core.Unavailable("Issue workflow activity unavailable")
+            busy |= result["total_count"] > 0
+        if not busy:
+            return deadline is None or clock() < deadline
+        observed = clock()
+        if deadline is None:
+            deadline = observed + 120
+        if observed >= deadline:
+            return False
+        sleep(min(5, deadline - observed))
+
+
+def approve_once(client, number):
+    try:
+        client.request("POST", f"/issues/{number}/labels", {"labels": ["status:approved"]})
+    except core.Uncertain:
+        labels = {label["name"] if isinstance(label, dict) else label
+                  for label in client.issue(number)["labels"]}
+        if "status:approved" not in labels:
+            raise core.Unavailable("Approval was not confirmed") from None
+
+
 def evidence(policy, client, number):
     """Return contiguous progress, a terminal flag and a fixed public stop category."""
     history = core.records(policy, client.comments(number), number)
@@ -210,6 +246,8 @@ def evidence(policy, client, number):
         terminal, category = False, "stop_unrecorded"
     approvals = [r for r in history if r["kind"] == "approval"]
     if not approvals:
+        if "status:approved" in labels:
+            return 0, False, "approval_unrecorded"
         return 0, terminal, category
     approval = approvals[-1]
     job = f"issue-{number}-event-{approval['event']}"
@@ -330,7 +368,8 @@ def stop_child(child):
 def description(agent, passed, progress, category):
     # All fields are allowlisted; never interpolate exceptions, agent prose or API text.
     if category not in set(core.STOP_REASONS) | {"pending", "timeout", "child_stopped", "unavailable",
-                                          "cleanup_failed", "gate_failed", "busy", "stop_unrecorded"}:
+                                          "cleanup_failed", "gate_failed", "busy", "stop_unrecorded",
+                                          "approval_unrecorded"}:
         category = "unavailable"
     text = (f"{'PASS' if passed else 'FAIL'}; furthest={STAGES[progress]}; "
             f"next={STAGES[min(progress + 1, 6)]}; stop={category}.")
@@ -423,32 +462,40 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                     issue = owner.request("POST", "/issues", {"title": "Lifecycle smoke story",
                                           "body": story, "labels": ["status:draft"]})
                     number = issue["number"]
-                    owner.request("POST", f"/issues/{number}/labels", {"labels": ["status:approved"]})
-                    deadline = clock() + cfg.get("timeout_seconds", 1800)
-                    step = "start-child"
-                    child = start_child(install, config_path, env)
-                    unrecorded_since = None
-                    while True:
-                        step = "evidence"
-                        progress, terminal, category = evidence(policy, runner, number)
-                        observed = clock()
-                        if category == "stop_unrecorded":
-                            if unrecorded_since is None:
-                                unrecorded_since = observed
-                            if observed - unrecorded_since >= 180:
+                    step = "guard-idle"
+                    if not guard_idle(runner, clock=clock, sleep=sleep):
+                        category = "busy"
+                    else:
+                        step = "approval"
+                        approve_once(owner, number)
+                        deadline = clock() + cfg.get("timeout_seconds", 1800)
+                        step = "start-child"
+                        child = start_child(install, config_path, env)
+                        unrecorded_since = None
+                        unrecorded_category = None
+                        while True:
+                            step = "evidence"
+                            progress, terminal, category = evidence(policy, runner, number)
+                            observed = clock()
+                            if category in {"stop_unrecorded", "approval_unrecorded"}:
+                                if unrecorded_since is None or category != unrecorded_category:
+                                    unrecorded_since = observed
+                                unrecorded_category = category
+                                if observed - unrecorded_since >= 180:
+                                    break
+                            else:
+                                unrecorded_since = None
+                                unrecorded_category = None
+                            if observed >= deadline:
+                                category = "timeout"
                                 break
-                        else:
-                            unrecorded_since = None
-                        if observed >= deadline:
-                            category = "timeout"
-                            break
-                        if terminal:
-                            passed = progress == 6
-                            break
-                        if child.poll() is not None:
-                            category = "child_stopped"
-                            break
-                        sleep(min(5, max(0, deadline - clock())))
+                            if terminal:
+                                passed = progress == 6
+                                break
+                            if child.poll() is not None:
+                                category = "child_stopped"
+                                break
+                            sleep(min(5, max(0, deadline - clock())))
             except (Exception, KeyboardInterrupt) as error:
                 diagnose(step, error)
                 category = "unavailable"
