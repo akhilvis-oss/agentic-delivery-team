@@ -95,7 +95,8 @@ Install the lifecycle workflow as `.github/workflows/task-lifecycle.yml` and pop
 copy the runner config/profile examples within `runner/` for both normal and primary
 runners, and use the optional pool and scheduler examples only when enabled.
 
-For v0.5.6, replace the whole `lifecycle/` directory and the private-content script
-together. The guard workflow's sparse paths do not change. If the guard reports that
+For v0.5.6 and later, replace the whole `lifecycle/` directory and the private-content script
+together. v0.5.7 changes no workflow or `.github/` file; the optional smoke test needs its own
+setup ([docs/smoke-test.md](smoke-test.md)). The guard workflow's sparse paths do not change. If the guard reports that
 `lifecycle/private_content.py` cannot be loaded, restore the complete package from
 the same release before retrying; no records were checked by that failed run.

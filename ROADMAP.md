@@ -20,6 +20,8 @@ Where the kit is heading. Plans change with feedback; each item links to its iss
 
 [v0.5.6](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.6) (patch): the hosted lifecycle guard no longer fails on issues whose stop records quote text. Adopt v0.5.6 rather than v0.5.5.
 
+[v0.5.7](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.7) (patch): fixes delivery for light and standard stories, and adds the optional live smoke test and its watcher. Adopt v0.5.7 if you use delivery.
+
 ## Next: a safety net, then a consolidated lifecycle
 A review on 14 November traced the failures since v0.5.3 to a few design causes. The next steps build on the current code and cut its paths down:
 - **Safety net** ([design note](docs/design/safety-net.md)): recorded GitHub responses as test fixtures, and a live smoke test that runs one tiny story with the real agent on candidate code before it is used.
