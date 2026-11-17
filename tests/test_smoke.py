@@ -1,11 +1,13 @@
 """The trusted harness uses no live GitHub, credentials or agent in these tests."""
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 from pathlib import Path
 import subprocess
 import tarfile
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +16,12 @@ from lifecycle import app_tokens, core, private_content, service, smoke
 from recorded_github import RecordedGitHub
 from test_github_replay import recording
 from test_lifecycle_app_tokens import API, AT, configured
+
+
+@pytest.fixture(autouse=True)
+def private_failure_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(smoke, "failed_runs_directory",
+                        lambda cfg: core.private(tmp_path / "failed-runs"))
 
 
 def config(tmp_path):
@@ -277,6 +285,8 @@ class RunClient:
 
 def run_setup(tmp_path, monkeypatch, outcome):
     cfg = config(tmp_path)
+    monkeypatch.setattr(smoke, "failed_runs_directory",
+                        lambda cfg: core.private(tmp_path / "failed-runs"))
     client = RunClient()
     child = SimpleNamespace(pid=999999, poll=lambda: None)
     stopped = []
@@ -365,6 +375,9 @@ def test_child_uses_export_and_filtered_environment(tmp_path, monkeypatch):
     assert kwargs["cwd"] == tmp_path / "install"
     assert kwargs["env"] == env
     assert kwargs["start_new_session"] is True
+    assert kwargs["stdout"].name == str(tmp_path / "candidate.log")
+    assert kwargs["stderr"] is kwargs["stdout"]
+    assert (tmp_path / "candidate.log").stat().st_mode & 0o777 == 0o600
 
 
 def test_direct_script_cli_is_available_without_import_environment(tmp_path):
@@ -509,12 +522,95 @@ def test_failure_diagnosis_stays_local(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(smoke, "start_child", fail)
     assert smoke.run(cfg, "main") == 1
     captured = capsys.readouterr()
-    assert captured.err.count("\n") == 1
+    assert captured.err.count("\n") == 2
     assert "step=start-child; RuntimeError: local detail second line" in captured.err
     assert "function=lifecycle.smoke.run" in captured.err
     assert "local detail" not in captured.out
     status = client.calls[-1][2]
     assert status["description"] == "FAIL; furthest=admission; next=approval; stop=unavailable."
+
+
+@pytest.mark.parametrize("target", ["blocked", "needs-owner"])
+def test_unrecorded_stop_label_is_detected(tmp_path, target):
+    policy, client, _ = evidence_setup(tmp_path)
+    client.rows = []
+    client.issue = lambda number: {"labels": [{"name": "status:" + target}]}
+    assert smoke.evidence(policy, client, 10) == (0, False, "stop_unrecorded")
+
+
+def test_unrecorded_stop_ends_after_three_minutes(tmp_path, monkeypatch):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (2, False, "stop_unrecorded"))
+    elapsed = [0]
+    def sleep(seconds):
+        elapsed[0] += seconds
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0], sleep=sleep) == 1
+    assert elapsed[0] == 180
+    assert stopped
+    assert "stop=stop_unrecorded" in client.calls[-1][2]["description"]
+
+
+def test_unrecorded_stop_timer_resets_when_label_clears(tmp_path, monkeypatch):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (2, False, "stop_unrecorded"))
+    elapsed = [0]
+    def evidence(*args):
+        if elapsed[0] == 175:
+            return 2, False, "pending"
+        return 2, False, "stop_unrecorded"
+    def sleep(seconds):
+        elapsed[0] += seconds
+    monkeypatch.setattr(smoke, "evidence", evidence)
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0], sleep=sleep) == 1
+    assert elapsed[0] == 360
+    assert "stop=stop_unrecorded" in client.calls[-1][2]["description"]
+
+
+def test_failed_runs_keep_private_state_and_logs_only_last_three(tmp_path, monkeypatch, capsys):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (2, True, "reviewer_reported_blocked"))
+    roots = []
+    def start(install, config_path, env):
+        root = config_path.parent
+        roots.append(root)
+        core.save(root / "state" / "fixture.json", {"private": len(roots)})
+        (root / "candidate.log").write_text("synthetic candidate output")
+        return SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(smoke, "start_child", start)
+    for _ in range(4):
+        assert smoke.run(cfg, "main") == 1
+    retained = sorted(p for p in (tmp_path / "failed-runs").iterdir() if p.is_dir())
+    assert len(retained) == 3
+    assert [core.read(p / "state" / "fixture.json")["private"] for p in retained] == [2, 3, 4]
+    for folder in retained:
+        assert folder.stat().st_mode & 0o777 == 0o700
+        assert (folder / "candidate.log").read_text() == "synthetic candidate output"
+    captured = capsys.readouterr()
+    assert all(str(folder) in captured.err for folder in retained)
+    assert str(tmp_path / "failed-runs") not in captured.out
+    assert all(not root.exists() for root in roots)
+    monkeypatch.setattr(smoke, "evidence", lambda *a: (6, True, "owner_merge_required"))
+    assert smoke.run(cfg, "main") == 0
+    assert sorted(p for p in (tmp_path / "failed-runs").iterdir() if p.is_dir()) == retained
+    assert not roots[-1].exists()
+
+
+def test_status_failure_also_retains_evidence(tmp_path, monkeypatch):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    client.status_refused = True
+    assert smoke.run(cfg, "main") == 1
+    assert len([p for p in (tmp_path / "failed-runs").iterdir() if p.is_dir()]) == 1
+
+
+def test_concurrent_failed_runs_keep_at_most_three(tmp_path):
+    cfg = config(tmp_path)
+    barrier = threading.Barrier(4)
+    def fail(index):
+        with smoke.workspace(cfg) as (root, result):
+            core.save(root / "state.json", {"run": index})
+            barrier.wait(timeout=10)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(fail, range(4)))
+    retained = [p for p in (tmp_path / "failed-runs").iterdir() if p.is_dir()]
+    assert len(retained) == 3
+    assert len({core.read(p / "state.json")["run"] for p in retained}) == 3
 
 
 def test_status_token_422_explains_installation_permission(tmp_path, monkeypatch, capsys):

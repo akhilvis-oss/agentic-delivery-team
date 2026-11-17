@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import subprocess
 import threading
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -322,6 +323,51 @@ def test_outbox_recovers_outage_and_never_duplicates_comments(tmp_path, failure)
     assert core.read(path)["status"] == "synced"
     assert len(client.comments(1)) == 1
     assert core.state(client.issue(1)) == "dispatched"
+
+
+@pytest.mark.parametrize("target", ["blocked", "needs-owner", "needs-primary"])
+@pytest.mark.parametrize("http_status", [403, 500])
+def test_stop_record_survives_assignment_failure_and_later_entries_sync(tmp_path, target, http_status):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(1, "in-review")
+    hub.issue(2)
+    client = hub.client()
+    path = core.queue(cfg, core.public_record(cfg, 1, "job", 0, target, event=101))
+    later = core.queue(cfg, core.public_record(cfg, 2, "later", 0, "dispatched", event=102))
+    wire = core.GitHub(cfg, token="synthetic")
+    wire.identity_verified = True
+    wire.issue = client.issue
+    calls = []
+
+    def refuse(req, **kwargs):
+        # Assignment must happen only after the comment and synced state are durable.
+        assert len(client.comments(1)) == 1
+        assert core.read(path)["status"] == "synced"
+        assert core.read(path)["notification_attempted"] is True
+        calls.append(req)
+        raise urllib.error.HTTPError(req.full_url, http_status, "synthetic", {}, None)
+
+    wire.opener = SimpleNamespace(open=refuse)
+    client.notify = wire.notify
+    core.flush(cfg, client)
+    core.flush(cfg, client)
+    entry = core.read(path)
+    assert entry["status"] == "synced"
+    assert entry["notification_error"] == "owner_notification_failed"
+    assert not entry.get("notified")
+    assert core.read(later)["status"] == "synced"
+    assert len(client.comments(1)) == len(client.comments(2)) == 1
+    assert len(calls) == 1
+    assert calls[0].full_url.endswith("/issues/1/assignees")
+
+
+def test_bot_owner_notification_makes_no_requests(tmp_path):
+    cfg = policy(tmp_path)
+    cfg["actors"]["owner"] = "fixture-app[bot]"
+    client = core.GitHub(cfg, token="synthetic")
+    client.request = lambda *a, **kw: pytest.fail("Bot owner must not cause a request")
+    assert client.notify(1) is None
 
 
 def test_atomic_queue_does_not_reset_attempted_or_synced(tmp_path):

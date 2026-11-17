@@ -959,6 +959,8 @@ class GitHub:
         return self.request("PUT", f"/issues/{number}/labels", {"labels": labels})
 
     def notify(self, number):
+        if self.cfg["actors"]["owner"].endswith("[bot]"):
+            return None
         if any(
             a["login"] == self.cfg["actors"]["owner"]
             for a in self.issue(number).get("assignees", [])
@@ -1233,12 +1235,6 @@ def flush(cfg, client):
                     # Label replacement is idempotent; append-only comments are not.
                     if current != record["to"]:
                         client.set_state(record["issue"], record["to"])
-                    if record["to"] in {"blocked", "needs-owner", "needs-primary"} and not entry.get(
-                        "notified"
-                    ):
-                        client.notify(record["issue"])
-                        entry["notified"] = True
-                        save(path, entry)
                     if cfg.get("uncertain_workflow_resume"):
                         entry["comment_attempted"] = True
                     if entry["comment_attempted"]:
@@ -1263,11 +1259,19 @@ def flush(cfg, client):
                             entry["comment_attempted"] = False
                         raise
                     entry["status"] = "synced"
+                # The explanatory record is durable before optional notification.
+                save(path, entry)
                 if record["to"] in {"blocked", "needs-owner", "needs-primary"} and not entry.get(
                     "notified"
-                ):
-                    client.notify(record["issue"])
-                    entry["notified"] = True
+                ) and not entry.get("notification_attempted"):
+                    # Persist before calling: even an ambiguous failure is never retried.
+                    entry["notification_attempted"] = True
+                    save(path, entry)
+                    try:
+                        client.notify(record["issue"])
+                        entry["notified"] = True
+                    except Unavailable:
+                        entry["notification_error"] = "owner_notification_failed"
                 save(path, entry)
             except TransitionRejected as exc:
                 rejections.append(str(exc))
