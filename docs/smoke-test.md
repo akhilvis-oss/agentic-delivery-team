@@ -84,6 +84,8 @@ The watcher keeps a private per-repository/agent journal beside the shared scrat
 locks. The daily cap counts candidates, including docs shortcuts, in UTC. Busy
 scratch repositories and held locks leave no status and consume no run, allowing
 retry at the next tick. Completed failures count and never automatically rerun.
+Definite candidate-fetch or export failures also release the reservation and
+daily count without posting a status, so the next invocation retries preparation.
 Durable reservations prevent repeat execution after crashes or uncertain writes;
 these require operator reconciliation rather than automatic replay. Preserve the
 journal across job restarts. The journal and local locks are not distributed:

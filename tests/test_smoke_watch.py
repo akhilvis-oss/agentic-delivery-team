@@ -1,10 +1,13 @@
 """Automatic smoke selection uses synthetic GitHub and no candidate execution."""
 
 import copy
+import io
+import json
+from types import SimpleNamespace
 
 import pytest
 
-from lifecycle import core, smoke_watch
+from lifecycle import core, smoke, smoke_watch
 from runner.integration import smoke_notice
 from test_smoke import config, run_setup
 
@@ -103,6 +106,38 @@ def test_docs_only_posts_success_naming_passed_commit(tmp_path):
     assert B in comments[-1] and "owner-merge" in comments[-1]
 
 
+def test_docs_comparison_uses_real_github_path_validator():
+    cfg = {"repository": "example/framework",
+           "actors": {"runner": "fixture-runner", "owner": "fixture-owner"}}
+    client = core.GitHub(cfg, token="synthetic")
+    client.identity_verified = True
+    calls = []
+
+    def opened(req, timeout):
+        calls.append(req.full_url)
+        return io.BytesIO(json.dumps({"status": "ahead", "files": [
+            {"filename": "docs/guide.md"}]}).encode())
+
+    client.opener = SimpleNamespace(open=opened)
+    assert smoke_watch.docs_only(client, A, B)
+    assert calls == [f"https://api.github.com/repos/example/framework/compare/{A}...{B}"]
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", f"/compare/{A}...{B}/../issues"),
+    ("GET", f"/compare/{A}...{B}?redirect=../issues"),
+    ("GET", "/compare/main...branch"),
+    ("GET", f"/compare/{A}..{B}"),
+    ("GET", f"/compare/{A}....{B}"),
+    ("POST", f"/compare/{A}...{B}"),
+])
+def test_comparison_exception_rejects_other_dotted_paths(method, path):
+    client = core.GitHub({"repository": "example/framework", "actors": {
+        "runner": "fixture-runner", "owner": "fixture-owner"}}, token="synthetic")
+    with pytest.raises(ValueError, match="Invalid repository API path"):
+        client.request(method, path)
+
+
 @pytest.mark.parametrize("files", [
     [{"filename": "docs/a.md", "status": "renamed", "previous_filename": "code.py"}],
     [{"filename": "docs/a.md"}] * 300,
@@ -152,6 +187,40 @@ def test_busy_start_leaves_no_status_and_retries(tmp_path, monkeypatch):
     scratch.open_issue = False
     assert smoke_watch.watch(cfg, client, run=smoke.run) == "completed"
     assert sum("/statuses/" in p for _, p, _ in scratch.calls) == 1
+
+
+@pytest.mark.parametrize("error", [core.Unavailable, OSError, ValueError])
+def test_preparation_failure_releases_reservation_and_retries(tmp_path, monkeypatch, error):
+    cfg, scratch, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    cfg["daily_cap"] = 1
+    client = Client(cfg)
+    export = smoke.export_candidate
+
+    def failed_export(*args):
+        raise error("synthetic preparation failure")
+
+    monkeypatch.setattr(smoke, "export_candidate", failed_export)
+    with pytest.raises(smoke.PreparationFailed):
+        smoke_watch.watch(cfg, client, run=smoke.run)
+    assert not scratch.calls and not stopped
+    monkeypatch.setattr(smoke, "export_candidate", export)
+    assert smoke_watch.watch(cfg, client, run=smoke.run) == "completed"
+    assert sum("/statuses/" in p for _, p, _ in scratch.calls) == 1
+
+
+def test_uncertain_execution_keeps_reservation(tmp_path):
+    cfg, client, _, _ = setup(tmp_path)
+    calls = []
+
+    def uncertain_run(cfg, sha, *, completed):
+        calls.append(sha)
+        raise core.Uncertain("synthetic execution uncertainty")
+
+    with pytest.raises(core.Uncertain):
+        smoke_watch.watch(cfg, client, run=uncertain_run)
+    assert smoke_watch.watch(cfg, client, run=uncertain_run) == "idle"
+    assert calls == [A]
+    assert not any("/statuses/" in p for _, p, _ in client.calls)
 
 
 def test_daily_cap_and_next_day(tmp_path):

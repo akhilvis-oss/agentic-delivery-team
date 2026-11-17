@@ -24,6 +24,10 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.
 STAGES = ("admission", "approval", "build", "review", "pull-request", "review-gate", "owner-merge")
 
 
+class PreparationFailed(core.Unavailable):
+    """Candidate preparation failed before any scratch write or execution."""
+
+
 def load_config(path):
     cfg = core.read(path)
     required = {"framework_repository", "repository", "agent_name", "lock_dir",
@@ -331,9 +335,12 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
             return 1
         with tempfile.TemporaryDirectory(prefix="lifecycle-smoke-") as folder:
             root = Path(folder)
-            home = core.private(root / "home")
-            env = environment(home)
-            install, sha = export_candidate(cfg, candidate, root, env)
+            try:
+                home = core.private(root / "home")
+                env = environment(home)
+                install, sha = export_candidate(cfg, candidate, root, env)
+            except Exception:
+                raise PreparationFailed("Candidate preparation unavailable") from None
             policy = runner = None
             number = child = None
             marker = "<!-- agentic-smoke-run:" + uuid.uuid4().hex + " -->"

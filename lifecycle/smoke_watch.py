@@ -130,7 +130,15 @@ def watch(cfg, client, *, clock=time.time, run=None, status_client=None):
                 (status_client or smoke.status_client(cfg)).request("POST", "/statuses/" + sha, {
                     "state": "success", "context": "smoke/" + cfg["agent_name"], "description": description})
             else:
-                run(cfg, sha, completed=completed)
+                try:
+                    run(cfg, sha, completed=completed)
+                except smoke.PreparationFailed:
+                    # Only the harness can attest that no candidate code or
+                    # scratch write started. Other errors keep the reservation.
+                    del journal["attempts"][sha]
+                    journal["count"] -= 1
+                    core.save(path, journal)
+                    raise
                 if journal["attempts"][sha] == "reserved":
                     # A normal return without completion means no run started.
                     del journal["attempts"][sha]
