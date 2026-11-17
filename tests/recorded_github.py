@@ -1,6 +1,7 @@
 """Offline HTTP transport: only explicitly registered, unmodified recordings."""
 
 import io
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -19,6 +20,11 @@ class RecordedGitHub:
 
     def __init__(self, client, routes):
         self.routes = dict(routes)
+        self.recorded_requests = {
+            name: (method, path) for name, method, path in re.findall(
+                r"\| `([^`]+\.json)` \| `(GET) ([^`]+)`",
+                (FIXTURES / "README.md").read_text())
+        }
         self.calls = []
         client.opener = self
         client.identity_verified = True
@@ -30,4 +36,7 @@ class RecordedGitHub:
         self.calls.append(key)
         if url.scheme != "https" or url.netloc != "api.github.com" or key not in self.routes:
             pytest.fail(f"No GitHub recording for {key[0]} {path}")
-        return io.BytesIO((FIXTURES / self.routes[key]).read_bytes())
+        name = self.routes[key]
+        if self.recorded_requests.get(name) != key:
+            pytest.fail(f"Request differs from recording: {key[0]} {path}")
+        return io.BytesIO((FIXTURES / name).read_bytes())

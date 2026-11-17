@@ -485,3 +485,51 @@ def test_pass_evidence_after_deadline_is_a_timeout(tmp_path, monkeypatch):
     assert stopped == [child]
     assert client.calls[-1][2]["state"] == "failure"
     assert "stop=timeout" in client.calls[-1][2]["description"]
+
+
+def test_admission_settings_url_has_no_trailing_slash(tmp_path, monkeypatch):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    wire = core.GitHub({"repository": cfg["repository"], "actors": cfg["actors"]},
+                       token="synthetic")
+    wire.identity_verified = True
+    urls = []
+    wire.opener = SimpleNamespace(open=lambda req, **kw: (
+        urls.append(req.full_url) or io.BytesIO(b'{"allow_auto_merge": false}')))
+    previous = client.request
+    client.request = lambda method, path, data=None: (
+        wire.request(method, path) if (method, path) == ("GET", "/") else previous(method, path, data))
+    assert smoke.run(cfg, "main") == 0
+    assert urls == ["https://api.github.com/repos/example/scratch"]
+
+
+def test_failure_diagnosis_stays_local(tmp_path, monkeypatch, capsys):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    def fail(*args):
+        raise RuntimeError("local detail\nsecond line")
+    monkeypatch.setattr(smoke, "start_child", fail)
+    assert smoke.run(cfg, "main") == 1
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1
+    assert "step=start-child; RuntimeError: local detail second line" in captured.err
+    assert "function=lifecycle.smoke.run" in captured.err
+    assert "local detail" not in captured.out
+    status = client.calls[-1][2]
+    assert status["description"] == "FAIL; furthest=admission; next=approval; stop=unavailable."
+
+
+def test_status_token_422_explains_installation_permission(tmp_path, monkeypatch, capsys):
+    import urllib.error
+
+    cfg, _, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    def refused(req, **kwargs):
+        raise urllib.error.HTTPError(req.full_url, 422, "synthetic refusal", {}, None)
+    opener = SimpleNamespace(open=refused)
+    def status_client(_):
+        app_tokens.request(opener, "synthetic", "POST", "/app/installations/1/access_tokens",
+                           {"permissions": {"statuses": "write"}})
+    monkeypatch.setattr(smoke, "status_client", status_client)
+    assert smoke.run(cfg, "main") == 1
+    err = capsys.readouterr().err
+    assert "step=status; AuthenticationError:" in err
+    assert "App installation lacks Commit statuses permission on the framework repository" in err
+    assert "function=lifecycle.app_tokens.request" in err

@@ -8,6 +8,7 @@ import base64
 import datetime as dt
 import json
 import os
+import pwd
 import re
 import ssl
 import subprocess
@@ -78,13 +79,13 @@ def keychain_pem(settings):
             capture_output=True,
             timeout=30,
             check=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~")},
+            env={"PATH": "/usr/bin:/bin", "HOME": pwd.getpwuid(os.getuid()).pw_dir},
         )
         pem = base64.b64decode(result.stdout.strip(), validate=True)
         if not 128 <= len(pem) <= 16384 or b"PRIVATE " + b"KEY-----" not in pem:
             raise ValueError()
         return pem
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError):
         raise AuthenticationError(
             "Keychain credential unavailable or malformed"
         ) from None
@@ -169,6 +170,11 @@ def request(opener, credential, method, path, data=None):
             if path.endswith("/access_tokens")
             else "token scope"
         )
+        if (error.code == 422 and path.endswith("/access_tokens")
+                and data and data.get("permissions") == {"statuses": "write"}):
+            raise AuthenticationError(
+                "App installation lacks Commit statuses permission on the framework repository (HTTP 422)"
+            ) from None
         raise AuthenticationError(
             f"App authentication {stage} failed (HTTP {error.code})"
         ) from None

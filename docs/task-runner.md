@@ -350,6 +350,13 @@ prompt to the primary agent. Existing configurations remain local-only. In a
 }
 ```
 
+Smoke results in owner-merge notices are optional. Set `integration.smoke_reporting`
+to `true` only for repositories using the smoke harness. It defaults to `false`: no
+smoke line is added and no status token is minted. When enabled, notices show
+passed, failed or pending results on the reviewed head; the App installation needs
+Commit statuses permission. Harness and watcher exception details appear only on
+local standard error; public statuses and status comments retain fixed text.
+
 Use the separately exported trusted release as the tool, outside the worker's
 writable checkout. Keep the existing `lifecycle_config`, event-bound assignment,
 runner commit identity and runner-owned `verification.commands`. Required tests

@@ -85,7 +85,7 @@ def replay_delivery(cfg, tmp_path, monkeypatch, filename):
     pr = recording(filename)
     client, transport = client_for(cfg, {
         ("GET", f"/pulls/{pr['number']}"): filename,
-        ("GET", "/"): "smoke-repo-owner-view.json",
+        ("GET", ""): "smoke-repo-owner-view.json",
     })
     monkeypatch.setattr(core, "load_config", lambda _: cfg)
     monkeypatch.setattr(core, "admit_phase", lambda *args: True)
@@ -118,10 +118,11 @@ def replay_delivery(cfg, tmp_path, monkeypatch, filename):
 
 def test_recorded_disabled_auto_merge_stops_delivery(cfg, tmp_path, monkeypatch):
     job, _, transport, _ = replay_delivery(cfg, tmp_path, monkeypatch, "smoke-pr3-open.json")
+    assert ("GET", "/repos/akhilvis-oss/adt-smoke") in transport.calls
     assert job["status"] == "needs_owner"
     assert job["integration"]["reason"] == "owner_merge_required"
     assert all(method == "GET" for method, _ in transport.calls)
-    assert transport.calls[-1] == ("GET", "/repos/" + SMOKE + "/")
+    assert transport.calls[-1] == ("GET", "/repos/akhilvis-oss/adt-smoke")
 
 
 @pytest.mark.parametrize("filename,merged", [
@@ -166,3 +167,18 @@ def test_recorded_one_click_approval_ignores_workflow_draft_removal(cfg):
     assert removal["actor"]["login"] == cfg["actors"]["workflow"]
     assert core.canonical_state(cfg, before) == core.canonical_state(cfg, after)
     assert core.canonical_state(cfg, after) == ("approved", approval)
+
+
+@pytest.mark.parametrize("path", ["/", "/pulls/3?extra=1"])
+def test_replay_rejects_route_differing_from_manifest(cfg, path):
+    client, _ = client_for(cfg, {("GET", path): "smoke-pr3-open.json"})
+    with pytest.raises(pytest.fail.Exception, match="recording"):
+        client.request("GET", path)
+
+
+def test_recording_manifest_lists_every_fixture():
+    import re
+
+    manifest = (FIXTURES / "README.md").read_text()
+    listed = re.findall(r"\| `([^`]+\.json)` \| `GET /[^`]+`", manifest)
+    assert sorted(listed) == sorted(p.name for p in FIXTURES.glob("*.json"))

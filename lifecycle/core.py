@@ -884,7 +884,8 @@ class GitHub:
             if not self.write_allowed(method, path):
                 raise ValueError("Only repository issue/label writes are permitted")
             self.ensure_actor()
-        url = "https://api.github.com/repos/" + self.cfg["repository"] + path
+        suffix = "" if method == "GET" and path == "/" else path
+        url = "https://api.github.com/repos/" + self.cfg["repository"] + suffix
         req = urllib.request.Request(
             url,
             method=method,
