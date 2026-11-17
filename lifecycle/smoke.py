@@ -6,6 +6,7 @@ import copy
 import contextlib
 import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -153,6 +154,25 @@ class SmokeGitHub(core.GitHub):
         return super().write_allowed(method, path) or (
             method == "PATCH" and bool(re.fullmatch(r"/pulls/[1-9]\d*", path)))
 
+    def guard_runs(self, query, *, timeout):
+        """Read Actions with the guard wait's remaining request budget.
+
+        Admission has already authenticated this client. This read cannot
+        refresh credentials or make writes while waiting for the guard.
+        """
+        if not re.fullmatch(r"(?:queued|in_progress|waiting|pending|requested|success)", query):
+            raise ValueError("Invalid guard run query")
+        req = urllib.request.Request(
+            "https://api.github.com/repos/" + self.cfg["repository"]
+            + f"/actions/runs?event=issues&status={query}&per_page=1",
+            headers={"Authorization": "Bearer " + self.token,
+                     "Accept": "application/vnd.github+json"})
+        try:
+            with self.opener.open(req, timeout=timeout) as response:
+                return json.loads(response.read())
+        except (OSError, ValueError):
+            raise core.Unavailable("Issue workflow activity unavailable") from None
+
     def request(self, method, path, data=None):
         if method != "DELETE":
             return super().request(method, path, data)
@@ -196,27 +216,54 @@ def status_client(cfg):
         "app_auth": {"runner": cfg["app_auth"]["framework_runner"]}})
 
 
-def guard_idle(client, *, clock, sleep):
+def run_count(result):
+    if (not isinstance(result, dict) or type(result.get("total_count")) is not int
+            or result["total_count"] < 0 or not isinstance(result.get("workflow_runs"), list)
+            or len(result["workflow_runs"]) != min(result["total_count"], 1)):
+        raise core.Unavailable("Issue workflow activity unavailable")
+    return result["total_count"]
+
+
+def latest_run(result):
+    if not run_count(result):
+        return 0
+    row = result["workflow_runs"][0]
+    if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] < 1:
+        raise core.Unavailable("Issue workflow identity unavailable")
+    return row["id"]
+
+
+def guard_idle(client, previous_run, *, clock, sleep):
     """Wait at most two minutes for scratch issue workflows to drain.
 
     Actions does not bind issue runs to issue numbers. Admission requires an
     empty scratch repository, so conservatively include every issue workflow.
     """
-    deadline = None
+    deadline = clock() + 120
     while True:
         busy = False
-        for status in ("queued", "in_progress", "waiting", "pending", "requested"):
-            result = client.request("GET", f"/actions/runs?event=issues&status={status}&per_page=1")
-            if (not isinstance(result, dict) or type(result.get("total_count")) is not int
-                    or result["total_count"] < 0 or not isinstance(result.get("workflow_runs"), list)
-                    or len(result["workflow_runs"]) != min(result["total_count"], 1)):
-                raise core.Unavailable("Issue workflow activity unavailable")
-            busy |= result["total_count"] > 0
-        if not busy:
-            return deadline is None or clock() < deadline
+        processed = False
+        # Require a successful run newer than the pre-filing snapshot. Empty
+        # results can mean that GitHub has not made the opened event visible yet.
+        for status in ("success", "queued", "in_progress", "waiting", "pending", "requested"):
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False
+            try:
+                result = client.guard_runs(status, timeout=min(30, remaining))
+            except core.Unavailable:
+                if clock() >= deadline:
+                    return False
+                raise
+            if clock() >= deadline:
+                return False
+            if status == "success":
+                processed = latest_run(result) > previous_run
+            else:
+                busy |= run_count(result) > 0
+        if processed and not busy:
+            return True
         observed = clock()
-        if deadline is None:
-            deadline = observed + 120
         if observed >= deadline:
             return False
         sleep(min(5, deadline - observed))
@@ -458,12 +505,14 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                              str(root / "repository")], cwd=root, env=env)
                     story = (ROOT / "tests/smoke/story.md").read_text() + "\n" + marker
                     step = "approval"
+                    previous_run = latest_run(runner.request(
+                        "GET", "/actions/runs?event=issues&per_page=1"))
                     creation_attempted = True
                     issue = owner.request("POST", "/issues", {"title": "Lifecycle smoke story",
                                           "body": story, "labels": ["status:draft"]})
                     number = issue["number"]
                     step = "guard-idle"
-                    if not guard_idle(runner, clock=clock, sleep=sleep):
+                    if not guard_idle(runner, previous_run, clock=clock, sleep=sleep):
                         category = "busy"
                     else:
                         step = "approval"
