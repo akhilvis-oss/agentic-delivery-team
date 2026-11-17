@@ -268,6 +268,10 @@ class RunClient:
 
     def request(self, method, path, data=None):
         self.calls.append((method, path, data))
+        if method == "GET" and path.startswith("/actions/runs?"):
+            if "status=success&" in path:
+                return {"total_count": 1, "workflow_runs": [{"id": 1}]}
+            return {"total_count": 0, "workflow_runs": []}
         if method == "GET" and path == "/":
             return {"allow_auto_merge": False}
         if method == "GET" and "matching-refs" in path:
@@ -281,6 +285,12 @@ class RunClient:
         if path == "/pulls/2" and self.cleanup_refused:
             raise core.Unavailable("PRIVATE-DETAIL")
         return {}
+
+    def issue(self, number):
+        return self.request("GET", f"/issues/{number}")
+
+    def guard_runs(self, status, *, timeout):
+        return self.request("GET", f"/actions/runs?event=issues&status={status}&per_page=1")
 
 
 def run_setup(tmp_path, monkeypatch, outcome):
@@ -297,6 +307,7 @@ def run_setup(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(smoke, "start_child", lambda *args: child)
     monkeypatch.setattr(smoke, "stop_child", lambda c: stopped.append(c))
     monkeypatch.setattr(smoke, "evidence", lambda *args: outcome)
+    monkeypatch.setattr(smoke, "guard_idle", lambda *args, **kwargs: True)
     return cfg, client, child, stopped
 
 
@@ -629,3 +640,184 @@ def test_status_token_422_explains_installation_permission(tmp_path, monkeypatch
     assert "step=status; AuthenticationError:" in err
     assert "App installation lacks Commit statuses permission on the framework repository" in err
     assert "function=lifecycle.app_tokens.request" in err
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress"])
+def test_approval_waits_for_guard(tmp_path, monkeypatch, status):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    elapsed = [0]
+    previous = client.request
+    def request(method, path, data=None):
+        if path.startswith("/actions/runs?") and f"status={status}&" in path:
+            active = elapsed[0] < 15
+            return {"total_count": int(active), "workflow_runs": [{"id": 1}] if active else []}
+        if method == "POST" and path == "/issues/1/labels":
+            assert elapsed[0] == 15
+        return previous(method, path, data)
+    client.request = request
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 0
+    assert sum(path == "/issues/1/labels" for _, path, _ in client.calls) == 1
+
+
+@pytest.mark.parametrize("request_seconds", [0, 29, 30])
+def test_busy_guard_cleans_without_approval_or_status(tmp_path, monkeypatch, capsys, request_seconds):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    elapsed = [0]
+    previous = client.request
+    def request(method, path, data=None):
+        if path.startswith("/actions/runs?"):
+            return {"total_count": 1, "workflow_runs": [{"id": 1}]}
+        return previous(method, path, data)
+    client.request = request
+    budgets = []
+    def guard_runs(status, *, timeout):
+        budgets.append(timeout)
+        assert 0 < timeout <= min(30, 120 - elapsed[0])
+        elapsed[0] += min(request_seconds, timeout)
+        return request("GET", f"/actions/runs?event=issues&status={status}&per_page=1")
+    client.guard_runs = guard_runs
+    completed = []
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                     completed=lambda *args: completed.append(args)) == 1
+    assert elapsed[0] == 120
+    assert budgets
+    assert not stopped and not completed
+    assert not any(path == "/issues/1/labels" or "/statuses/" in path for _, path, _ in client.calls)
+    assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
+    assert "stop=busy" in capsys.readouterr().out
+
+
+def test_initially_empty_guard_results_wait_for_new_run_to_finish(tmp_path, monkeypatch):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    elapsed = [0]
+    previous = client.request
+    def request(method, path, data=None):
+        if path == "/actions/runs?event=issues&per_page=1":
+            return {"total_count": 1, "workflow_runs": [{"id": 9}]}
+        if path.startswith("/actions/runs?"):
+            # The opened run is initially invisible. Historical successes do
+            # not prove the new story was processed.
+            status = ("queued" if elapsed[0] < 15 else "in_progress") if elapsed[0] < 20 else "success"
+            visible = elapsed[0] >= 5 and f"status={status}&" in path
+            if "status=success&" in path and elapsed[0] < 20:
+                return {"total_count": 1, "workflow_runs": [{"id": 9}]}
+            return {"total_count": int(visible), "workflow_runs": [{"id": 10}] if visible else []}
+        if path == "/issues/1/labels":
+            assert elapsed[0] == 20
+        return previous(method, path, data)
+    client.request = request
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 0
+    assert sum(path == "/issues/1/labels" for _, path, _ in client.calls) == 1
+
+
+def test_guard_never_visible_is_busy():
+    elapsed = [0]
+    client = SimpleNamespace(guard_runs=lambda *args, **kwargs: {"total_count": 0, "workflow_runs": []})
+    assert not smoke.guard_idle(client, 0, clock=lambda: elapsed[0],
+                                sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
+    assert elapsed[0] == 120
+
+
+@pytest.mark.parametrize("failed_request", [1, 4])
+def test_guard_timeout_at_deadline_is_busy(failed_request):
+    elapsed = [0]
+    calls = []
+    def guard_runs(status, *, timeout):
+        calls.append(status)
+        elapsed[0] += timeout
+        if len(calls) == failed_request:
+            raise core.Unavailable("synthetic timeout")
+        return {"total_count": 0, "workflow_runs": []}
+    # An earlier request failure remains unavailable, rather than pretending
+    # that GitHub established an idle guard.
+    if failed_request == 1:
+        with pytest.raises(core.Unavailable):
+            smoke.guard_idle(SimpleNamespace(guard_runs=guard_runs), 0,
+                             clock=lambda: elapsed[0], sleep=lambda _: None)
+    else:
+        assert not smoke.guard_idle(SimpleNamespace(guard_runs=guard_runs), 0,
+                                    clock=lambda: elapsed[0], sleep=lambda _: None)
+        assert elapsed[0] == 120
+
+
+def test_guard_transport_uses_remaining_budget():
+    client = smoke.SmokeGitHub({"repository": "example/scratch", "actors": {
+        "runner": "runner", "owner": "owner"}}, token="synthetic")
+    calls = []
+    def open_request(req, *, timeout):
+        calls.append((req.full_url, timeout))
+        return io.BytesIO(b'{"total_count": 0, "workflow_runs": []}')
+    client.opener = SimpleNamespace(open=open_request)
+    assert client.guard_runs("queued", timeout=2.5) == {"total_count": 0, "workflow_runs": []}
+    assert calls == [("https://api.github.com/repos/example/scratch/actions/runs?event=issues&status=queued&per_page=1", 2.5)]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "server"])
+@pytest.mark.parametrize("applied", [True, False])
+def test_unclear_approval_is_read_and_never_resent(tmp_path, monkeypatch, failure, applied):
+    import urllib.error
+
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    wire = smoke.SmokeGitHub({"repository": cfg["repository"], "actors": {
+        "runner": cfg["actors"]["owner"], "owner": cfg["actors"]["runner"]}}, token="synthetic")
+    wire.identity_verified = True
+    attempts = []
+    def open_request(req, **kwargs):
+        attempts.append(req.method)
+        if req.method == "POST":
+            if failure == "timeout":
+                raise TimeoutError("synthetic")
+            raise urllib.error.HTTPError(req.full_url, 503, "synthetic", {}, None)
+        return io.BytesIO(json.dumps({"labels": [{"name": "status:approved"}] if applied else []}).encode())
+    wire.opener = SimpleNamespace(open=open_request)
+    previous = client.request
+    def request(method, path, data=None):
+        if path in {"/issues/1/labels", "/issues/1"} and method in {"POST", "GET"}:
+            return wire.request(method, path, data)
+        return previous(method, path, data)
+    client.request = request
+    assert smoke.run(cfg, "main") == (0 if applied else 1)
+    assert attempts == ["POST", "GET"]
+    assert bool(stopped) == applied
+    assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
+
+
+def test_unrecorded_approval_ends_after_three_minutes(tmp_path, monkeypatch):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (0, False, "pending"))
+    # Exercise actual record/label detection, rather than supplying the new category.
+    monkeypatch.setattr(smoke, "evidence", smoke_evidence)
+    client.comments = lambda number: []
+    client.issue = lambda number: {"labels": [{"name": "status:approved"}]}
+    elapsed = [0]
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 1
+    assert elapsed[0] == 180 and stopped
+    assert client.calls[-1][2]["description"] == (
+        "FAIL; furthest=admission; next=approval; stop=approval_unrecorded.")
+
+
+# Preserve the real observer for integration tests whose setup replaces it.
+smoke_evidence = smoke.evidence
+smoke_guard_idle = smoke.guard_idle
+
+
+@pytest.mark.parametrize("recovery", ["label-cleared", "record-arrived"])
+def test_unrecorded_approval_timer_recovers(tmp_path, monkeypatch, recovery):
+    policy, recorded, _ = evidence_setup(tmp_path / "recorded")
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (0, False, "pending"))
+    elapsed = [0]
+    client.comments = lambda number: recorded.rows[:1] if recovery == "record-arrived" and elapsed[0] >= 175 else []
+    client.issue = lambda number: {"labels": [] if elapsed[0] == 175 else ["status:approved"]}
+    # The recorded approval is for issue 10; observe it with its matching policy.
+    monkeypatch.setattr(smoke, "evidence", lambda *args: smoke_evidence(policy, client, 10))
+    cfg["timeout_seconds"] = 400 if recovery == "record-arrived" else 1800
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 1
+    assert elapsed[0] == (400 if recovery == "record-arrived" else 360)
+    assert ("stop=timeout" if recovery == "record-arrived" else "stop=approval_unrecorded") in client.calls[-1][2]["description"]

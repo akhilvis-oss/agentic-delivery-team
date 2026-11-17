@@ -6,6 +6,7 @@ import copy
 import contextlib
 import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -153,6 +154,25 @@ class SmokeGitHub(core.GitHub):
         return super().write_allowed(method, path) or (
             method == "PATCH" and bool(re.fullmatch(r"/pulls/[1-9]\d*", path)))
 
+    def guard_runs(self, query, *, timeout):
+        """Read Actions with the guard wait's remaining request budget.
+
+        Admission has already authenticated this client. This read cannot
+        refresh credentials or make writes while waiting for the guard.
+        """
+        if not re.fullmatch(r"(?:queued|in_progress|waiting|pending|requested|success)", query):
+            raise ValueError("Invalid guard run query")
+        req = urllib.request.Request(
+            "https://api.github.com/repos/" + self.cfg["repository"]
+            + f"/actions/runs?event=issues&status={query}&per_page=1",
+            headers={"Authorization": "Bearer " + self.token,
+                     "Accept": "application/vnd.github+json"})
+        try:
+            with self.opener.open(req, timeout=timeout) as response:
+                return json.loads(response.read())
+        except (OSError, ValueError):
+            raise core.Unavailable("Issue workflow activity unavailable") from None
+
     def request(self, method, path, data=None):
         if method != "DELETE":
             return super().request(method, path, data)
@@ -196,6 +216,69 @@ def status_client(cfg):
         "app_auth": {"runner": cfg["app_auth"]["framework_runner"]}})
 
 
+def run_count(result):
+    if (not isinstance(result, dict) or type(result.get("total_count")) is not int
+            or result["total_count"] < 0 or not isinstance(result.get("workflow_runs"), list)
+            or len(result["workflow_runs"]) != min(result["total_count"], 1)):
+        raise core.Unavailable("Issue workflow activity unavailable")
+    return result["total_count"]
+
+
+def latest_run(result):
+    if not run_count(result):
+        return 0
+    row = result["workflow_runs"][0]
+    if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] < 1:
+        raise core.Unavailable("Issue workflow identity unavailable")
+    return row["id"]
+
+
+def guard_idle(client, previous_run, *, clock, sleep):
+    """Wait at most two minutes for scratch issue workflows to drain.
+
+    Actions does not bind issue runs to issue numbers. Admission requires an
+    empty scratch repository, so conservatively include every issue workflow.
+    """
+    deadline = clock() + 120
+    while True:
+        busy = False
+        processed = False
+        # Require a successful run newer than the pre-filing snapshot. Empty
+        # results can mean that GitHub has not made the opened event visible yet.
+        for status in ("success", "queued", "in_progress", "waiting", "pending", "requested"):
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False
+            try:
+                result = client.guard_runs(status, timeout=min(30, remaining))
+            except core.Unavailable:
+                if clock() >= deadline:
+                    return False
+                raise
+            if clock() >= deadline:
+                return False
+            if status == "success":
+                processed = latest_run(result) > previous_run
+            else:
+                busy |= run_count(result) > 0
+        if processed and not busy:
+            return True
+        observed = clock()
+        if observed >= deadline:
+            return False
+        sleep(min(5, deadline - observed))
+
+
+def approve_once(client, number):
+    try:
+        client.request("POST", f"/issues/{number}/labels", {"labels": ["status:approved"]})
+    except core.Uncertain:
+        labels = {label["name"] if isinstance(label, dict) else label
+                  for label in client.issue(number)["labels"]}
+        if "status:approved" not in labels:
+            raise core.Unavailable("Approval was not confirmed") from None
+
+
 def evidence(policy, client, number):
     """Return contiguous progress, a terminal flag and a fixed public stop category."""
     history = core.records(policy, client.comments(number), number)
@@ -210,6 +293,8 @@ def evidence(policy, client, number):
         terminal, category = False, "stop_unrecorded"
     approvals = [r for r in history if r["kind"] == "approval"]
     if not approvals:
+        if "status:approved" in labels:
+            return 0, False, "approval_unrecorded"
         return 0, terminal, category
     approval = approvals[-1]
     job = f"issue-{number}-event-{approval['event']}"
@@ -330,7 +415,8 @@ def stop_child(child):
 def description(agent, passed, progress, category):
     # All fields are allowlisted; never interpolate exceptions, agent prose or API text.
     if category not in set(core.STOP_REASONS) | {"pending", "timeout", "child_stopped", "unavailable",
-                                          "cleanup_failed", "gate_failed", "busy", "stop_unrecorded"}:
+                                          "cleanup_failed", "gate_failed", "busy", "stop_unrecorded",
+                                          "approval_unrecorded"}:
         category = "unavailable"
     text = (f"{'PASS' if passed else 'FAIL'}; furthest={STAGES[progress]}; "
             f"next={STAGES[min(progress + 1, 6)]}; stop={category}.")
@@ -419,36 +505,46 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                              str(root / "repository")], cwd=root, env=env)
                     story = (ROOT / "tests/smoke/story.md").read_text() + "\n" + marker
                     step = "approval"
+                    previous_run = latest_run(runner.request(
+                        "GET", "/actions/runs?event=issues&per_page=1"))
                     creation_attempted = True
                     issue = owner.request("POST", "/issues", {"title": "Lifecycle smoke story",
                                           "body": story, "labels": ["status:draft"]})
                     number = issue["number"]
-                    owner.request("POST", f"/issues/{number}/labels", {"labels": ["status:approved"]})
-                    deadline = clock() + cfg.get("timeout_seconds", 1800)
-                    step = "start-child"
-                    child = start_child(install, config_path, env)
-                    unrecorded_since = None
-                    while True:
-                        step = "evidence"
-                        progress, terminal, category = evidence(policy, runner, number)
-                        observed = clock()
-                        if category == "stop_unrecorded":
-                            if unrecorded_since is None:
-                                unrecorded_since = observed
-                            if observed - unrecorded_since >= 180:
+                    step = "guard-idle"
+                    if not guard_idle(runner, previous_run, clock=clock, sleep=sleep):
+                        category = "busy"
+                    else:
+                        step = "approval"
+                        approve_once(owner, number)
+                        deadline = clock() + cfg.get("timeout_seconds", 1800)
+                        step = "start-child"
+                        child = start_child(install, config_path, env)
+                        unrecorded_since = None
+                        unrecorded_category = None
+                        while True:
+                            step = "evidence"
+                            progress, terminal, category = evidence(policy, runner, number)
+                            observed = clock()
+                            if category in {"stop_unrecorded", "approval_unrecorded"}:
+                                if unrecorded_since is None or category != unrecorded_category:
+                                    unrecorded_since = observed
+                                unrecorded_category = category
+                                if observed - unrecorded_since >= 180:
+                                    break
+                            else:
+                                unrecorded_since = None
+                                unrecorded_category = None
+                            if observed >= deadline:
+                                category = "timeout"
                                 break
-                        else:
-                            unrecorded_since = None
-                        if observed >= deadline:
-                            category = "timeout"
-                            break
-                        if terminal:
-                            passed = progress == 6
-                            break
-                        if child.poll() is not None:
-                            category = "child_stopped"
-                            break
-                        sleep(min(5, max(0, deadline - clock())))
+                            if terminal:
+                                passed = progress == 6
+                                break
+                            if child.poll() is not None:
+                                category = "child_stopped"
+                                break
+                            sleep(min(5, max(0, deadline - clock())))
             except (Exception, KeyboardInterrupt) as error:
                 diagnose(step, error)
                 category = "unavailable"
