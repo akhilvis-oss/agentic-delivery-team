@@ -1030,3 +1030,42 @@ def test_category_normalizes_trusted_base_config(delivery, monkeypatch):
         client, {"repository": "example/kit"}, client.pr, integration.load_gate())
     assert errors == [] and minimum == "domain-critical"
     assert reads == ["/contents/.github/review-gate.json?ref=" + job["base_commit"]]
+
+
+@pytest.mark.parametrize("passed", [False, True])
+def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, passed):
+    _, _, job, client = delivery
+    client.allow_auto_merge = False
+    pages = client.pages
+
+    def status_pages(path):
+        if path == f"/commits/{job['reviewed_head']}/statuses":
+            return ([{"context": "smoke/fixture", "state": "success",
+                      "creator": {"login": "runner-bot"}}] if passed else [])
+        return pages(path)
+
+    monkeypatch.setattr(client, "pages", status_pages)
+    advance(delivery)
+    notices = [w[2]["body"] for w in client.writes if w[1] == "/issues/1/comments"
+               and "needs your merge" in w[2]["body"]]
+    assert len(notices) == 1
+    assert ("smoke/fixture: passed" if passed else "Smoke: pending") in notices[0]
+    assert job["reviewed_head"] in notices[0]
+
+
+def test_smoke_notice_uses_separate_status_token(app_transport, monkeypatch):
+    core, cfg, _, prepare = app_transport
+    prepare(DELIVERY_PERMISSIONS)
+    client = integration.client_for(core, cfg, {
+        "lifecycle_config": "synthetic", "integration": {"enabled": True, "declared_tier": "standard"}})
+    api = prepare({"statuses": "write"})
+    observed = []
+
+    def pages(self, path):
+        observed.append(path)
+        return []
+
+    monkeypatch.setattr(core.GitHub, "pages", pages)
+    assert client.smoke_statuses("a" * 40) == []
+    assert observed == ["/commits/" + "a" * 40 + "/statuses"]
+    assert json.loads(api.calls[2].data)["permissions"] == {"statuses": "write"}

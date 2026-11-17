@@ -1,5 +1,8 @@
 {
   "framework_repository": "<FRAMEWORK_OWNER>/<FRAMEWORK_REPOSITORY>",
+  "framework_owner": "<FRAMEWORK_OWNER_LOGIN>",
+  "framework_runner": "<FRAMEWORK_RUNNER_BOT_LOGIN>",
+  "daily_cap": 12,
   "repository": "<SCRATCH_OWNER>/<SCRATCH_REPOSITORY>",
   "agent_name": "<AGENT_NAME>",
   "lock_dir": "<ABSOLUTE_PRIVATE_SMOKE_LOCK_DIRECTORY>",

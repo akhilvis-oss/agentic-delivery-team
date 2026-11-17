@@ -40,6 +40,27 @@ class OwnerMergeRequired(RuntimeError):
     """GitHub definitively refused repository auto-merge; no write occurred."""
 
 
+def smoke_notice(client, cfg, head):
+    """Report advisory App results only on the reviewed commit."""
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            return "Smoke: pending on the reviewed head."
+        latest = {}
+        rows = (client.smoke_statuses(head) if hasattr(client, "smoke_statuses") else
+                client.pages(f"/commits/{head}/statuses"))
+        for row in rows:
+            context = row.get("context", "")
+            if (re.fullmatch(r"smoke/[a-z0-9][a-z0-9_-]{0,79}", context)
+                    and row.get("creator", {}).get("login") == cfg["actors"]["runner"]):
+                latest.setdefault(context, row.get("state"))
+        if latest:
+            return "\n".join(context + (": passed" if state == "success" else ": pending")
+                             + " on the reviewed head." for context, state in sorted(latest.items()))
+    except Exception:
+        pass
+    return "Smoke: pending on the reviewed head."
+
+
 def options(config):
     value = config.get("integration", {"enabled": False})
     if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
@@ -80,6 +101,16 @@ def client_for(core, cfg, config=None):
     integration_enabled = options({} if config is None else config) is not None
 
     class DeliveryGitHub(core.GitHub):
+        def smoke_statuses(self, head):
+            # Delivery tokens deliberately lack commit-status authority. Reuse
+            # the harness's isolated status-only scope for this advisory read.
+            spec = importlib.util.spec_from_file_location(
+                "_smoke_notice_tokens", Path(__file__).resolve().parents[1] / "lifecycle/app_tokens.py")
+            tokens = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(tokens)
+            token, _ = tokens.mint(cfg, "runner", status_only=True)
+            return core.GitHub(cfg, token=token).pages(f"/commits/{head}/statuses")
+
         def write_allowed(self, method, path):
             return super().write_allowed(method, path) or (
                 method == "POST" and bool(re.fullmatch(r"/pulls(?:/[1-9]\d*/reviews)?", path))) or (
@@ -392,6 +423,7 @@ def advance(runner, config, path, job, client=None):
                 message = REASONS[reason]
                 if reason == "owner_merge_required" and delivery.get("pr"):
                     message += f"\nhttps://github.com/{cfg['repository']}/pull/{delivery['pr']}"
+                    message += "\n" + smoke_notice(client, cfg, job.get("reviewed_head", ""))
                 client.request("POST", f"/issues/{job['github_number']}/comments", {
                     "body": message + "\nReviewed head: " + job.get("reviewed_head", "unavailable")})
             except Exception:

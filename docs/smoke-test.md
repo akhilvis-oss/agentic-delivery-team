@@ -1,6 +1,6 @@
 # Live lifecycle smoke test
 
-Run one tiny story with the real configured agent before adopting candidate framework code. The harness belongs to the installed, pinned framework; it downloads the public candidate into a disposable install and starts that candidate's standalone lifecycle service as a child. It never reconfigures the running service, pinned install or lifecycle state. Pool execution and automatic PR/release smoke checks are outside this command's scope.
+Run one tiny story with the real configured agent before adopting candidate framework code. The harness belongs to the installed, pinned framework; it downloads the public candidate into a disposable install and starts that candidate's standalone lifecycle service as a child. It never reconfigures the running service, pinned install or lifecycle state. The watcher below schedules main and PR candidates; pool execution and release upgrades remain outside its scope.
 
 ## Setup
 
@@ -33,7 +33,7 @@ A pass requires GitHub evidence for all six stages: attested approval; dispatch 
 
 After pass, failure or timeout, the harness attempts to close the story PR and issue, close the candidate's heartbeat report, and delete matching story branches and saved continuation references. Local installs, worktrees and continuation refs disappear with the temporary directory. Cleanup errors make the run fail; reconcile leftover scratch resources manually before retrying. An uncertain issue creation is looked up by its unique run marker and closed without approving or repeating the write. A process crash, machine shutdown or unavailable GitHub can still require manual reconciliation. The harness does not retry ambiguous writes.
 
-Exit status is zero only when every stage and cleanup passed and the commit status was posted. A refused status post prints the result plus a missing/unavailable permission message and exits nonzero. Check the App permission and installation acceptance before retrying. This advisory status is not automatically wired into PR delivery or releases.
+Exit status is zero only when every stage and cleanup passed and the commit status was posted. A refused status post prints the result plus a missing/unavailable permission message and exits nonzero. Check the App permission and installation acceptance before retrying. This status remains advisory and does not authorize service upgrades.
 
 ## Verification and limits
 
@@ -42,3 +42,57 @@ Offline tests use synthetic clients and the existing GitHub recordings; they nev
 The live exit test is an owner step after merge: grant status permission, write the private config, re-pin the service, then smoke-test main and the owner-prepared schema-regression branch. Main must pass; the regression must fail at review. This worker does not perform the live run or change the scratch repository.
 
 Known limit: the candidate runs as the **same OS user** as the harness. Its configuration and environment contain no framework key, token, Keychain reference or framework repository authority. Only scratch runner App references are exported; the smoke owner key stays in the harness. This is credential minimization, not an OS security boundary: candidate code can still attempt to access that user's files or Keychain. Operating-system separation of keys from code under test comes in M4. Use only owner-approved candidate code under this temporary exception.
+
+## Automatic watcher
+
+Run the watcher from the separately exported, approved release, using the same
+private smoke config and Python as the manual command:
+
+```sh
+python -m lifecycle.service --config /absolute/private/smoke.json smoke-watch
+```
+
+Set `framework_owner` to the framework repository owner's login and
+`framework_runner` to its runner App login (the same value as
+`actors.framework_runner`). These optional additions are required for the
+watcher; existing manual configs remain compatible. `daily_cap` defaults to 12.
+The framework App installation must already permit Contents, Pull requests,
+Checks and Actions read, Issues write, and Commit statuses write. Discovery and
+service-result comments use a separate repository-scoped Product token; status
+writes retain the existing status-only token. No workflow permissions change.
+
+Copy `templates/lifecycle-smoke.plist.example` into a private launchd definition,
+replace its placeholders, and load it once after owner review. It runs every
+300 seconds and at load, exits after at most one candidate, and does not upgrade
+or reconfigure the service. Do not point the job at candidate code.
+
+Each invocation considers the current main commit first, then open PR heads in
+PR-number order. Only owner- or framework-runner-authored PRs whose head and base
+repositories match the configured framework repository qualify. It refreshes PR
+metadata before admission to skip superseded heads. A status in `smoke/<agent>`
+from the framework runner App, including failure or pending, suppresses automatic
+execution; statuses from other identities do not. The manual `smoke --candidate`
+command above explicitly reruns a tested commit.
+
+A complete docs-only comparison against the last locally recorded successful
+commit posts success naming that passed commit instead of executing code. An
+existing successful candidate status can seed that baseline on first use. Only
+`docs/` and `*.md` differences qualify, including both sides of renames;
+ambiguous or potentially truncated comparisons run the smoke instead.
+
+The watcher keeps a private per-repository/agent journal beside the shared scratch
+locks. The daily cap counts candidates, including docs shortcuts, in UTC. Busy
+scratch repositories and held locks leave no status and consume no run, allowing
+retry at the next tick. Completed failures count and never automatically rerun.
+Definite candidate-fetch or export failures also release the reservation and
+daily count without posting a status, so the next invocation retries preparation.
+Durable reservations prevent repeat execution after crashes or uncertain writes;
+these require operator reconciliation rather than automatic replay. Preserve the
+journal across job restarts. The journal and local locks are not distributed:
+use one watcher machine per scratch repository.
+
+After completion, a separate last-smoke comment on the service status issue shows
+the candidate, result and stage without private output. Comment publication can
+retry independently of execution. Runner owner-merge notices report whether the
+runner App's smoke status passed on the reviewed head or is still pending. These
+results remain advisory; no required check or service upgrade is added here.

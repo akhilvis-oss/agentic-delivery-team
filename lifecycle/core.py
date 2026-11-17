@@ -875,7 +875,9 @@ class GitHub:
         ))
 
     def request(self, method, path, data=None):
-        if not path.startswith("/") or ".." in path or "#" in path or "\\" in path:
+        comparison = method == "GET" and re.fullmatch(r"/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
+        if (not path.startswith("/") or (".." in path and not comparison)
+                or "#" in path or "\\" in path):
             raise ValueError("Invalid repository API path")
         self.ensure_actor()
         if method != "GET":

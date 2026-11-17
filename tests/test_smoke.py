@@ -19,6 +19,7 @@ from test_lifecycle_app_tokens import API, AT, configured
 def config(tmp_path):
     cfg = core.read(smoke.ROOT / "runner/smoke.example.json")
     cfg.update(framework_repository="example/framework", repository="example/scratch",
+               framework_owner="fixture-owner", framework_runner="framework-runner[bot]",
                agent_name="codex", lock_dir=str(tmp_path / "locks"))
     cfg["actors"] = {"runner": "smoke-runner[bot]", "owner": "smoke-owner[bot]",
                      "framework_runner": "framework-runner[bot]"}
@@ -334,7 +335,7 @@ def test_open_scratch_work_refuses_start(tmp_path, monkeypatch, busy):
     assert smoke.run(cfg, "main") == 1
     assert not stopped
     assert not any(method in {"PATCH", "DELETE"} or path == "/issues" for method, path, _ in client.calls)
-    assert "stop=busy" in client.calls[-1][2]["description"]
+    assert not any("/statuses/" in path for _, path, _ in client.calls)
 
 
 def test_all_status_text_is_public_and_fits_github():

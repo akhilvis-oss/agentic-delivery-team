@@ -24,11 +24,16 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.
 STAGES = ("admission", "approval", "build", "review", "pull-request", "review-gate", "owner-merge")
 
 
+class PreparationFailed(core.Unavailable):
+    """Candidate preparation failed before any scratch write or execution."""
+
+
 def load_config(path):
     cfg = core.read(path)
     required = {"framework_repository", "repository", "agent_name", "lock_dir",
                 "actors", "app_auth", "runner"}
-    if (not required <= set(cfg) or set(cfg) - required - {"timeout_seconds", "trusted_gate_workflow"}
+    if (not required <= set(cfg) or set(cfg) - required - {"timeout_seconds", "trusted_gate_workflow",
+            "framework_owner", "framework_runner", "daily_cap"}
             or any(not REPOSITORY.fullmatch(cfg[k]) for k in ("repository", "framework_repository"))
             or cfg["repository"] == cfg["framework_repository"]
             or not core.ID.fullmatch(cfg["agent_name"])
@@ -36,6 +41,13 @@ def load_config(path):
             or not Path(cfg["lock_dir"]).is_absolute()):
         raise ValueError("Invalid smoke configuration")
     timeout = cfg.get("timeout_seconds", 1800)
+    for field in ("framework_owner", "framework_runner"):
+        if field in cfg and not core.LOGIN.fullmatch(cfg[field]):
+            raise ValueError("Invalid framework identity")
+    if (type(cfg.get("daily_cap", 12)) is not int or cfg.get("daily_cap", 12) < 1
+            or cfg.get("framework_runner", cfg["actors"]["framework_runner"])
+            != cfg["actors"]["framework_runner"]):
+        raise ValueError("Invalid smoke watcher settings")
     if type(timeout) is not int or not 1 <= timeout <= 86400:
         raise ValueError("Invalid smoke timeout")
     if (set(cfg["actors"]) != {"runner", "owner", "framework_runner"}
@@ -315,7 +327,7 @@ def description(agent, passed, progress, category):
     return text
 
 
-def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep):
+def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=None):
     progress, category, passed = 0, "unavailable", False
     with core.lock(Path(cfg["lock_dir"]) / (core.key(cfg["repository"]) + ".lock")) as acquired:
         if not acquired:
@@ -323,9 +335,12 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep):
             return 1
         with tempfile.TemporaryDirectory(prefix="lifecycle-smoke-") as folder:
             root = Path(folder)
-            home = core.private(root / "home")
-            env = environment(home)
-            install, sha = export_candidate(cfg, candidate, root, env)
+            try:
+                home = core.private(root / "home")
+                env = environment(home)
+                install, sha = export_candidate(cfg, candidate, root, env)
+            except Exception:
+                raise PreparationFailed("Candidate preparation unavailable") from None
             policy = runner = None
             number = child = None
             marker = "<!-- agentic-smoke-run:" + uuid.uuid4().hex + " -->"
@@ -384,6 +399,10 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep):
                     passed, category = False, "cleanup_failed"
             text = description(cfg["agent_name"], passed, progress, category)
             print("smoke/" + cfg["agent_name"] + ": " + text)
+            if category == "busy":
+                return 1
+            if completed is not None:
+                completed(sha, "success" if passed else "failure", text)
             try:
                 status_client(cfg).request("POST", "/statuses/" + sha, {
                     "state": "success" if passed else "failure", "context": "smoke/" + cfg["agent_name"],
