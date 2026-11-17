@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import fcntl
 import io
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -199,6 +202,12 @@ def evidence(policy, client, number):
     stop = next((r for r in reversed(history) if r["to"] in {"blocked", "needs-owner", "needs-primary"}), None)
     category = stop["reason"] if stop else "pending"
     terminal = stop is not None
+    labels = {label["name"] if isinstance(label, dict) else label
+              for label in client.issue(number).get("labels", [])}
+    stop_labels = labels & {"status:blocked", "status:needs-owner"}
+    if any(not any(r["to"] == label.removeprefix("status:") for r in history)
+           for label in stop_labels):
+        terminal, category = False, "stop_unrecorded"
     approvals = [r for r in history if r["kind"] == "approval"]
     if not approvals:
         return 0, terminal, category
@@ -292,9 +301,11 @@ def cleanup(policy, client, number):
 
 
 def start_child(install, config_path, env):
-    return subprocess.Popen([sys.executable, "-m", "lifecycle.service", "--config", str(config_path), "serve"],
-                            cwd=install, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True)
+    with (config_path.parent / "candidate.log").open("ab") as log:
+        os.fchmod(log.fileno(), 0o600)
+        return subprocess.Popen([sys.executable, "-m", "lifecycle.service", "--config", str(config_path), "serve"],
+                                cwd=install, env=env, stdout=log, stderr=log,
+                                start_new_session=True)
 
 
 def stop_child(child):
@@ -319,7 +330,7 @@ def stop_child(child):
 def description(agent, passed, progress, category):
     # All fields are allowlisted; never interpolate exceptions, agent prose or API text.
     if category not in set(core.STOP_REASONS) | {"pending", "timeout", "child_stopped", "unavailable",
-                                          "cleanup_failed", "gate_failed", "busy"}:
+                                          "cleanup_failed", "gate_failed", "busy", "stop_unrecorded"}:
         category = "unavailable"
     text = (f"{'PASS' if passed else 'FAIL'}; furthest={STAGES[progress]}; "
             f"next={STAGES[min(progress + 1, 6)]}; stop={category}.")
@@ -345,14 +356,42 @@ def diagnose(step, error):
           file=sys.stderr)
 
 
+def failed_runs_directory(cfg):
+    # Separate from candidate repositories and service state, private to this OS user.
+    return core.private(Path(tempfile.gettempdir()) / f"lifecycle-smoke-failures-{os.getuid()}")
+
+
+@contextlib.contextmanager
+def workspace(cfg):
+    result = {"passed": False}
+    with tempfile.TemporaryDirectory(prefix="lifecycle-smoke-") as folder:
+        root = Path(folder)
+        try:
+            yield root, result
+        finally:
+            if not result["passed"]:
+                parent = failed_runs_directory(cfg)
+                fd = os.open(parent / ".retention.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "a+") as handle:
+                    # Different scratch repositories may finish concurrently.
+                    fcntl.flock(handle, fcntl.LOCK_EX)
+                    destination = parent / f"{time.time_ns():020d}-{uuid.uuid4().hex}"
+                    shutil.move(str(root), destination)
+                    print(f"Smoke failure evidence: {destination}", file=sys.stderr)
+                    runs = sorted(p for p in parent.iterdir()
+                                  if re.fullmatch(r"[0-9]{20}-[0-9a-f]{32}", p.name)
+                                  and p.is_dir() and not p.is_symlink())
+                    for old in runs[:-3]:
+                        shutil.rmtree(old)
+
+
 def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=None):
     progress, category, passed = 0, "unavailable", False
     with core.lock(Path(cfg["lock_dir"]) / (core.key(cfg["repository"]) + ".lock")) as acquired:
         if not acquired:
             print("smoke/" + cfg["agent_name"] + ": " + description(cfg["agent_name"], False, 0, "busy"))
             return 1
-        with tempfile.TemporaryDirectory(prefix="lifecycle-smoke-") as folder:
-            root = Path(folder)
+        with workspace(cfg) as (root, result):
             try:
                 home = core.private(root / "home")
                 env = environment(home)
@@ -388,10 +427,19 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                     deadline = clock() + cfg.get("timeout_seconds", 1800)
                     step = "start-child"
                     child = start_child(install, config_path, env)
+                    unrecorded_since = None
                     while True:
                         step = "evidence"
                         progress, terminal, category = evidence(policy, runner, number)
-                        if clock() >= deadline:
+                        observed = clock()
+                        if category == "stop_unrecorded":
+                            if unrecorded_since is None:
+                                unrecorded_since = observed
+                            if observed - unrecorded_since >= 180:
+                                break
+                        else:
+                            unrecorded_since = None
+                        if observed >= deadline:
                             category = "timeout"
                             break
                         if terminal:
@@ -440,6 +488,7 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                 diagnose("status", error)
                 print("Commit status permission missing or unavailable; result could not be posted.")
                 return 1
+            result["passed"] = passed
             return 0 if passed else 1
 
 
