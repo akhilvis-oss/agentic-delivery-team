@@ -2,6 +2,14 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## v0.5.7 (2026-11-17): Delivery fix and the smoke test harness
+- **Fixed:** delivery asked GitHub for the repository's settings with a trailing slash, which GitHub rejects. Every light or standard story that reached the merge decision failed there, since v0.5.5 (#153).
+- **Fixed:** the replay test helper now serves a recording only for the exact request it was captured with, so a request built wrongly fails its test (#153).
+- **Fixed:** Keychain lookups use the account's home folder from the system, not `$HOME` (#153).
+- **New, optional:** a live smoke test runs one tiny story through the real lifecycle on candidate code, against a scratch repository, and posts `smoke/<agent>` on the commit (#149). A watcher runs it on new commits and on the owner's and runner's pull requests (#151). Merge notices can show the result with `integration.smoke_reporting` (off by default). Failures print one local diagnostic line (#153). See [docs/smoke-test.md](docs/smoke-test.md).
+- **Tests:** recorded GitHub responses and replay tests for the trusted gate, delivery and one-click approval (#139, #140, #146).
+- **Design:** the M1 design note, [docs/design/m1-consolidate.md](docs/design/m1-consolidate.md) (#148).
+
 ## v0.5.6 (2026-11-15): Self-contained hosted lifecycle guard
 - Delivery attempts auto-merge when GitHub omits `allow_auto_merge`; an explicit disabled setting or a not-allowed refusal still stops for the owner's merge (#144).
 - Fixed the hosted guard failing on stop summaries, review findings and builder questions: shared private-content rules now ship inside the lifecycle sparse checkout (#141).
