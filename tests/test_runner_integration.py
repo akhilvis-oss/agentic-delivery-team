@@ -1032,16 +1032,18 @@ def test_category_normalizes_trusted_base_config(delivery, monkeypatch):
     assert reads == ["/contents/.github/review-gate.json?ref=" + job["base_commit"]]
 
 
-@pytest.mark.parametrize("passed", [False, True])
-def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, passed):
-    _, _, job, client = delivery
+@pytest.mark.parametrize("state,label", [("success", "passed"), ("failure", "failed"),
+                                             ("error", "failed"), ("pending", "pending")])
+def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, state, label):
+    config, _, job, client = delivery
+    config["integration"]["smoke_reporting"] = True
     client.allow_auto_merge = False
     pages = client.pages
 
     def status_pages(path):
         if path == f"/commits/{job['reviewed_head']}/statuses":
-            return ([{"context": "smoke/fixture", "state": "success",
-                      "creator": {"login": "runner-bot"}}] if passed else [])
+            return [{"context": "smoke/fixture", "state": state,
+                     "creator": {"login": "runner-bot"}}]
         return pages(path)
 
     monkeypatch.setattr(client, "pages", status_pages)
@@ -1049,7 +1051,7 @@ def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, passed)
     notices = [w[2]["body"] for w in client.writes if w[1] == "/issues/1/comments"
                and "needs your merge" in w[2]["body"]]
     assert len(notices) == 1
-    assert ("smoke/fixture: passed" if passed else "Smoke: pending") in notices[0]
+    assert "smoke/fixture: " + label in notices[0]
     assert job["reviewed_head"] in notices[0]
 
 
@@ -1069,3 +1071,23 @@ def test_smoke_notice_uses_separate_status_token(app_transport, monkeypatch):
     assert client.smoke_statuses("a" * 40) == []
     assert observed == ["/commits/" + "a" * 40 + "/statuses"]
     assert json.loads(api.calls[2].data)["permissions"] == {"statuses": "write"}
+
+
+@pytest.mark.parametrize("setting", [None, False])
+def test_owner_merge_notice_smoke_off_mints_no_token(delivery, monkeypatch, setting):
+    config, _, job, client = delivery
+    if setting is not None:
+        config["integration"]["smoke_reporting"] = setting
+    client.allow_auto_merge = False
+    monkeypatch.setattr(client, "smoke_statuses", lambda _: pytest.fail("status token must not be minted"),
+                        raising=False)
+    advance(delivery)
+    notices = [w[2]["body"] for w in client.writes if w[1] == "/issues/1/comments"
+               and "needs your merge" in w[2]["body"]]
+    assert len(notices) == 1
+    assert "smoke" not in notices[0].lower()
+
+
+def test_smoke_reporting_requires_boolean():
+    with pytest.raises(ValueError, match="Smoke reporting"):
+        integration.options({"integration": {"enabled": False, "smoke_reporting": "yes"}})

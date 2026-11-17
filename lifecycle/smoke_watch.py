@@ -159,6 +159,7 @@ def main(config_path):
             raise ValueError("Watcher requires framework identities")
         print(watch(cfg, framework_client(cfg), status_client=smoke.status_client(cfg)))
         return 0
-    except Exception:
+    except Exception as error:
+        smoke.diagnose("watcher", error)
         print("Smoke watcher stopped: configuration or GitHub prerequisite unavailable.")
         return 1

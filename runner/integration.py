@@ -54,7 +54,8 @@ def smoke_notice(client, cfg, head):
                     and row.get("creator", {}).get("login") == cfg["actors"]["runner"]):
                 latest.setdefault(context, row.get("state"))
         if latest:
-            return "\n".join(context + (": passed" if state == "success" else ": pending")
+            return "\n".join(context + (": passed" if state == "success" else
+                                      ": failed" if state in {"failure", "error"} else ": pending")
                              + " on the reviewed head." for context, state in sorted(latest.items()))
     except Exception:
         pass
@@ -65,6 +66,8 @@ def options(config):
     value = config.get("integration", {"enabled": False})
     if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
         raise ValueError("Integration requires an explicit enabled boolean")
+    if type(value.get("smoke_reporting", False)) is not bool:
+        raise ValueError("Smoke reporting requires a boolean")
     if not value["enabled"]:
         return None
     if (not config.get("lifecycle_config") or config.get("pool_slot") or config.get("phase_context")
@@ -423,7 +426,8 @@ def advance(runner, config, path, job, client=None):
                 message = REASONS[reason]
                 if reason == "owner_merge_required" and delivery.get("pr"):
                     message += f"\nhttps://github.com/{cfg['repository']}/pull/{delivery['pr']}"
-                    message += "\n" + smoke_notice(client, cfg, job.get("reviewed_head", ""))
+                    if opts.get("smoke_reporting", False):
+                        message += "\n" + smoke_notice(client, cfg, job.get("reviewed_head", ""))
                 client.request("POST", f"/issues/{job['github_number']}/comments", {
                     "body": message + "\nReviewed head: " + job.get("reviewed_head", "unavailable")})
             except Exception:

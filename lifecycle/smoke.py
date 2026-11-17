@@ -249,7 +249,8 @@ def cleanup(policy, client, number):
     def attempt(call):
         try:
             call()
-        except Exception:
+        except Exception as error:
+            diagnose("cleanup", error)
             errors.append(True)
     # Admission required an empty scratch repo; still restrict deletions to this issue.
     prs = []
@@ -327,6 +328,23 @@ def description(agent, passed, progress, category):
     return text
 
 
+def diagnose(step, error):
+    """Local stderr only; public statuses and comments never include exceptions."""
+    if getattr(error, "_smoke_diagnosed", False):
+        return
+    error._smoke_diagnosed = True
+    origin = "unknown"
+    trace = error.__traceback__
+    while trace is not None:
+        module = trace.tb_frame.f_globals.get("__name__", "")
+        if module.startswith(("lifecycle.", "runner.")):
+            origin = module + "." + trace.tb_frame.f_code.co_name
+        trace = trace.tb_next
+    message = " ".join(str(error).splitlines())
+    print(f"Smoke step={step}; {type(error).__name__}: {message}; function={origin}",
+          file=sys.stderr)
+
+
 def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=None):
     progress, category, passed = 0, "unavailable", False
     with core.lock(Path(cfg["lock_dir"]) / (core.key(cfg["repository"]) + ".lock")) as acquired:
@@ -339,12 +357,16 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                 home = core.private(root / "home")
                 env = environment(home)
                 install, sha = export_candidate(cfg, candidate, root, env)
-            except Exception:
-                raise PreparationFailed("Candidate preparation unavailable") from None
+            except Exception as error:
+                diagnose("preparation", error)
+                failure = PreparationFailed("Candidate preparation unavailable")
+                failure._smoke_diagnosed = True
+                raise failure from None
             policy = runner = None
             number = child = None
             marker = "<!-- agentic-smoke-run:" + uuid.uuid4().hex + " -->"
             creation_attempted = False
+            step = "admission"
             try:
                 policy, config_path = candidate_config(cfg, root)
                 runner, owner = clients(cfg, policy)
@@ -353,17 +375,21 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                 elif runner.request("GET", "/").get("allow_auto_merge") is True:
                     category = "unavailable"
                 else:
+                    step = "clone"
                     command(["git", "clone", "--", "https://github.com/" + cfg["repository"] + ".git",
                              str(root / "repository")], cwd=root, env=env)
                     story = (ROOT / "tests/smoke/story.md").read_text() + "\n" + marker
+                    step = "approval"
                     creation_attempted = True
                     issue = owner.request("POST", "/issues", {"title": "Lifecycle smoke story",
                                           "body": story, "labels": ["status:draft"]})
                     number = issue["number"]
                     owner.request("POST", f"/issues/{number}/labels", {"labels": ["status:approved"]})
                     deadline = clock() + cfg.get("timeout_seconds", 1800)
+                    step = "start-child"
                     child = start_child(install, config_path, env)
                     while True:
+                        step = "evidence"
                         progress, terminal, category = evidence(policy, runner, number)
                         if clock() >= deadline:
                             category = "timeout"
@@ -375,13 +401,15 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                             category = "child_stopped"
                             break
                         sleep(min(5, max(0, deadline - clock())))
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as error:
+                diagnose(step, error)
                 category = "unavailable"
             finally:
                 try:
                     if child is not None:
                         stop_child(child)
-                except Exception:
+                except Exception as error:
+                    diagnose("stop-child", error)
                     passed, category = False, "cleanup_failed"
                 if creation_attempted and number is None:
                     # A create may succeed despite a lost response. Discover by
@@ -393,7 +421,8 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                         for issue in orphaned:
                             if not cleanup(policy, runner, issue["number"]):
                                 category = "cleanup_failed"
-                    except Exception:
+                    except Exception as error:
+                        diagnose("cleanup-discovery", error)
                         category = "cleanup_failed"
                 if number is not None and not cleanup(policy, runner, number):
                     passed, category = False, "cleanup_failed"
@@ -407,7 +436,8 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                 status_client(cfg).request("POST", "/statuses/" + sha, {
                     "state": "success" if passed else "failure", "context": "smoke/" + cfg["agent_name"],
                     "description": text})
-            except Exception:
+            except Exception as error:
+                diagnose("status", error)
                 print("Commit status permission missing or unavailable; result could not be posted.")
                 return 1
             return 0 if passed else 1
@@ -416,6 +446,7 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
 def main(config_path, candidate):
     try:
         return run(load_config(config_path), candidate)
-    except Exception:
+    except Exception as error:
+        diagnose("configuration/preparation", error)
         print("Smoke refused: configuration, candidate or GitHub prerequisite unavailable.")
         return 1

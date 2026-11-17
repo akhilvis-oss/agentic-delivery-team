@@ -289,7 +289,7 @@ def test_merge_notice_pass_and_pending_on_reviewed_head(tmp_path):
     assert "smoke/codex: passed" in smoke_notice(client, policy, A)
     assert "pending" in smoke_notice(client, policy, B)
     client.row(A, state="failure")
-    assert "pending" in smoke_notice(client, policy, A)
+    assert "failed" in smoke_notice(client, policy, A)
 
 
 def test_null_head_repository_is_skipped(tmp_path):
@@ -323,3 +323,15 @@ def test_legacy_manual_config_remains_compatible(tmp_path):
     path = tmp_path / "legacy-smoke.json"
     core.save(path, cfg)
     assert smoke.load_config(path) == cfg
+
+
+def test_watcher_failure_has_local_diagnosis(monkeypatch, capsys):
+    def fail(_):
+        raise ValueError("local watcher detail")
+    monkeypatch.setattr(smoke, "load_config", fail)
+    assert smoke_watch.main("synthetic") == 1
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1
+    assert "step=watcher; ValueError: local watcher detail" in captured.err
+    assert "function=lifecycle.smoke_watch.main" in captured.err
+    assert "local watcher detail" not in captured.out

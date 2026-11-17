@@ -381,3 +381,31 @@ def test_mint_rejects_invalid_fetch_opt_in(tmp_path, monkeypatch, role, enabled)
     monkeypatch.setattr(auth, "keychain_pem", lambda s: pytest.fail("must reject before Keychain"))
     with pytest.raises(auth.AuthenticationError, match="fetch"):
         auth.mint(cfg, role, fetch_enabled=enabled)
+
+
+
+def test_keychain_home_comes_from_user_database(tmp_path, monkeypatch):
+    cfg = configured(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "temporary-home"))
+    account_home = str(tmp_path / "account-home")
+    seen = []
+    monkeypatch.setattr(auth.pwd, "getpwuid", lambda uid: (
+        seen.append(uid) or SimpleNamespace(pw_dir=account_home)))
+    def run(argv, **kwargs):
+        assert kwargs["env"]["HOME"] == account_home
+        return SimpleNamespace(stdout=base64.b64encode(
+            b"-----BEGIN PRIVATE " + b"KEY-----" + b"x" * 128))
+    monkeypatch.setattr(auth.subprocess, "run", run)
+    assert auth.keychain_pem(cfg["app_auth"]["runner"])
+    assert seen == [os.getuid()]
+
+
+
+def test_missing_user_database_home_fails_safely(tmp_path, monkeypatch):
+    cfg = configured(tmp_path)
+    def missing(_):
+        raise KeyError("synthetic account unavailable")
+    monkeypatch.setattr(auth.pwd, "getpwuid", missing)
+    monkeypatch.setattr(auth.subprocess, "run", lambda *a, **kw: pytest.fail("no Keychain lookup"))
+    with pytest.raises(auth.AuthenticationError, match="Keychain credential unavailable or malformed"):
+        auth.keychain_pem(cfg["app_auth"]["runner"])
