@@ -702,7 +702,7 @@ def schema(role, lifecycle=False, pool=False):
         finding["severity"]["enum"] = ["P0", "P1", "P2"]
         finding["criterion"] = {"type": "string"}
         fields["findings"] = {"type": "array", "items": {"type": "object", "properties": finding,
-                              "required": list(finding), "additionalProperties": False}}
+                              "required": ["severity", "path", "detail"], "additionalProperties": False}}
     if role == "worker":
         fields["owner_question"] = {"anyOf": [{"type": "null"}, {"type": "string"}]}
         fields["failed_tests"] = {"anyOf": [{"type": "null"}, {
