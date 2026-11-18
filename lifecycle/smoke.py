@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import contextlib
 import fcntl
+import http.client
 import io
 import json
 import os
@@ -171,7 +172,7 @@ class SmokeGitHub(core.GitHub):
         try:
             with self.opener.open(req, timeout=timeout) as response:
                 return json.loads(response.read())
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             raise core.Unavailable("Issue workflow activity unavailable") from None
 
     def request(self, method, path, data=None):

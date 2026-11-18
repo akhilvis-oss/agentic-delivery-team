@@ -2,6 +2,7 @@
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import http.client
 import io
 import json
 from pathlib import Path
@@ -947,3 +948,64 @@ def test_snapshot_transport_uses_remaining_budget():
     client.opener = SimpleNamespace(open=open_request)
     assert client.guard_runs(timeout=2.5) == {"total_count": 1, "workflow_runs": [{"id": 9}]}
     assert calls == [("https://api.github.com/repos/example/scratch/actions/runs?event=issues&per_page=1", 2.5)]
+
+
+@pytest.mark.parametrize("query", [None, "queued", "success"])
+@pytest.mark.parametrize("recovers", [True, False])
+def test_truncated_guard_response_retries_or_expires_busy(tmp_path, monkeypatch, capsys,
+                                                        query, recovers):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_snapshot", smoke_guard_snapshot)
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    wire = smoke.SmokeGitHub({"repository": cfg["repository"], "actors": {
+        "runner": "runner", "owner": "owner"}}, token="synthetic")
+    elapsed = [0]
+    sleeps = []
+    failed_reads = []
+
+    class TruncatedResponse(io.BytesIO):
+        def read(self):
+            raise http.client.IncompleteRead(b'{"total_count":', 20)
+
+    def open_request(req, *, timeout):
+        assert 0 < timeout <= min(30, 120 - elapsed[0])
+        status = next((s for s in ("queued", "success", "in_progress", "waiting", "pending", "requested")
+                       if f"status={s}&" in req.full_url), None)
+        if status == query and (not recovers or elapsed[0] == 0):
+            failed_reads.append(elapsed[0])
+            return TruncatedResponse()
+        result = {"total_count": 1, "workflow_runs": [{"id": 9 if status is None else 10}]}
+        if status not in (None, "success"):
+            result = {"total_count": 0, "workflow_runs": []}
+        return io.BytesIO(json.dumps(result).encode())
+
+    wire.opener = SimpleNamespace(open=open_request)
+    client.guard_runs = wire.guard_runs
+    request = client.request
+
+    def checked_request(method, path, data=None):
+        if method == "POST" and path == ("/issues" if query is None else "/issues/1/labels"):
+            assert recovers and elapsed[0] == 5
+        return request(method, path, data)
+
+    client.request = checked_request
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0], sleep=sleep) == (0 if recovers else 1)
+    assert elapsed[0] == (5 if recovers else 120)
+    assert failed_reads == ([0] if recovers else list(range(0, 120, 5)))
+    assert sleeps == [5] * (1 if recovers else 24)
+    if recovers:
+        assert sum(path == "/issues/1/labels" for _, path, _ in client.calls) == 1
+        assert stopped
+    else:
+        assert not stopped
+        assert not any(path == "/issues/1/labels" or "/statuses/" in path for _, path, _ in client.calls)
+        if query is None:
+            assert not any(method != "GET" for method, _, _ in client.calls)
+        else:
+            assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
+        assert "stop=busy" in capsys.readouterr().out
