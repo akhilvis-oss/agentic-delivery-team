@@ -2,6 +2,7 @@
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import http.client
 import io
 import json
 from pathlib import Path
@@ -289,8 +290,9 @@ class RunClient:
     def issue(self, number):
         return self.request("GET", f"/issues/{number}")
 
-    def guard_runs(self, status, *, timeout):
-        return self.request("GET", f"/actions/runs?event=issues&status={status}&per_page=1")
+    def guard_runs(self, status=None, *, timeout):
+        query = "" if status is None else f"&status={status}"
+        return self.request("GET", f"/actions/runs?event=issues{query}&per_page=1")
 
 
 def run_setup(tmp_path, monkeypatch, outcome):
@@ -308,6 +310,7 @@ def run_setup(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(smoke, "stop_child", lambda c: stopped.append(c))
     monkeypatch.setattr(smoke, "evidence", lambda *args: outcome)
     monkeypatch.setattr(smoke, "guard_idle", lambda *args, **kwargs: True)
+    monkeypatch.setattr(smoke, "guard_snapshot", lambda *args, **kwargs: 0)
     return cfg, client, child, stopped
 
 
@@ -694,6 +697,7 @@ def test_busy_guard_cleans_without_approval_or_status(tmp_path, monkeypatch, cap
 def test_initially_empty_guard_results_wait_for_new_run_to_finish(tmp_path, monkeypatch):
     cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
     monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    monkeypatch.setattr(smoke, "guard_snapshot", smoke_guard_snapshot)
     elapsed = [0]
     previous = client.request
     def request(method, path, data=None):
@@ -734,16 +738,9 @@ def test_guard_timeout_at_deadline_is_busy(failed_request):
         if len(calls) == failed_request:
             raise core.Unavailable("synthetic timeout")
         return {"total_count": 0, "workflow_runs": []}
-    # An earlier request failure remains unavailable, rather than pretending
-    # that GitHub established an idle guard.
-    if failed_request == 1:
-        with pytest.raises(core.Unavailable):
-            smoke.guard_idle(SimpleNamespace(guard_runs=guard_runs), 0,
-                             clock=lambda: elapsed[0], sleep=lambda _: None)
-    else:
-        assert not smoke.guard_idle(SimpleNamespace(guard_runs=guard_runs), 0,
-                                    clock=lambda: elapsed[0], sleep=lambda _: None)
-        assert elapsed[0] == 120
+    assert not smoke.guard_idle(SimpleNamespace(guard_runs=guard_runs), 0,
+                                clock=lambda: elapsed[0], sleep=lambda _: None)
+    assert elapsed[0] == 120
 
 
 def test_guard_transport_uses_remaining_budget():
@@ -805,6 +802,7 @@ def test_unrecorded_approval_ends_after_three_minutes(tmp_path, monkeypatch):
 # Preserve the real observer for integration tests whose setup replaces it.
 smoke_evidence = smoke.evidence
 smoke_guard_idle = smoke.guard_idle
+smoke_guard_snapshot = smoke.guard_snapshot
 
 
 @pytest.mark.parametrize("recovery", ["label-cleared", "record-arrived"])
@@ -821,3 +819,193 @@ def test_unrecorded_approval_timer_recovers(tmp_path, monkeypatch, recovery):
                      sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 1
     assert elapsed[0] == (400 if recovery == "record-arrived" else 360)
     assert ("stop=timeout" if recovery == "record-arrived" else "stop=approval_unrecorded") in client.calls[-1][2]["description"]
+
+
+@pytest.mark.parametrize("bad_read", [
+    {"total_count": 1, "workflow_runs": []},
+    {"total_count": 0, "workflow_runs": [{"id": 1}]},
+    None,
+    core.Unavailable("synthetic read failure"),
+])
+@pytest.mark.parametrize("status", ["queued", "success"])
+def test_guard_bad_read_retries_before_approval(tmp_path, monkeypatch, bad_read, status):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    elapsed = [0]
+    reads = []
+    previous = client.guard_runs
+    def guard_runs(query=None, *, timeout):
+        if query == status:
+            reads.append(elapsed[0])
+            if elapsed[0] == 0:
+                if isinstance(bad_read, Exception):
+                    raise bad_read
+                return bad_read
+        return previous(query, timeout=timeout)
+    client.guard_runs = guard_runs
+    request = client.request
+    def approve(method, path, data=None):
+        if path == "/issues/1/labels":
+            assert elapsed[0] == 5
+        return request(method, path, data)
+    client.request = approve
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 0
+    assert reads == [0, 5]
+    assert sum(path == "/issues/1/labels" for _, path, _ in client.calls) == 1
+
+
+@pytest.mark.parametrize("bad_read", [
+    {"total_count": 1, "workflow_runs": []},
+    {"total_count": 0, "workflow_runs": [{"id": 9}]},
+    {"total_count": 1, "workflow_runs": [{"id": "unreadable"}]},
+    None,
+    core.Unavailable("synthetic read failure"),
+])
+def test_snapshot_bad_read_retries_before_filing(tmp_path, monkeypatch, bad_read):
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_snapshot", smoke_guard_snapshot)
+    elapsed = [0]
+    reads = []
+    def guard_runs(query=None, *, timeout):
+        assert query is None
+        reads.append(elapsed[0])
+        if elapsed[0] == 0:
+            if isinstance(bad_read, Exception):
+                raise bad_read
+            return bad_read
+        return {"total_count": 1, "workflow_runs": [{"id": 9}]}
+    client.guard_runs = guard_runs
+    previous = client.request
+    def request(method, path, data=None):
+        if method == "POST" and path == "/issues":
+            assert elapsed[0] == 5
+        return previous(method, path, data)
+    client.request = request
+    def guard_idle(_, previous_run, **kwargs):
+        assert previous_run == 9
+        return True
+    monkeypatch.setattr(smoke, "guard_idle", guard_idle)
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 0
+    assert reads == [0, 5]
+    assert sum(method == "POST" and path == "/issues" for method, path, _ in client.calls) == 1
+
+
+@pytest.mark.parametrize("request_seconds", [0, 29, 30])
+def test_inconsistent_snapshot_expires_without_filing_or_status(tmp_path, monkeypatch, capsys,
+                                                              request_seconds):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_snapshot", smoke_guard_snapshot)
+    elapsed = [0]
+    reads = []
+    def guard_runs(query=None, *, timeout):
+        assert query is None
+        assert 0 < timeout <= min(30, 120 - elapsed[0])
+        reads.append(elapsed[0])
+        elapsed[0] += min(request_seconds, timeout)
+        return {"total_count": 1, "workflow_runs": []}
+    client.guard_runs = guard_runs
+    completed = []
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                     completed=lambda *args: completed.append(args)) == 1
+    assert elapsed[0] == 120 and reads
+    assert not stopped and not completed
+    assert not any(method != "GET" for method, _, _ in client.calls)
+    assert "stop=busy" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status", ["queued", "success"])
+def test_inconsistent_guard_expires_without_approval_or_status(tmp_path, monkeypatch, capsys, status):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    elapsed = [0]
+    previous = client.guard_runs
+    def guard_runs(query=None, *, timeout):
+        if query == status:
+            return {"total_count": 1, "workflow_runs": []}
+        return previous(query, timeout=timeout)
+    client.guard_runs = guard_runs
+    completed = []
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
+                     sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                     completed=lambda *args: completed.append(args)) == 1
+    assert elapsed[0] == 120
+    assert not stopped and not completed
+    assert not any(path == "/issues/1/labels" or "/statuses/" in path for _, path, _ in client.calls)
+    assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
+    assert "stop=busy" in capsys.readouterr().out
+
+
+def test_snapshot_transport_uses_remaining_budget():
+    client = smoke.SmokeGitHub({"repository": "example/scratch", "actors": {
+        "runner": "runner", "owner": "owner"}}, token="synthetic")
+    calls = []
+    def open_request(req, *, timeout):
+        calls.append((req.full_url, timeout))
+        return io.BytesIO(b'{"total_count": 1, "workflow_runs": [{"id": 9}]}')
+    client.opener = SimpleNamespace(open=open_request)
+    assert client.guard_runs(timeout=2.5) == {"total_count": 1, "workflow_runs": [{"id": 9}]}
+    assert calls == [("https://api.github.com/repos/example/scratch/actions/runs?event=issues&per_page=1", 2.5)]
+
+
+@pytest.mark.parametrize("query", [None, "queued", "success"])
+@pytest.mark.parametrize("recovers", [True, False])
+def test_truncated_guard_response_retries_or_expires_busy(tmp_path, monkeypatch, capsys,
+                                                        query, recovers):
+    cfg, client, _, stopped = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    monkeypatch.setattr(smoke, "guard_snapshot", smoke_guard_snapshot)
+    monkeypatch.setattr(smoke, "guard_idle", smoke_guard_idle)
+    wire = smoke.SmokeGitHub({"repository": cfg["repository"], "actors": {
+        "runner": "runner", "owner": "owner"}}, token="synthetic")
+    elapsed = [0]
+    sleeps = []
+    failed_reads = []
+
+    class TruncatedResponse(io.BytesIO):
+        def read(self):
+            raise http.client.IncompleteRead(b'{"total_count":', 20)
+
+    def open_request(req, *, timeout):
+        assert 0 < timeout <= min(30, 120 - elapsed[0])
+        status = next((s for s in ("queued", "success", "in_progress", "waiting", "pending", "requested")
+                       if f"status={s}&" in req.full_url), None)
+        if status == query and (not recovers or elapsed[0] == 0):
+            failed_reads.append(elapsed[0])
+            return TruncatedResponse()
+        result = {"total_count": 1, "workflow_runs": [{"id": 9 if status is None else 10}]}
+        if status not in (None, "success"):
+            result = {"total_count": 0, "workflow_runs": []}
+        return io.BytesIO(json.dumps(result).encode())
+
+    wire.opener = SimpleNamespace(open=open_request)
+    client.guard_runs = wire.guard_runs
+    request = client.request
+
+    def checked_request(method, path, data=None):
+        if method == "POST" and path == ("/issues" if query is None else "/issues/1/labels"):
+            assert recovers and elapsed[0] == 5
+        return request(method, path, data)
+
+    client.request = checked_request
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    assert smoke.run(cfg, "main", clock=lambda: elapsed[0], sleep=sleep) == (0 if recovers else 1)
+    assert elapsed[0] == (5 if recovers else 120)
+    assert failed_reads == ([0] if recovers else list(range(0, 120, 5)))
+    assert sleeps == [5] * (1 if recovers else 24)
+    if recovers:
+        assert sum(path == "/issues/1/labels" for _, path, _ in client.calls) == 1
+        assert stopped
+    else:
+        assert not stopped
+        assert not any(path == "/issues/1/labels" or "/statuses/" in path for _, path, _ in client.calls)
+        if query is None:
+            assert not any(method != "GET" for method, _, _ in client.calls)
+        else:
+            assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
+        assert "stop=busy" in capsys.readouterr().out
