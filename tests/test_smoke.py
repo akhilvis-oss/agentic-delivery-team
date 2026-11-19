@@ -1009,3 +1009,45 @@ def test_truncated_guard_response_retries_or_expires_busy(tmp_path, monkeypatch,
         else:
             assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
         assert "stop=busy" in capsys.readouterr().out
+
+
+def test_candidate_pr_evidence_passes_standard_gate(tmp_path):
+    cfg = config(tmp_path)
+    root = tmp_path / "candidate"
+    policy, _ = smoke.candidate_config(cfg, root)
+    runner = service.runner_module()
+    integration = runner.integration_api()
+    runner_cfg = core.read(root / "runner.json")
+    expected = (
+        "## Security review\n"
+        "Secrets: no private values published.\n"
+        "External access/cost: none in the change; the run writes only to the scratch "
+        "repository through the smoke Apps and uses one agent build and review.\n"
+        "Data/provenance: the fixed smoke story and sanitized runner records.\n"
+    )
+    head, base = "a" * 40, "b" * 40
+    job = {"id": "issue-1-event-2", "head_commit": head, "github_number": 1,
+           "review_session": "fresh-review", "assignment": {
+               "task_text": (smoke.ROOT / "tests/smoke/story.md").read_text()},
+           "verification_runs": [{"results": [{"reported_counts": {"passed": 3}}]}]}
+    core.save(Path(runner_cfg["state_dir"]) / "receipts" / (job["id"] + ".json"), {
+        "status": "ready_for_integration", "base_commit": base, "head_commit": head,
+        "summary": "Required checks passed", "timestamp": "2026-01-01T00:00:00+00:00"})
+    gate = integration.load_gate()
+    rules_path = tmp_path / "gate.json"
+    rules = core.read(smoke.ROOT / "templates/review-gate.example.json")
+    rules["repo_url"] = "https://github.com/" + cfg["repository"]
+    core.save(rules_path, rules)
+    rules = gate.load_config(rules_path)
+    receipt_url = rules["repo_url"] + "/issues/1#issuecomment-2"
+    opts = integration.options(runner_cfg)
+    body = integration.body_for(runner, runner_cfg, job, policy, opts, receipt_url)
+    pr = {"number": 1, "base": {"ref": "main"}, "head": {"sha": head}, "body": body}
+    assert gate.validate(pr, ["smoke_add.py", "test_smoke_add.py"], rules) == []
+    assert opts == {"enabled": True, "declared_tier": "standard", "public_evidence": expected}
+    # The observed live failure must remain a failure without the evidence.
+    without = dict(opts)
+    without.pop("public_evidence")
+    pr["body"] = integration.body_for(runner, runner_cfg, job, policy, without, receipt_url)
+    assert gate.validate(pr, ["smoke_add.py", "test_smoke_add.py"], rules) == [
+        "Missing section/content: Security review"]
