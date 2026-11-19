@@ -14,7 +14,7 @@ Clone your repository into its own folder, used only for product sessions. Don't
 git clone https://github.com/<OWNER>/<REPOSITORY>.git <PRODUCT_CHECKOUT>
 ```
 
-The repository needs the starter kit's product files: `PRODUCT_AGENT.md`, `docs/product/`, `docs/troubleshooting.md` and the story template.
+The repository needs the starter kit's product files: `PRODUCT_AGENT.md`, `docs/product/`, `docs/troubleshooting.md`, `docs/dry-run.md` and the story template.
 
 ## 2. Install the settings file
 
@@ -51,9 +51,11 @@ Then check the session before relying on it:
 
 1. You discuss the roadmap. It reads `docs/product/` first and states the commit it read.
 2. It proposes changes to the roadmap, milestone weights or decision log, edits files under `docs/product/`, and asks before creating a branch and pull request for them. You merge product-doc pull requests yourself.
-3. It drafts stories as issues with the story template: section, milestone and weight, acceptance criteria and test scenarios.
-4. You approve each story yourself. The settings stop it from labelling one approved.
-5. If you ask about a failing check, it answers from `docs/troubleshooting.md` and says who fixes it.
+3. It drafts a story with the story template: section, milestone and weight, acceptance criteria and test scenarios.
+4. It runs the dry run (`docs/dry-run.md` in the kit) with a Claude Code sub-agent, and fixes what it finds.
+5. It files the story as an issue.
+6. You approve each story yourself. The settings stop it from labelling one approved.
+7. If you ask about a failing check, it answers from `docs/troubleshooting.md` and says who fixes it.
 
 ## Limits
 

@@ -166,3 +166,51 @@ def test_feature_switches_document_lack_of_framework_enforcement():
     assert "The kit file is not read by framework code today." in text
     assert "agents are told to read and respect it" in text
     assert "[roadmap](../ROADMAP.md#later)" in text
+
+
+def _rule_section(text, number):
+    start = text.index(f"\n## {number}. ")
+    end = text.find("\n## ", start + 1)
+    return text[start:end if end != -1 else None]
+
+
+def test_product_rules_are_numbered_one_to_eight_in_order():
+    text = (KIT / "PRODUCT_AGENT.md").read_text()
+    positions = [text.index(f"\n## {n}. ") for n in range(1, 9)]
+    assert positions == sorted(positions)
+    assert "\n## 9. " not in text
+
+
+def test_dry_run_rule_sets_inputs_ground_rules_and_record():
+    rule = _rule_section((KIT / "PRODUCT_AGENT.md").read_text(), 6)
+    assert "## 6. Dry-run every story before the owner approves it" in rule
+    for phrase in ("scratch copy", "verified", "inferred", "**blocker**", "**should-fix**", "**note**",
+                   "up to three passes", "Open questions", "Dry run", "not a review"):
+        assert phrase in rule, phrase
+
+
+def test_handoff_and_story_rules_point_to_the_dry_run():
+    text = (KIT / "PRODUCT_AGENT.md").read_text()
+    assert "verbatim acceptance criteria, after the story's dry run (rule 6);" in _rule_section(text, 4)
+    stories = _rule_section(text, 5)
+    assert "**must-asks** written as the types of change allowed" in stories
+    assert "not as lists of specific tests" in stories
+
+
+def test_dry_run_guide_has_its_steps_in_order():
+    guide = (KIT / "docs" / "dry-run.md").read_text()
+    for heading in ("## What goes in, and what doesn't", "## Ground rules", "## Steps", "## Report format",
+                    "## What it can miss", "## Cost", "## Setting it up in Claude Code"):
+        assert heading in guide, heading
+    titles = ("Check every fact the story cites", "Find every caller and consumer",
+              "Check safety and integrity", "Run the baseline", "Prototype the change",
+              "Check the criteria against each other, the standards and the code",
+              "Work out the review tier", "Check the environment", "Report")
+    positions = [guide.index(f"\n{n}. **{title}.**") for n, title in enumerate(titles, 1)]
+    assert positions == sorted(positions)
+
+
+def test_product_agent_guide_includes_the_dry_run_step():
+    guide = (ROOT / "docs" / "product-agent-claude-code.md").read_text()
+    assert "It runs the dry run (`docs/dry-run.md` in the kit)" in guide
+    assert "`docs/dry-run.md`" in guide.split("## 2.")[0]
