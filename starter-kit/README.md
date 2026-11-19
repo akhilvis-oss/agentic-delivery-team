@@ -12,6 +12,7 @@ Everything a new project copies to adopt the whole way of working, not only the 
 | [`docs/product/roadmap.md`](docs/product/roadmap.md) | `docs/product/roadmap.md` | Roadmap sections, the first milestone with story weights, and the critical regression set |
 | [`docs/product/decision-log.md`](docs/product/decision-log.md) | `docs/product/decision-log.md` | Settled decisions and accepted assumptions, newest first |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | `docs/troubleshooting.md` | Plain-language fixes for common errors, and who fixes each one; the product agent answers from it |
+| [`docs/dry-run.md`](docs/dry-run.md) | `docs/dry-run.md` | How the product agent dry-runs a story before the owner approves it |
 | [`.github/ISSUE_TEMPLATE/story.yml`](.github/ISSUE_TEMPLATE/story.yml) | `.github/ISSUE_TEMPLATE/story.yml` | Story template: context, acceptance criteria, test scenarios, roadmap section, milestone and weight |
 
 From the kit's own folders, also copy:

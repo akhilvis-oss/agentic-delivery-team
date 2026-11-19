@@ -26,7 +26,7 @@ A project uses **one kit version** for everything, and turns **features on or of
 | Feature | What it is | Quickstart level | Needs |
 | --- | --- | --- | --- |
 | `review_gate` | Trusted review gate and its categories | 1 | Gate script, config, workflow; Actions policy on public repositories |
-| `product_files` | `PRODUCT_AGENT.md`, `docs/product/`, story template, troubleshooting playbook | 1 | Copy from the starter kit |
+| `product_files` | `PRODUCT_AGENT.md`, `docs/product/`, story template, troubleshooting playbook, dry-run guide (`docs/dry-run.md`) | 1 | Copy from the starter kit |
 | `runner` | Task runner: delegated builder, fresh reviewer, runner-made commit, runner-run tests | 2 | Private runner install and config on your machine |
 | `pool` | Several agent slots in parallel with cross-review | 2 | `runner`, plus a private pool config |
 | `lifecycle` | Status labels, guard workflow, approval by label, automatic dispatch | 3 | `runner`, plus the guard workflow, public policy file, labels, bot Apps and the service on your machine |
