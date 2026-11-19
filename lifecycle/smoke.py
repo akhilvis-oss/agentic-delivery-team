@@ -142,7 +142,14 @@ def candidate_config(cfg, root):
     runner_cfg.update(profile=str(root / "profile.json"),
                       worktree=str(root / "unused-worktree"), branch="runner/smoke",
                       state_dir=str(root / "runner-state"), lifecycle_config=str(config_path),
-                      integration={"enabled": True, "declared_tier": "standard"},
+                      integration={"enabled": True, "declared_tier": "standard",
+                                   "public_evidence": (
+                                       "## Security review\n"
+                                       "Secrets: no private values published.\n"
+                                       "External access/cost: none in the change; the run writes only "
+                                       "to the scratch repository through the smoke Apps and uses "
+                                       "one agent build and review.\n"
+                                       "Data/provenance: the fixed smoke story and sanitized runner records.\n")},
                       github_receipts={"enabled": False})
     core.save(root / "runner.json", runner_cfg)
     return core.load_config(config_path), config_path
