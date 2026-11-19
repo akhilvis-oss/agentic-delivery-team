@@ -163,6 +163,7 @@ def load_config(path, *, local=True):
             "token_env",
             "product_token_env",
             "app_auth",
+            "upgrade",
         }
         if not set(cfg) <= local_fields:
             raise ValueError("Public policy fields belong in the policy file")
@@ -172,6 +173,9 @@ def load_config(path, *, local=True):
         cfg = {**policy, **cfg}
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", cfg.get("repository", "")):
         raise ValueError("Explicit repository required")
+    if "upgrade" in cfg:
+        from lifecycle.upgrade import validate
+        validate(cfg["upgrade"])
     roles = cfg.get("actors", {})
     if set(roles) != {"owner", "runner", "product", "workflow"}:
         raise ValueError("Four explicit actor roles required")

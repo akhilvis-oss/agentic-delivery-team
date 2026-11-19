@@ -1,6 +1,6 @@
 # Live lifecycle smoke test
 
-Run one tiny story with the real configured agent before adopting candidate framework code. The harness belongs to the installed, pinned framework; it downloads the public candidate into a disposable install and starts that candidate's standalone lifecycle service as a child. It never reconfigures the running service, pinned install or lifecycle state. The watcher below schedules main and PR candidates; pool execution and release upgrades remain outside its scope.
+Run one tiny story with the real configured agent before adopting candidate framework code. The harness belongs to the installed, pinned framework; it downloads the public candidate into a disposable install and starts that candidate's standalone lifecycle service as a child. It never reconfigures the running service, pinned install or lifecycle state. The watcher below schedules main and PR candidates; pool execution and release-tag upgrades remain outside its scope. This repository can opt into main-track service upgrades using these results (see [Upgrading](quickstart.md#upgrading)).
 
 ## Setup
 
@@ -35,7 +35,7 @@ An approved label without an approval record for three continuous minutes ends t
 
 After pass, failure or timeout, the harness attempts to close the story PR and issue, close the candidate's heartbeat report, and delete matching story branches and saved continuation references. After a pass, local installs, state and worktrees disappear with the temporary directory. After a failure, the harness retains that directory, including private state and the child's combined output in `candidate.log`, in a private folder under the operating system's temporary directory, outside the source repositories. It prints the location on local standard error only and keeps the last three failures for the local operating system user. Temporary-directory cleanup by the operating system can remove this evidence; copy it privately elsewhere if longer retention is needed. Cleanup errors make the run fail; reconcile leftover scratch resources manually before retrying. An uncertain issue creation is looked up by its unique run marker and closed without approving or repeating the write. A process crash, machine shutdown or unavailable GitHub can still require manual reconciliation. The harness does not retry ambiguous writes.
 
-Exit status is zero only when every stage and cleanup passed and the commit status was posted. A refused status post prints the result plus a missing/unavailable permission message and exits nonzero. Check the App permission and installation acceptance before retrying. This status remains advisory and does not authorize service upgrades.
+Exit status is zero only when every stage and cleanup passed and the commit status was posted. A refused status post prints the result plus a missing/unavailable permission message and exits nonzero. Check the App permission and installation acceptance before retrying. This status remains advisory for adopters. This repository's opt-in main-track upgrader requires a matching success from its configured runner identity before checking and switching.
 
 ## Verification and limits
 
@@ -65,8 +65,7 @@ writes retain the existing status-only token. No workflow permissions change.
 
 Copy `templates/lifecycle-smoke.plist.example` into a private launchd definition,
 replace its placeholders, and load it once after owner review. It runs every
-300 seconds and at load, exits after at most one candidate, and does not upgrade
-or reconfigure the service. Do not point the job at candidate code.
+300 seconds and at load and exits after at most one candidate. The service's separate opt-in upgrade check consumes successful main results. Keep the watcher on a fixed approved install, updated by the owner by hand; do not point this job at candidate code.
 
 Each invocation considers the current main commit first, then open PR heads in
 PR-number order. Only owner- or framework-runner-authored PRs whose head and base
@@ -97,4 +96,4 @@ After completion, a separate last-smoke comment on the service status issue show
 the candidate, result and stage without private output. Comment publication can
 retry independently of execution. Runner owner-merge notices report whether the
 runner App's smoke status passed on the reviewed head or is still pending. These
-results remain advisory; no required check or service upgrade is added here.
+results remain advisory for PR integration and adopters; this repository's opt-in main-track service upgrades consume a matching successful status. No required check is added.

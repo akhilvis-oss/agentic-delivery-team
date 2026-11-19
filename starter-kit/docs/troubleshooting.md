@@ -156,6 +156,15 @@ private responses or logs into an issue.
 Run `serve` under the supplied `lifecycle-serve.plist.example` launchd template
 with `KeepAlive`, as described in the [lifecycle guide](../../docs/v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
 It restarts the process after unexpected errors. The kit does not install it.
+This framework repository can instead opt into the upgrade launcher and
+`lifecycle-serve-upgrade.plist.example`; adopter release-tag upgrades are not yet
+supported. A refused commit stays refused until the operator investigates and
+runs `python -m lifecycle.service --config <private-config> upgrade-clear <40-hex-commit>`.
+Clearing takes the poll lock and refuses while it is held; retry later. If a clear
+races launcher startup it may be lost, so run it again. Upgrade and rollback
+notices persist in the status comment. A hung unconfirmed process still requires
+an owner restart after the stale-heartbeat alert; the launcher then rolls it back
+when its start or elapsed-time limit is reached.
 
 ### An issue was labelled `status:draft` automatically
 Expected. Every issue carries one status label, and a new issue starts as a draft. It means "not yet approved for work".
