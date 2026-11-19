@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>org.example.agentic-lifecycle</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string><string>__INSTALLED_LAUNCHER__</string>
+    <string>__VERSIONS_DIRECTORY__</string><string>__FIRST_INSTALL__</string>
+    <string>__ABSOLUTE_PYTHON__</string><string>-m</string><string>lifecycle.service</string>
+    <string>--config</string><string>__PRIVATE_CONFIG__</string><string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>__PRIVATE_STDOUT_LOG__</string>
+  <key>StandardErrorPath</key><string>__PRIVATE_STDERR_LOG__</string>
+</dict></plist>

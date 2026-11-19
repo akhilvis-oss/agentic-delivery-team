@@ -62,12 +62,49 @@ Follow [the lifecycle and digest guide](v04-lifecycle-digest.md). It covers labe
 
 ## Upgrading
 
-Upgrade every piece together, from one release tag:
+For adopting projects, upgrade every piece together, from one release tag:
 1. Read that release's notes. They list each breaking change and the steps it needs.
 2. Replace the repository files (gate, lifecycle code and workflow, templates you copied) in one pull request and merge it yourself.
 3. Update your private configuration as the notes describe, then re-pin the lifecycle service to the tag.
 
 For example, v0.5.5 requires an explicit `integration` setting in both private runner templates, and a new `needs-owner` → `merged` rule in `.github/task-lifecycle.json`.
+
+This repository alone can opt into automatic `main` upgrades. Add a private
+`upgrade` object (omit it to stay off):
+
+```json
+{"track": "main", "smoke_agent": "example-agent", "versions_dir": "/absolute/private/versions", "initial_commit": "0123456789abcdef0123456789abcdef01234567"}
+```
+
+Use the launcher's exact versions folder; symlinks and trailing slashes resolve
+to the same folder. `initial_commit` is the last manually pinned commit and stays
+the running baseline until the first confirmation. The configured service
+repository is the framework repository; this is not an adopter release updater.
+Only `serve` checks for upgrades. An idle poll requires the newest main commit's
+successful `smoke/<smoke_agent>` status from `actors.runner`, read using a separate
+runner status-only token, and a Product-token comparison proving it is ahead.
+Active claims, finished claims with reconciliation errors and pending switches
+all delay upgrades. Read/export outages retry while claims continue normally.
+
+The service exports into `<versions_dir>/<commit>/install`, removes the download,
+and runs `upgrade-check` in an isolated Python child with a 120-second limit.
+That action imports code, loads config and mints configured App-role tokens;
+it never starts an agent. Temporary GitHub failures (exit 75) retry. Unsafe
+archives, definite check failures and check timeouts refuse that commit.
+Passing checks save an atomic pending switch and exit cleanly for launchd.
+The candidate ignores the saved cursor and confirms after reads and status
+publication succeed, before any claim or job. Failed publication runs no jobs.
+Upgrade and rollback notices persist in the status comment.
+
+Install the launcher and replacement plist once as described in the
+[lifecycle guide](v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
+The launcher rolls back at the fourth unconfirmed start, or a start at least ten
+minutes after the first. A hanging process still needs an owner restart after
+the existing stale-heartbeat alert; automatic watchdog termination is a later
+story. The launcher does not supervise the process. Keep watchdog and smoke-watch
+jobs on a fixed approved install, rarely updated by hand. An unreadable switch
+runs the first install and turns upgrades off until repaired or removed. Folder
+mismatches also disable upgrades, with an explanatory status-comment notice.
 
 ### Files to carry by feature
 
@@ -82,7 +119,7 @@ checkout.
 | Gate | `gate/review_gate.py`, `templates/review-gate.yml`, `templates/review-gate.example.json`, `templates/pull_request_template.md` |
 | Lifecycle guard sparse checkout | `lifecycle/`, `.github/task-lifecycle.json` |
 | Lifecycle guard workflow and policy source | `templates/task-lifecycle.yml`, `templates/task-lifecycle.example.json` |
-| Lifecycle service | `lifecycle/`, `runner/`, `digest/`, `gate/review_gate.py`, `scripts/check_private_content.py`, `templates/task-lifecycle.example.json`, `templates/app-auth.example.json`, `templates/standup.example.json`, `templates/lifecycle-serve.plist.example`, `templates/lifecycle-watchdog.plist.example` |
+| Lifecycle service | `lifecycle/`, `runner/`, `digest/`, `gate/review_gate.py`, `scripts/check_private_content.py`, `templates/task-lifecycle.example.json`, `templates/app-auth.example.json`, `templates/standup.example.json`, `templates/lifecycle-serve.plist.example`, `templates/lifecycle-launch.sh`, `templates/lifecycle-serve-upgrade.plist.example`, `templates/lifecycle-watchdog.plist.example` |
 | Private-content check | `scripts/check_private_content.py`, `lifecycle/__init__.py`, `lifecycle/private_content.py` |
 | Version record (all features) | `templates/agentic-kit.example.json` |
 

@@ -20,7 +20,7 @@ import uuid
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lifecycle import app_tokens, core
+from lifecycle import app_tokens, core, upgrade
 
 
 def flush_outbox(cfg, client):
@@ -553,6 +553,7 @@ def poll_body(cfg, at, notices):
             "updating, ask the operator to restore the service; re-approving alone "
             "will not restart it.\n"
             + "".join(line + "\n" for line in notices)
+            + (cfg["_upgrade_notice"] + "\n" if cfg.get("_upgrade_notice") else "")
             + "<!-- agentic-last-poll-v1 -->")
 
 
@@ -598,7 +599,7 @@ def error_origin(exc):
     return function
 
 
-def poll(cfg, client, *, run_jobs=True, clock=time.time):
+def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False):
     validate_local(cfg)
     core.bind_state(cfg)
     root = core.private(cfg["state_dir"])
@@ -607,10 +608,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
     with core.lock(root / "service.lock") as acquired:
         if not acquired:
             return []
+        try:
+            ctx = upgrade.context(cfg) if upgrade_enabled else None
+        except Exception:
+            ctx = None
+            cfg["_upgrade_notice"] = upgrade.UNREADABLE
+        pending = upgrade.is_pending(ctx)
         cursor = root / "poll.json"
-        if cursor.exists() and clock() < core.read(cursor)["next_poll"]:
+        if not pending and cursor.exists() and clock() < core.read(cursor)["next_poll"]:
             return []
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
+        if upgrade_enabled and upgrade.attempt(cfg, ctx):
+            return upgrade.SWITCH
         flush_outbox(cfg, client)
         all_issues = client.pages("/issues?state=all")
         heartbeat_failure = root / "public-heartbeat-failure.json"
@@ -619,8 +628,12 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time):
         except Exception as exc:
             # Status publication is advisory; no message or agent text is saved.
             core.save(heartbeat_failure, {"exception_class": type(exc).__name__})
+            if pending:
+                return upgrade.DEFER
         else:
             heartbeat_failure.unlink(missing_ok=True)
+            if pending:
+                upgrade.confirm(cfg, ctx)
         issues = [
             i
             for i in all_issues
@@ -1168,10 +1181,17 @@ def main(argv=None):
             "watchdog",
             "smoke",
             "smoke-watch",
+            "upgrade-check",
+            "upgrade-clear",
         ],
     )
+    parser.add_argument("commit", nargs="?")
     parser.add_argument("--candidate")
     args = parser.parse_args(argv)
+    if args.commit is not None and args.action != "upgrade-clear":
+        parser.error("commit requires upgrade-clear")
+    if args.action == "upgrade-check":
+        return upgrade.check(args.config)
     if args.action == "smoke-watch":
         if args.candidate is not None:
             parser.error("--candidate requires smoke")
@@ -1186,6 +1206,11 @@ def main(argv=None):
         parser.error("--candidate requires smoke")
     cfg = core.load_config(args.config)
     cfg["config_path"] = str(args.config.resolve())
+    if args.action == "upgrade-clear":
+        if args.commit is None:
+            parser.error("upgrade-clear requires a commit")
+        upgrade.clear(cfg, args.commit)
+        return 0
     if args.action == "status":
         print(status(cfg))
         return 0
@@ -1224,8 +1249,12 @@ def run_loop(cfg, client, action):
     while True:
         try:
             previous_poll = heartbeat(cfg) if serving else None
-            poll(cfg, client, run_jobs=action != "enqueue-only")
-            if action != "enqueue-only" and cfg.get("digest_config"):
+            options = {"upgrade_enabled": True} if serving and "upgrade" in cfg else {}
+            result = poll(cfg, client, run_jobs=action != "enqueue-only", **options)
+            if result is upgrade.SWITCH:
+                return 0
+            if (result is not upgrade.DEFER and action != "enqueue-only"
+                    and cfg.get("digest_config")):
                 from digest import standup
 
                 digest_cfg = standup.load_config(cfg["digest_config"])

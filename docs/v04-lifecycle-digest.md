@@ -287,6 +287,37 @@ The owner may copy them into private files named `org.example.agentic-lifecycle.
 and `org.example.agentic-lifecycle-watchdog.plist` under `$HOME/Library/LaunchAgents`.
 Use a distinct pair of labels and filenames for each private state root.
 
+For this repository's opt-in `main` upgrades, do one final manual re-pin and
+record its commit as private `upgrade.initial_commit`. Confirm that the smoke
+watcher's `framework_runner` equals the service's `actors.runner`, enable
+`smoke_reporting`, and load the watcher if needed. Copy
+`templates/lifecycle-launch.sh` once to an owner-only location **outside** the
+versions folder. Use `templates/lifecycle-serve-upgrade.plist.example` in place of
+the serve plist, with the same label so there is only one serve job. Its argv is
+`/bin/sh <launcher> <versions folder> <first install> <service command...>`.
+It exports `ADT_VERSIONS_DIR`, changes into the chosen install and execs the
+command. Use the absolute Python from your existing environment. Set the private
+`upgrade.versions_dir` to that same folder and `track` to `main`; the first install
+is the fixed install from the last manual re-pin. The original serve template
+remains compatible and unchanged. Watchdog and smoke-watch stay on fixed approved
+installs, updated by the owner by hand.
+
+The private `<versions folder>/switch` has line-based keys `current`, `previous`,
+`pending`, `pending_since`, `pending_starts`, `refused` and `notice`. Both writers
+replace it atomically; neither sources it. The launcher writes only before exec;
+the service writes only with the poll lock. To retry a refused commit, run:
+
+```sh
+python -m lifecycle.service --config /absolute/private/lifecycle.json upgrade-clear <40-hex-commit>
+```
+
+This takes the poll lock and refuses while a poll holds it. A clear during launcher
+startup may be lost: run it again. Never clear a refusal without investigating the
+private check failure. Preserve the switch record and current/previous installs.
+A malformed record runs the first install unchanged and disables upgrades with a
+status notice. See [Upgrading](quickstart.md#upgrading) for confirmation and
+rollback limits. Only the owner installs/loads these jobs; the kit does not.
+
 Before loading either file:
 
 1. Replace every `__PLACEHOLDER__` with an absolute local value, XML-escaping values
