@@ -766,11 +766,26 @@ def record_body(record):
     )
 
 
+def finding_notice(cfg, findings):
+    details = public_stop_details(cfg, {"findings": findings})
+    text = ""
+    for finding in details["findings"]:
+        text += "\nOpen finding: " + finding["severity"] + " — " + finding["criterion"] + "\n"
+        text += "\n".join("> " + line for line in finding["detail"].split("\n")) + "\n"
+    if details.get("more"):
+        text += f"\nand {details['more']} more\n"
+    return text
+
+
 def notice_body(cfg, client, entry):
     """Render optional job context at transport time without altering the record."""
     record = entry["record"]
     body = entry.get("public_body", record_body(record))
     context = entry.get("notice_context", {})
+    extra = ""
+    if (record["kind"] == "review" and context.get("findings")
+            and not record.get("stop_details", {}).get("findings")):
+        extra += finding_notice(cfg, context["findings"])
     if context.get("delivery") and record.get("reason"):
         from runner.integration import REASONS, smoke_notice
 
@@ -781,8 +796,13 @@ def notice_body(cfg, client, entry):
             if context.get("smoke_reporting"):
                 message += "\n" + smoke_notice(client, cfg, context.get("reviewed_head", ""))
         message += "\nReviewed head: " + context.get("reviewed_head", "unavailable")
-        body = message + "\n\n" + body
-    return stop_notice(record.get("reason"), body)
+        extra += message + "\n\n"
+    # Budget only supplemental prose. Never truncate the record's data block.
+    available = 65535 - len(stop_notice(record.get("reason"), body))
+    if len(extra) > available:
+        marker = "\n[truncated]\n"
+        extra = extra[:max(0, available - len(marker))] + marker if available >= len(marker) else ""
+    return stop_notice(record.get("reason"), extra + body)
 
 
 def records(cfg, comments, expected_issue=None):
@@ -1597,9 +1617,11 @@ def job_records(cfg, job):
 def sync_job(config_path, job, client=None):
     cfg = load_config(config_path)
     for record in job_records(cfg, job):
-        context = None
+        context = {}
+        if record["kind"] == "review" and job.get("review", {}).get("findings"):
+            context["findings"] = job["review"]["findings"]
         if job.get("integration", {}).get("reason"):
-            context = dict(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
+            context.update(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
                            smoke_reporting=job["integration"].get("smoke_reporting", False))
         queue(cfg, record, notice_context=context)
     try:
@@ -2384,8 +2406,8 @@ def followups(cfg, job, client):
                     f"Minor follow-up from #{binding['issue']}, job `{job['id']}`, "
                     f"round {review['round']}, finding {index + 1}.\n"
                     f"Reviewed commit: `{review['head']}`.\n"
-                    "The finding detail is retained privately. Primary triage is required; no approval implied.\n"
-                    + marker
+                    "Primary triage is required; no approval implied.\n"
+                    + finding_notice(cfg, [finding]) + "\n" + marker
                 )
                 try:
                     created = client.request(

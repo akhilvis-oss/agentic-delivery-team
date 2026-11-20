@@ -414,3 +414,10 @@ restoration only through an unedited workflow-authored data block naming the exa
 restored label event. If that event cannot be read back, no event is claimed and a
 later run may add one notice. Product and workflow stops without a matching recent
 record still receive a notice; a lost producer comment retried later may duplicate it.
+
+New minor follow-ups include their finding's severity, criterion and detail above
+the follow-up marker. New review notices show at most ten current findings and an
+“and N more” line when needed. Text is filtered through `public_quote` (100
+characters for criteria, 600 for details) at send time; findings already shown in
+stop details are not repeated. Supplemental prose fits within GitHub's 65,536
+character comment limit without changing the record data block or metadata.
