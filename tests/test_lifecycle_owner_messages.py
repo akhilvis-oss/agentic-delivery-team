@@ -579,7 +579,7 @@ def test_poll_time_is_public_pinned_and_updated_in_place(tmp_path, standup):
         cfg["digest_config"] = "synthetic-config-reference"
         issue = hub.issue(body="<!-- agentic-digest-v1:synthetic -->")
         issue.update(user={"login": cfg["actors"]["product"]}, labels=[{"name": "report:standup"}])
-    service.poll(cfg, hub.client(), clock=lambda: 100)
+    service.poll(cfg, hub.client(), clock=lambda: -500)
     service.poll(cfg, hub.client(), clock=lambda: 200)
     assert len(hub.issues) == 1
     comment, = hub.client().comments(1)
@@ -720,7 +720,7 @@ def test_duplicate_heartbeat_comments_update_only_oldest(tmp_path):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
     client = hub.client()
-    service.poll(cfg, client, clock=lambda: 100)
+    service.poll(cfg, client, clock=lambda: -500)
     original = hub.comments_by_issue[1][0]
     duplicate = copy.deepcopy(original)
     duplicate["id"] += 10
