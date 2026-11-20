@@ -1667,10 +1667,30 @@ def _attest_approval(cfg, client, event):
     events = []
     latest = None
 
+    def instant(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            return stamp(value).astimezone(dt.timezone.utc)
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    snapshot_time = instant(issue.get("updated_at"))
+
+    def matches(value):
+        parsed = instant(value)
+        return parsed is not None and snapshot_time is not None and parsed == snapshot_time
+
     def ignore_snapshot():
         # This is not a rejection of the current label event. In particular do
         # not emit a rejection marker that guard_issue could apply to it.
         marker = "<!-- agentic-approval-snapshot-ignored:" + key(event) + " -->"
+        diagnostic = ""
+        latest_time = instant(latest.get("created_at")) if latest is not None else None
+        if snapshot_time is not None and latest_time is not None and snapshot_time != latest_time:
+            gap = abs(snapshot_time - latest_time)
+            seconds = gap.days * 86400 + gap.seconds + bool(gap.microseconds)
+            diagnostic = f"Snapshot time differs from the latest approval event by {seconds} seconds.\n"
         try:
             comments = client.comments(issue["number"])
         except Unavailable:
@@ -1682,7 +1702,7 @@ def _attest_approval(cfg, client, event):
                 "It could not be bound to the current approval, so the guard preserved "
                 "the current label and any existing approval proof. Owner: if this story "
                 "is still waiting for approval, remove and re-add status:approved to "
-                "re-approve the current story.\n" + marker
+                "re-approve the current story.\n" + diagnostic + marker
             )})
         raise Unavailable("Approval snapshot is stale or ambiguous; current approval preserved")
 
@@ -1766,8 +1786,8 @@ def _attest_approval(cfg, client, event):
     timestamp_matches = [e for e in events
                          if e.get("event") == "labeled"
                          and e.get("label", {}).get("name") == "status:approved"
-                         and e.get("created_at") == issue.get("updated_at")]
-    if latest is not None and latest.get("created_at") != issue.get("updated_at"):
+                         and matches(e.get("created_at"))]
+    if latest is not None and not matches(latest.get("created_at")):
         ignore_snapshot()
     # IDs identify cycles, but the webhook has no label-event ID. When multiple
     # cycles share a timestamp, its body must also agree with the live snapshot;
@@ -1803,7 +1823,7 @@ def _attest_approval(cfg, client, event):
         if e.get("event") == "labeled"
         and e.get("label", {}).get("name") == "status:approved"
         and e.get("actor", {}).get("login") == cfg["actors"]["owner"]
-        and e.get("created_at") == issue.get("updated_at")
+        and matches(e.get("created_at"))
         and int(e["id"]) > boundary
     ]
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":

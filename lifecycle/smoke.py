@@ -186,7 +186,11 @@ class SmokeGitHub(core.GitHub):
     def request(self, method, path, data=None):
         if method != "DELETE":
             return super().request(method, path, data)
-        if not re.fullmatch(r"/git/refs/(?:heads/runner|agentic/continue)/issue-[1-9]\d*-event-[1-9]\d*", path):
+        number = getattr(self, "smoke_issue_number", None)
+        approval_label = (type(number) is int and number > 0
+                          and path == f"/issues/{number}/labels/status%3Aapproved")
+        if not approval_label and not re.fullmatch(
+                r"/git/refs/(?:heads/runner|agentic/continue)/issue-[1-9]\d*-event-[1-9]\d*", path):
             raise ValueError("Only smoke story refs may be deleted")
         self.ensure_actor()
         req = urllib.request.Request("https://api.github.com/repos/" + self.cfg["repository"] + path,
@@ -243,9 +247,9 @@ def latest_run(result):
     return row["id"]
 
 
-def guard_snapshot(client, *, clock, sleep):
+def guard_snapshot(client, *, clock, sleep, deadline=None):
     """Read a consistent pre-filing run identity, or return None after two minutes."""
-    deadline = clock() + 120
+    deadline = min(clock() + 120, deadline) if deadline is not None else clock() + 120
     while True:
         remaining = deadline - clock()
         if remaining <= 0:
@@ -262,13 +266,13 @@ def guard_snapshot(client, *, clock, sleep):
         sleep(min(5, deadline - observed))
 
 
-def guard_idle(client, previous_run, *, clock, sleep):
+def guard_idle(client, previous_run, *, clock, sleep, deadline=None):
     """Wait at most two minutes for scratch issue workflows to drain.
 
     Actions does not bind issue runs to issue numbers. Admission requires an
     empty scratch repository, so conservatively include every issue workflow.
     """
-    deadline = clock() + 120
+    deadline = min(clock() + 120, deadline) if deadline is not None else clock() + 120
     while True:
         busy = False
         processed = False
@@ -541,6 +545,7 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                         issue = owner.request("POST", "/issues", {"title": "Lifecycle smoke story",
                                               "body": story, "labels": ["status:draft"]})
                         number = issue["number"]
+                        owner.smoke_issue_number = number
                         step = "guard-idle"
                         if not guard_idle(runner, previous_run, clock=clock, sleep=sleep):
                             category = "busy"
@@ -550,18 +555,52 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                             deadline = clock() + cfg.get("timeout_seconds", 1800)
                             step = "start-child"
                             child = start_child(install, config_path, env)
+                            reapproved = False
                             unrecorded_since = None
                             unrecorded_category = None
                             while True:
                                 step = "evidence"
                                 progress, terminal, category = evidence(policy, runner, number)
                                 observed = clock()
+                                if observed >= deadline:
+                                    category = "timeout"
+                                    break
                                 if category in {"stop_unrecorded", "approval_unrecorded"}:
                                     if unrecorded_since is None or category != unrecorded_category:
                                         unrecorded_since = observed
                                     unrecorded_category = category
                                     if observed - unrecorded_since >= 180:
-                                        break
+                                        if category != "approval_unrecorded" or reapproved:
+                                            break
+                                        reapproved = True
+                                        step = "reapproval-snapshot"
+                                        previous_run = guard_snapshot(
+                                            runner, clock=clock, sleep=sleep, deadline=deadline)
+                                        if clock() >= deadline:
+                                            category = "timeout"
+                                            break
+                                        if previous_run is None:
+                                            category = "busy"
+                                            break
+                                        step = "reapproval-remove"
+                                        owner.request("DELETE", f"/issues/{number}/labels/status%3Aapproved")
+                                        if clock() >= deadline:
+                                            category = "timeout"
+                                            break
+                                        step = "reapproval-guard-idle"
+                                        idle = guard_idle(runner, previous_run, clock=clock,
+                                                          sleep=sleep, deadline=deadline)
+                                        if clock() >= deadline:
+                                            category = "timeout"
+                                            break
+                                        if not idle:
+                                            category = "busy"
+                                            break
+                                        step = "reapproval"
+                                        approve_once(owner, number)
+                                        unrecorded_since = None
+                                        unrecorded_category = None
+                                        continue
                                 else:
                                     unrecorded_since = None
                                     unrecorded_category = None
