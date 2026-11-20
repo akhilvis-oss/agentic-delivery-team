@@ -20,7 +20,7 @@ TIERS = ["light", "standard", "domain-critical", "control-critical"]
 RELEASE_PATHS = ["changelog*", "*/changelog*", "releases/*", "*/releases/*",
                  "*release-notes*", "*release_notes*"]
 REASONS = {
-    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
+    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then re-approve to publish the reviewed work.",
     "publication_failed": "Publishing the reviewed commit or pull request failed; reconcile before retrying.",
     "publication_uncertain": "A publication write may have completed; inspect GitHub before retrying.",
     "stale_head": "The pull request or local head changed; a fresh review is required.",
@@ -215,7 +215,7 @@ def reviewed(runner, config, job):
         raise ValueError("Reviewed checkout changed") from None
 
 
-def story_section(text, title):
+def story_section(text, title, *, trim=True):
     """Read a story section through the next peer/higher heading or separator.
 
     Issue forms use level-three headings; product stories use level two.
@@ -225,8 +225,9 @@ def story_section(text, title):
                         text, re.M | re.I)
     if not heading:
         return None
-    return re.split(r"(?m)^#{1," + str(len(heading[1])) + r"}[ \t]+|^---[ \t]*\r?$",
-                    text[heading.end():], maxsplit=1)[0].strip()
+    section = re.split(r"(?m)^#{1," + str(len(heading[1])) + r"}[ \t]+|^---[ \t]*\r?$",
+                       text[heading.end():], maxsplit=1)[0]
+    return section.strip() if trim else section
 
 
 def criteria(text):
@@ -393,6 +394,8 @@ def merge_evidence(core, cfg, client, pr, opts, job):
 
 
 def advance(runner, config, path, job, client=None):
+    if job.get("delivery_retired"):
+        return
     opts = options(config)
     if job["status"] != "ready_for_integration":
         return

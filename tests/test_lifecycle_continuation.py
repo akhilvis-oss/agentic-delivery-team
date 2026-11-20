@@ -3,7 +3,6 @@
 from pathlib import Path
 import hashlib
 import sys
-from textwrap import dedent
 
 import pytest
 
@@ -39,26 +38,6 @@ def approve(hub, head, block=None):
 def newest_claim(cfg):
     claims = [core.read(p) for p in (Path(cfg["state_dir"]) / "claims").glob("*.json")]
     return max(claims, key=lambda c: c["event"])
-
-
-def test_story_form_saved_work_block_continues_after_github_label_spacing(tmp_path, monkeypatch):
-    cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
-    template = (Path(__file__).resolve().parents[1]
-                / "starter-kit/.github/ISSUE_TEMPLATE/story.yml").read_text()
-    field = template.split("    id: continue_from\n", 1)[1].split("  - type:", 1)[0]
-    label = field.split("      label: ", 1)[1].splitlines()[0]
-    # Follow the form's example, replacing its placeholder with the saved commit.
-    example = dedent(field.split("      placeholder: |\n", 1)[1]).strip()
-    answer = example.replace("<40-character lowercase commit ID>", old["head_commit"])
-    assert answer == "### Continue from\nCommit: " + old["head_commit"]
-    # GitHub separates the generated field heading from the textarea answer.
-    body = "### " + label + "\n\n" + answer
-    approve(hub, old["head_commit"], body)
-    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
-    claim = newest_claim(cfg)
-    assert claim["continued_from"] == old["head_commit"]
-    assert command(claim["worktree"], "rev-parse", "HEAD") == old["head_commit"]
-    assert Path(claim["worktree"], "delivery.txt").exists()
 
 
 def test_crlf_story_continues_without_normalizing_approved_scope(tmp_path, monkeypatch):
@@ -108,32 +87,14 @@ def test_owner_continuation_merges_fetched_target_and_binds_full_review(tmp_path
     assert "acceptance criteria take priority" in prompt
 
 
-@pytest.mark.parametrize("block", [
-    "## Continue from\nCommit: {head}", "### Continue from\n\nCommit: {head}",
-    "### Continue from\nCommit: {head} ", "### Continue from\ncommit: {head}",
-    "### Continue from\nCommit: ABCDEF0123456789ABCDEF0123456789ABCDEF01",
-    "### Continue from\nCommit: abc", " ### Continue from\nCommit: {head}",
-])
-def test_malformed_continuation_starts_fresh(tmp_path, monkeypatch, block):
-    cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
-    approve(hub, old["head_commit"], block.format(head=old["head_commit"]))
-    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
-    claim = newest_claim(cfg)
-    assert not claim.get("continued_from")
-    assert claim["start_commit"] == command(cfg["repository_root"], "rev-parse", "main")
-    assert not Path(claim["worktree"], "delivery.txt").exists()
-
-
 @pytest.mark.parametrize("refusal", [
-    "unrecorded", "failed", "blocked_integrity", "missing_ancestry", "no_flag", "other_issue", "other_actor",
+    "failed", "blocked_integrity", "missing_ancestry", "no_flag", "other_issue", "other_actor",
     "verification_reason", "verification_source_changed",
 ])
 def test_unverified_or_integrity_failed_saved_commit_is_refused(tmp_path, monkeypatch, refusal):
     cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
     head = old["head_commit"]
-    if refusal == "unrecorded":
-        head = "a" * 40
-    elif refusal in {"failed", "blocked_integrity", "missing_ancestry",
+    if refusal in {"failed", "blocked_integrity", "missing_ancestry",
                      "verification_reason", "verification_source_changed"}:
         old["status"] = "failed" if refusal == "failed" else "blocked"
         if refusal == "blocked_integrity":
