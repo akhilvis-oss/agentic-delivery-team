@@ -315,7 +315,11 @@ This takes the poll lock and refuses while a poll holds it. A clear during launc
 startup may be lost: run it again. Never clear a refusal without investigating the
 private check failure. Preserve the switch record and current/previous installs.
 A malformed record runs the first install unchanged and disables upgrades with a
-status notice. See [Upgrading](quickstart.md#upgrading) for confirmation and
+status notice. A pending version under `serve` starts a daemon timer at its first
+poll and exits with code 70 at the original ten-minute wall-clock deadline unless
+confirmation has atomically written the switch record, allowing launchd to restart
+the launcher and roll it back even when polls fail or the process sleeps.
+See [Upgrading](quickstart.md#upgrading) for confirmation and
 rollback limits. Only the owner installs/loads these jobs; the kit does not.
 
 Before loading either file:

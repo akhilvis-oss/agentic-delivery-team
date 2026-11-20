@@ -99,9 +99,20 @@ Upgrade and rollback notices persist in the status comment.
 Install the launcher and replacement plist once as described in the
 [lifecycle guide](v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
 The launcher rolls back at the fourth unconfirmed start, or a start at least ten
-minutes after the first. A hanging process still needs an owner restart after
-the existing stale-heartbeat alert; automatic watchdog termination is a later
-story. The launcher does not supervise the process. Keep watchdog and smoke-watch
+minutes after the first. Under `serve`, a pending version starts one daemon timer
+at its first poll, after validation, state binding and upgrade-context reads.
+It exits with code 70 at `pending_since` plus 600 whole wall-clock seconds, without
+writing `service-error.json`; an empty start time gets the full ten minutes from
+timer startup. An already-expired deadline exits in the polling thread before
+the rest of that poll. Confirmation cancels the timer only after the atomic
+switch write, before claims or jobs. launchd's `KeepAlive` restarts the launcher,
+which rolls back and records "Rolled back from <commit>: did not confirm".
+A GitHub outage lasting ten minutes straight after an upgrade can therefore
+roll back and refuse a good commit; investigate, then retry with `upgrade-clear`.
+Hangs before the timer starts, including validation, state binding and context
+reads, or native code holding the interpreter lock still need an owner restart
+after the stale-heartbeat alert; the launcher then rolls back. The launcher does
+not supervise the process. Keep watchdog and smoke-watch
 jobs on a fixed approved install, rarely updated by hand. An unreadable switch
 runs the first install and turns upgrades off until repaired or removed. Folder
 mismatches also disable upgrades, with an explanatory status-comment notice.
