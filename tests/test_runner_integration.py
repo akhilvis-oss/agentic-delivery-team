@@ -1030,6 +1030,8 @@ def test_auto_merge_enabled_with_unknown_or_allowed_repository_setting(delivery,
 
 @pytest.mark.parametrize("mode", ["disabled", "rejected", "missing_rejected"])
 def test_auto_merge_unavailable_needs_owner_once(delivery, monkeypatch, mode):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     _, path, job, client = delivery
     attempts = []
     if mode == "missing_rejected":
@@ -1113,6 +1115,8 @@ def test_category_normalizes_trusted_base_config(delivery, monkeypatch):
 @pytest.mark.parametrize("state,label", [("success", "passed"), ("failure", "failed"),
                                              ("error", "failed"), ("pending", "pending")])
 def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, state, label):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     config, _, job, client = delivery
     config["integration"]["smoke_reporting"] = True
     client.allow_auto_merge = False
@@ -1153,6 +1157,8 @@ def test_smoke_notice_uses_separate_status_token(app_transport, monkeypatch):
 
 @pytest.mark.parametrize("setting", [None, False])
 def test_owner_merge_notice_smoke_off_mints_no_token(delivery, monkeypatch, setting):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     config, _, job, client = delivery
     if setting is not None:
         config["integration"]["smoke_reporting"] = setting

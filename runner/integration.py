@@ -437,25 +437,12 @@ def advance(runner, config, path, job, client=None):
                         raise core.Uncertain("Auto-merge cancellation unconfirmed")
                 except Exception:
                     reason, owner = "auto_merge_disable_uncertain", True
-        delivery.update(stage="owner" if owner else "blocked", reason=reason)
+        delivery.update(stage="owner" if owner else "blocked", reason=reason,
+                        smoke_reporting=opts.get("smoke_reporting", False))
         job.update(status="needs_owner" if owner else "blocked", blocked_reason={
             "reason_code": reason, "reason": REASONS[reason]})
         runner.save_at_stop(config, path, job, job["head_commit"])
         persist()
-        if not delivery.get("reason_notice_attempted"):
-            try:
-                delivery["reason_notice_attempted"] = True
-                persist()
-                message = core.stop_notice(reason, REASONS[reason])
-                if reason == "owner_merge_required" and delivery.get("pr"):
-                    message += f"\nhttps://github.com/{cfg['repository']}/pull/{delivery['pr']}"
-                    if opts.get("smoke_reporting", False):
-                        message += "\n" + smoke_notice(client, cfg, job.get("reviewed_head", ""))
-                client.request("POST", f"/issues/{job['github_number']}/comments", {
-                    "body": message + "\nReviewed head: " + job.get("reviewed_head", "unavailable")})
-            except Exception:
-                job["lifecycle_unsynced"] = True
-                runner.save(path, job)
         try:
             client.notify(job["github_number"])
             if delivery.get("pr"):

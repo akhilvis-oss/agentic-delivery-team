@@ -766,6 +766,25 @@ def record_body(record):
     )
 
 
+def notice_body(cfg, client, entry):
+    """Render optional job context at transport time without altering the record."""
+    record = entry["record"]
+    body = entry.get("public_body", record_body(record))
+    context = entry.get("notice_context", {})
+    if context.get("delivery") and record.get("reason"):
+        from runner.integration import REASONS, smoke_notice
+
+        reason = record["reason"]
+        message = REASONS.get(reason, STOP_REASONS[reason])
+        if reason == "owner_merge_required" and record.get("pr"):
+            message += f"\nhttps://github.com/{cfg['repository']}/pull/{record['pr']}"
+            if context.get("smoke_reporting"):
+                message += "\n" + smoke_notice(client, cfg, context.get("reviewed_head", ""))
+        message += "\nReviewed head: " + context.get("reviewed_head", "unavailable")
+        body = message + "\n\n" + body
+    return stop_notice(record.get("reason"), body)
+
+
 def records(cfg, comments, expected_issue=None):
     trusted = {
         identity
@@ -1124,7 +1143,7 @@ def bind_state(cfg):
         )
 
 
-def queue(cfg, record, *, role="runner", public_body=None):
+def queue(cfg, record, *, role="runner", public_body=None, notice_context=None):
     bind_state(cfg)
     if record["repository"] != cfg["repository"]:
         raise ValueError("Wrong outbox repository")
@@ -1133,6 +1152,8 @@ def queue(cfg, record, *, role="runner", public_body=None):
     entry = dict(record=record, role=role, status="pending", comment_attempted=False)
     if public_body is not None:
         entry["public_body"] = public_body
+    if notice_context is not None:
+        entry["notice_context"] = notice_context
     create(path, entry)
     return path
 
@@ -1389,8 +1410,7 @@ def flush(cfg, client):
                         client.request(
                             "POST",
                             f"/issues/{record['issue']}/comments",
-                            {"body": stop_notice(record.get("reason"),
-                                                 entry.get("public_body", record_body(record)))},
+                            {"body": notice_body(cfg, client, entry)},
                         )
                     except Unavailable as exc:
                         if not isinstance(exc, Uncertain):
@@ -1574,7 +1594,11 @@ def job_records(cfg, job):
 def sync_job(config_path, job, client=None):
     cfg = load_config(config_path)
     for record in job_records(cfg, job):
-        queue(cfg, record)
+        context = None
+        if job.get("integration", {}).get("reason"):
+            context = dict(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
+                           smoke_reporting=job["integration"].get("smoke_reporting", False))
+        queue(cfg, record, notice_context=context)
     try:
         flush(cfg, client or GitHub(cfg))
         if any(
@@ -1963,20 +1987,37 @@ def guard_issue(cfg, client, number):
         actual = state(issue)
     except ValueError:
         actual = None
-    if actual == canonical:
-        # Runner stops already publish their job-bound reason (whose event is
-        # the approval ID). Only manual stops need this label-event notice.
-        if (canonical in {"blocked", "needs-owner", "needs-primary"}
-                and not has_role(cfg, event.get("actor", {}).get("login"), "runner")
-                and not any(
-                r["to"] == canonical and r.get("reason") in STOP_REASONS
-                and r["event"] == int(event["id"])
-                for r in records(cfg, client.comments(number), number))):
+    if canonical in {"blocked", "needs-owner", "needs-primary"}:
+        actor = event.get("actor", {}).get("login")
+        # Compare concrete logins: the owner can also hold the Product role.
+        noticed = actor == cfg["actors"]["runner"]
+        comments = client.comments(number)  # Re-read after the producer's label write.
+        remote = records(cfg, comments, number)
+        noticed = noticed or any(r["job"] == "label-stop" and r["event"] == int(event["id"])
+                                 and r["to"] == canonical for r in remote)
+        if actor != cfg["actors"]["owner"] and actor in {
+                cfg["actors"]["product"], cfg["actors"]["workflow"]}:
+            previous = max((e for e in events if e.get("event") == "labeled"
+                            and e.get("label", {}).get("name", "").startswith("status:")
+                            and int(e["id"]) < int(event["id"])),
+                           key=lambda e: int(e["id"]), default=None)
+            previous = previous or event
+            noticed = noticed or any(
+                    r["actor"] == actor and r["to"] == canonical
+                    and r.get("reason") in STOP_REASONS
+                    and r["reason"] != "approval_not_attested"
+                    and stamp(r["timestamp"]) >= stamp(previous["created_at"])
+                    for r in remote)
+        if not noticed:
+            if actual != canonical:
+                client.set_state(number, canonical)
             record = public_record(cfg, number, "label-stop", 0, canonical,
                                    event=int(event["id"]), kind="guard",
                                    reason="owner_requested_stop")
             queue(cfg, record, role="workflow")
             flush(cfg, client)
+            return actual != canonical
+    if actual == canonical:
         return False
     client.set_state(number, canonical)
     record = public_record(
