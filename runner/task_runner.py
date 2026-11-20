@@ -613,6 +613,12 @@ def public_receipt(receipt):
         public["runner_commits"] = commits
     if receipt.get("blocked_reason") or receipt["status"] == "blocked":
         public["blocked_reason"] = public_block_reason(receipt.get("blocked_reason"))
+    question = receipt.get("readiness_question")
+    if (public.get("blocked_reason", {}).get("reason_code") == "readiness_question"
+            and lifecycle_api().safe_question({"identity_roles": {}}, question)):
+        public["readiness_question"] = question
+    if receipt.get("readiness_sessions") and receipt["status"] in TERMINAL - {"ready_for_integration"}:
+        public["readiness_sessions"] = 1
     return public
 
 
@@ -1412,6 +1418,13 @@ class GitHubClient:
             reason = public_block_reason(receipt["blocked_reason"])
             body += f"\nBlocked: {reason['reason_code']}: {reason['reason']}"
             body = lifecycle_api().stop_notice(reason["reason_code"], body)
+        question = receipt.get("readiness_question")
+        if (receipt.get("blocked_reason", {}).get("reason_code") == "readiness_question"
+                and lifecycle_api().safe_question({"identity_roles": {}}, question)):
+            question = lifecycle_api().inert_mentions(question)
+            body += "\n" + "\n".join("> " + line for line in question.splitlines())
+        if receipt.get("readiness_sessions") and receipt["status"] in TERMINAL - {"ready_for_integration"}:
+            body += "\nReadiness cost: one extra agent session for this approval."
         for commit in receipt.get("runner_commits", []):
             body += f"\nRunner commit: {commit['commit_sha']} (committed_by: runner)"
         subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/issues/{number}/comments",
@@ -1461,6 +1474,15 @@ def save_job(config, path, job):
         receipt["verification_runs"] = job["verification_runs"]
     if job.get("blocked_reason") or job["status"] == "blocked":
         receipt["blocked_reason"] = public_block_reason(job.get("blocked_reason"))
+    if (job.get("readiness_stopped")
+            and receipt.get("blocked_reason", {}).get("reason_code") == "readiness_question"):
+        question = "\n".join(job["readiness"]["questions"])
+        # Standalone receipts have no lifecycle identities configured. Reuse the
+        # public-question policy unchanged, checking the aggregate before copying.
+        if lifecycle_api().safe_question({"identity_roles": {}}, question):
+            receipt["readiness_question"] = question
+    if job.get("readiness_sessions") and job["status"] in TERMINAL - {"ready_for_integration"}:
+        receipt["readiness_sessions"] = 1
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
     if (config.get("lifecycle_config") and job["assignment"].get("lifecycle")
             and (not job.get("stop_saving") or job.get("stop_ready"))):

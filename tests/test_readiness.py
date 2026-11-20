@@ -343,3 +343,107 @@ def test_readiness_cost_survives_later_worker_stop(tmp_path):
                worker={"status": "blocked", "summary": "Required check could not run."})
     body = core.record_body(core.job_records(cfg, job)[0])
     assert "Readiness cost: one extra agent session for this approval." in body
+
+
+COST_LINE = "Readiness cost: one extra agent session for this approval."
+
+
+def capture_standalone_receipt(setup, monkeypatch, answer, *, switch=True, enabled=True):
+    """Exercise real receipt persistence and rendering, replacing only gh transport."""
+    cfg, state, path, job = setup
+    cfg.update(readiness=switch, github_receipts=dict(enabled=enabled, repository="example/project"))
+    job["github_number"] = 7
+    job["private_detail"] = "PRIVATE-JOB-DETAIL"
+    runner.save_job(cfg, path, job)
+    posts = []
+    run = runner.subprocess.run
+
+    def transport(argv, **kwargs):
+        if argv[0] != "gh":
+            return run(argv, **kwargs)
+        assert argv == ["gh", "api", "--method", "POST",
+                        "repos/example/project/issues/7/comments", "--input", "-"]
+        assert kwargs["check"] and kwargs["timeout"] == 30
+        assert not kwargs.get("shell")
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    def worker_stop(config, state, path, job, role):
+        assert role == "worker"
+        return fixtures.result("blocked")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    monkeypatch.setattr(runner, "execute", worker_stop)
+    calls = readiness_agent(monkeypatch, runner, answer)
+    runner.run_once(cfg)
+    saved = runner.read(path)
+    if enabled:
+        assert saved["receipt_delivery"] == "posted" and len(posts) == 1
+        assert "PRIVATE-JOB-DETAIL" not in posts[0]
+        runner.publish_receipt(cfg, path, saved)
+        assert len(posts) == 1
+    else:
+        assert not posts and "receipt_delivery" not in saved
+    return saved, runner.read(state / "receipts/task.json"), posts, calls
+
+
+@pytest.mark.parametrize("questions", [[QUESTION], ["Which criterion should take precedence?"],
+                                       ["First decision?", "Second decision?"],
+                                       ["Ask @example-reviewer?"]],
+                         ids=["owner-delivery", "criterion", "multiple", "inert-mention"])
+def test_standalone_publication_quotes_safe_readiness_questions(setup, monkeypatch, questions):
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": questions})
+    assert calls == ["readiness"]
+    assert job["status"] == "needs_owner" and job["round"] == 1
+    assert not job.get("runner_commits") and not job.get("head_commit")
+    assert receipt["blocked_reason"]["reason_code"] == "readiness_question"
+    for question in questions:
+        assert "> " + core.inert_mentions(question) in posts[0]
+    assert "@example-reviewer" not in posts[0]
+
+
+@pytest.mark.parametrize("answer", [{"status": "questions", "questions": [QUESTION]},
+                                    {"status": "ready", "questions": []}, {}],
+                         ids=["questions", "later-worker-stop", "malformed"])
+def test_standalone_publication_states_readiness_cost(setup, monkeypatch, answer):
+    job, _, posts, _ = capture_standalone_receipt(setup, monkeypatch, answer)
+    assert job["readiness_sessions"] == 1
+    assert posts[0].splitlines().count(COST_LINE) == 1
+
+
+@pytest.mark.parametrize("questions", [
+    ["credential needed?"], ["a/b?"], ["x" * 2001],
+    ["Which change? " * 100, "Which change? " * 100],
+    ["Safe decision?", "secret needed?"], ["provider response: private output"],
+], ids=["sensitive-word", "path", "over-limit", "combined-limit", "mixed", "log"])
+def test_standalone_publication_withholds_unsafe_readiness_questions(setup, monkeypatch, questions):
+    assert not core.safe_question({"identity_roles": {}}, "\n".join(questions))
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": questions})
+    assert calls == ["readiness"] and job["readiness"]["questions"] == questions
+    public = json.dumps(runner.public_receipt(receipt)) + posts[0]
+    assert all(question not in public for question in questions)
+    assert "readiness_question" not in receipt
+    assert "readiness" not in runner.public_receipt(receipt)
+
+
+@pytest.mark.parametrize("switch", [None, False])
+def test_standalone_readiness_off_preserves_exact_receipt(setup, monkeypatch, switch):
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": [QUESTION]}, switch=switch)
+    assert calls == ["worker"] and "readiness_sessions" not in job
+    public = runner.public_receipt(receipt)
+    assert set(public) == {"status", "base_commit", "head_commit", "summary", "timestamp", "blocked_reason"}
+    reason = public["blocked_reason"]
+    original = (f"Task receipt: {public['status']}\nCommits: {public['base_commit']}.."
+                f"{public['head_commit']}\nSummary: {public['summary']}\nRun: {public['timestamp']}"
+                f"\nBlocked: {reason['reason_code']}: {reason['reason']}")
+    assert posts == [core.stop_notice(reason["reason_code"], original)]
+    assert COST_LINE not in posts[0] and QUESTION not in posts[0]
+
+
+def test_standalone_receipts_disabled_adds_no_notice(setup, monkeypatch):
+    _, _, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": [QUESTION]}, enabled=False)
+    assert posts == [] and calls == ["readiness"]
