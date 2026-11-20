@@ -122,10 +122,12 @@ approval is needed rather than replaying the earlier webhook.
 
 ### Is the service still polling?
 
-Look for the pinned **Lifecycle service last poll** comment on the latest
+Look for the pinned **Lifecycle service last poll (last update)** comment on the latest
 stand-up issue. If no stand-up exists or stand-ups are disabled, open the
 **Lifecycle service status** issue. The service updates one pinned comment in
-place for that issue on every poll, before running a builder. The UTC time and
+place when its content changes, and otherwise every 10 minutes while polling
+normally, before running a builder. The time shown is the last update. A long
+build or a poll interval above 600 seconds defers refresh to the next poll. The UTC time and
 configured interval are public; local paths and responses are not. Builds and
 reviews can delay the next poll. If the time stops advancing beyond that work,
 ask the operator to restore the service. Re-approving alone cannot restart it.
