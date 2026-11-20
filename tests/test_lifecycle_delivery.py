@@ -97,7 +97,7 @@ def test_passing_review_with_delivery_off_saves_reviewed_continuation(tmp_path, 
     assert record["outcome"] == "ready_for_integration"
     body = core.record_body(record)
     assert "Delivery is off for this repository" in body
-    assert "### Continue from\nCommit: " + job["reviewed_head"] in body
+    assert "Re-approve to continue" in body
     before = list(calls)
     service.poll(cfg, hub.client(), clock=lambda: 200)
     assert calls == before
@@ -116,7 +116,7 @@ def test_primary_inherits_original_delivery_and_publishes_only_when_enabled(tmp_
         return execute(config, state, path, job, role)
 
     monkeypatch.setattr(runner, "execute", rework)
-    # Primary's own preference must never override the original generated config.
+    # Primary's own preference must never override the current main template.
     settings(cfg, "primary_runner_config", {"enabled": not enabled, "declared_tier": "standard"})
     service.poll(cfg, hub.client(), clock=lambda: 100)
     original, = service.jobs(cfg)
@@ -125,9 +125,9 @@ def test_primary_inherits_original_delivery_and_publishes_only_when_enabled(tmp_
     service.poll(cfg, hub.client(), clock=lambda: 200)
     claim = newest_claim(cfg)
     config = core.read(claim["config"])
-    assert config["integration"]["enabled"] is enabled
+    assert config["integration"]["enabled"] is not enabled
     primary = next(j for j in service.jobs(cfg) if j["id"] == claim["job"])
-    if enabled:
+    if not enabled:
         assert [p[0] for p in publications] == ["push", "pr", "checker"]
         assert publications[0][1] == primary["reviewed_head"]
     else:
@@ -149,7 +149,7 @@ def test_incomplete_primary_template_stops_before_dispatch(tmp_path, monkeypatch
 
     monkeypatch.setattr(runner, "execute", rework)
     service.poll(cfg, hub.client(), clock=lambda: 100)
-    settings(cfg, "primary_runner_config", invalid)
+    settings(cfg, "runner_config", invalid)
     service.poll(cfg, hub.client(), clock=lambda: 200)
     claim = newest_claim(cfg)
     assert claim["error"] == "delivery_configuration_invalid"

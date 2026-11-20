@@ -1560,6 +1560,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
         if not acquired:
             return
         jobs = [(p, read(p)) for p in sorted((state / "tasks").glob("*.json"))]
+        jobs = [(p, j) for p, j in jobs if not j.get("delivery_retired")]
         for path, job in jobs:
             if (job.get("stop_saving") and config.get("lifecycle_config")
                     and (task_id is None or job["id"] == task_id)):
@@ -1580,6 +1581,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
         for pending_path, pending in jobs:
             if (pending["status"] == "ready_for_integration"
                     and (task_id is None or pending["id"] == task_id)
+                    and not pending.get("delivery_retired")
                     and ((config.get("lifecycle_config") and not config.get("pool_slot")
                           and not config.get("phase_context")) or integration_api().options(config))):
                 integration_api().advance(self_module(), config, pending_path, pending)
@@ -1602,7 +1604,9 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     raise Blocked("Lifecycle dispatch requires an event-bound service claim")
             max_attempts = (1 + lifecycle_cfg["pushback"]["max_correction_rounds"]
                             if lifecycle_cfg else config.get("max_rounds", 2))
-            if assignment.get("continuation"):
+            if assignment.get("lifecycle", {}).get("primary"):
+                max_attempts = 1
+            elif assignment.get("continuation"):
                 max_attempts = 2
             # Continuation exhaustion requires another owner approval; automatic
             # primary dispatch would grant an uncounted extra build and review.

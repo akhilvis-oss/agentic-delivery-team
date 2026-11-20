@@ -1778,9 +1778,7 @@ def test_stop_preserves_work_and_public_continue_block(tmp_path, monkeypatch, de
         head = job["head_commit"]
         assert len(head) == 40 and head != job["base_commit"]
         assert record["commit"] == head and record["actor"] == cfg["actors"]["runner"]
-        block = "### Continue from\nCommit: " + head
-        assert body.endswith(block + "\nPaste this into the story and re-approve to continue from this work "
-                             "once #110 is in place; without it, re-approval starts fresh.")
+        assert body.endswith("Restart: fresh under Owner decisions and re-approve to restart fresh.")
         assert service.git(cfg, "rev-parse", ref).stdout.strip() == head
         assert service.git(cfg, "show", head + ":delivery.txt").stdout == "delivery\n"
         if delivery != "review-blocked":
@@ -1883,7 +1881,7 @@ def test_stop_recovers_durable_boundaries_without_worker_replay(tmp_path, monkey
         assert len(job["runner_commits"]) == 1
         head = job["head_commit"]
         assert record["commit"] == head
-        assert "### Continue from\nCommit: " + head in body
+        assert "Re-approve to continue" in body
         assert service.git(cfg, "rev-parse", "refs/agentic/continue/" + job["id"]).stdout.strip() == head
 
 

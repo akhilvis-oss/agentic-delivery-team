@@ -508,11 +508,12 @@ def public_record(
 STOP_REASONS = {
     "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
-    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
+    "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then re-approve to publish the reviewed work.",
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
-    "continuation_commit_unrecorded": "The named commit is not verified saved work from a permitted stop on this issue. Owner: use the commit from a valid continuation comment, or remove the section and re-approve to restart fresh.",
-    "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or remove the section to restart fresh.",
-    "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (remove the Continue from section and re-approve), or split the story.",
+    "continuation_commit_unrecorded": "The latest saved work could not be verified on this issue. Owner: ask the operator to reconcile it, or add Restart: fresh under Owner decisions and re-approve.",
+    "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or add Restart: fresh under Owner decisions and re-approve.",
+    "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (add Restart: fresh under Owner decisions and re-approve), or split the story.",
+    "pr_open_reapproval": "This story has an open PR. Owner: close the PR and re-approve to rebuild, or merge it and add `status:merged` to finish (#184).",
     "continuation_not_applied": "The continued commit is missing from the built head. Owner: reconcile the history before re-approving.",
     "owner_question": 'The builder needs your decision. Owner: add the answer to the story under "Owner decisions", then re-approve.',
     "question_withheld": 'The builder asked a question containing potentially private content, so it could not be published. Owner: write "Please ask a public-safe question" under "Owner decisions", then re-approve.',
@@ -557,6 +558,7 @@ STOP_KINDS = {
     "pr_closed_unmerged": "Needs your decision",
     "owner_requested_stop": "Needs your decision",
     "continuation_limit": "Needs your decision",
+    "pr_open_reapproval": "Needs your decision",
     "owner_merge_required": "Needs your merge",
     "commit_refused": "Needs a fix",
     "delivery_disabled": "Needs a fix",
@@ -783,9 +785,8 @@ def record_body(record):
     if record.get("stop_save_failed"):
         explanation += "\nThe builder's work couldn't be saved completely; owner: ask the operator to reconcile it.\n"
     if record.get("continuation"):
-        tail = ("\n\n### Continue from\nCommit: " + record["commit"]
-                + "\nPaste this into the story and re-approve to continue from this work once #110 is in place; "
-                  "without it, re-approval starts fresh.")
+        tail = ("\n\nSaved work is available. Re-approve to continue it, or add "
+                "Restart: fresh under Owner decisions and re-approve to restart fresh.")
     return (
         "Task lifecycle record (public details; no approval implied).\n"
         + explanation

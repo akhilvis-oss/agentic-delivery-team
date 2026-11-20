@@ -88,8 +88,7 @@ an isolated temporary Git repository with no credential helpers or inherited Git
 configuration. The exact fetched commit is saved as `start_commit` in the private
 claim before worktree creation; the story branch starts from that SHA, never a
 local branch. Polling executes jobs one at a time, so a merge that lands before
-the next story starts is included by its next fetch. Primary continuations keep
-their existing reviewed source commit. This does not select GitHub's default
+the next story starts is included by its next fetch. All continuations merge the fetched target into their saved source commit. This does not select GitHub's default
 branch automatically or change PR delivery.
 
 A failed fetch, missing remote branch or App authentication failure records the
@@ -414,3 +413,35 @@ and permission set until five minutes before expiry. Tokens are never cached on
 disk or shared across processes. A 401, or an authenticated git failure, invalidates
 the rejected token; the affected client refreshes on its next request. All token
 consumers, including standalone runner imports, share the same locked cache.
+
+### Continuing and restarting
+
+Re-approving continues the newest local saved work for this story, merged with
+the latest target branch. No commit ID is needed. Jobs without saved work are
+skipped; an integrity failure in the newest saved job stops with
+`continuation_commit_unrecorded`, never silently starts fresh. Saved work includes
+runner-saved stops, reviewed heads and heads awaiting automatic Primary review.
+There are at most two counted continuations per story, each with one correction
+round. Automatic Primary continuation uses the same path with no correction
+round and does not count against that limit. Delivery settings always come from
+the main runner template.
+
+To start over, add exactly `Restart: fresh` on its own line under `## Owner decisions`
+or `### Owner decisions`, then re-approve. It takes effect only when absent from
+the last dispatched approval's text and resets the count. Remove the line before
+a later re-approval; editing a story during a run stops it. Claims stopped before
+dispatch do not become the comparison text.
+
+If the reviewed saved head is current against the fetched target and the approved
+scope is unchanged, the service only delivers it. Legacy continuation blocks,
+the old Saved work field and the restart directive are ignored for that scope
+comparison. A legacy block never selects a commit; the dispatched notice explains
+that the latest saved work is used.
+
+With an open PR, re-approval or restart stops with `pr_open_reapproval` (Needs your
+decision). Close the PR and re-approve to rebuild, or merge it and add
+`status:merged` to finish (#184). The old delivery loop ends permanently without
+another notice; the PR and auto-merge setting stay as they are. A merge may first
+produce a public "blocked → merged was rejected" comment and one failing lifecycle
+check; adding `status:merged` finishes the story. Auto-merge may still merge it
+by itself.

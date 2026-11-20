@@ -177,7 +177,7 @@ def test_unexpected_error_exits_and_next_start_reports_then_clears(
     client = Hub(cfg).client()
 
     def broken(*args, **kwargs):
-        service.continuation_commit(None)
+        service.restart_fresh(None)
 
     with monkeypatch.context() as patch:
         patch.setattr(core, "GitHub", lambda *args: client)
@@ -187,12 +187,12 @@ def test_unexpected_error_exits_and_next_start_reports_then_clears(
             service.main(["--config", cfg["config_path"], "serve"])
     path = Path(cfg["state_dir"]) / "service-error.json"
     assert core.read(path) == dict(exception_class="AttributeError",
-                                    function="continuation_commit")
+                                    function="restart_fresh")
     assert path.stat().st_mode & 0o777 == 0o600
     cfg, client, _, bodies, _ = simulation(tmp_path, monkeypatch, [None, None])
     with pytest.raises(StopLoop):
         service.run_loop(cfg, client, "serve")
-    assert "Service restarted after AttributeError in continuation_commit." in bodies[0][0]
+    assert "Service restarted after AttributeError in restart_fresh." in bodies[0][0]
     assert "Service restarted" not in bodies[1][0]
     assert not path.exists()
 

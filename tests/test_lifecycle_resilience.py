@@ -246,7 +246,7 @@ def test_public_error_metadata_validates_and_roundtrips(tmp_path):
 
 def test_claim_creation_error_with_known_event_gets_public_terminal_stop(tmp_path, monkeypatch):
     cfg, hub, _ = configured_service(tmp_path, monkeypatch)
-    monkeypatch.setattr(service, 'continuation_commit', crash)
+    monkeypatch.setattr(service, 'continuation', crash)
     service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
     claim, = claims(cfg)
     assert claim['stage'] == 'finished' and claim['error'] == 'unexpected_error'
