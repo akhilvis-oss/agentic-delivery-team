@@ -364,6 +364,7 @@ def public_record(
         "guard",
         "assumption",
         "approval",
+        "finish",
         "clarification",
     }:
         raise ValueError("Unknown record kind")
@@ -384,6 +385,15 @@ def public_record(
             raise ValueError("Approval needs owner event and scope digest")
     elif scope_sha256 is not None or approved_by is not None:
         raise ValueError("Approval metadata only belongs to approval records")
+    if kind == "finish" and (
+        target != "merged" or event is None or reason != "finished_by_owner"
+        or job != "owner-finish" or round_number != 0 or commit is not None
+        or pr is not None or gate is not None or outcome is not None
+        or severities not in (None, {}) or owner_question is not None
+        or failed_tests is not None or continuation or stop_save_failed
+        or conflict_files is not None or stop_details is not None
+    ):
+        raise ValueError("Finish needs an owner label event and fixed metadata")
     counts = severities or {}
     if set(counts) - {"P0", "P1", "P2"} or any(
         type(n) is not int or n < 0 for n in counts.values()
@@ -763,10 +773,14 @@ def records(cfg, comments, expected_issue=None):
                 or item["from"] not in STATES
             ):
                 continue
+            if item["to"] == "merged" and actor == cfg["actors"]["owner"]:
+                continue
+            if item["kind"] == "finish" and item["from"] == "merged":
+                continue
             if expected_issue is not None and item["issue"] != expected_issue:
                 continue
             if (
-                item["kind"] in {"guard", "approval"}
+                item["kind"] in {"guard", "approval", "finish"}
                 and actor != cfg["actors"]["workflow"]
             ):
                 continue
@@ -777,7 +791,7 @@ def records(cfg, comments, expected_issue=None):
             ):
                 continue
             special = (
-                item["kind"] in {"guard", "approval"}
+                item["kind"] in {"guard", "approval", "finish"}
                 and actor == cfg["actors"]["workflow"]
                 or item["kind"] in {"assumption", "clarification"}
                 and has_role(cfg, actor, "product")
@@ -1218,6 +1232,18 @@ def flush(cfg, client):
                         save(path, entry)
                         blocked_issues.add(record["issue"])
                         continue
+                    if record["to"] == "merged" and record["actor"] == cfg["actors"]["owner"]:
+                        reject_transition(cfg, client, path, entry)
+                    finishing = record["kind"] == "finish"
+                    if finishing:
+                        finish = owner_finish_event(cfg, client.events(record["issue"]))
+                        valid = records(cfg, [{"user": {"login": record["actor"]},
+                                               "body": record_body(record)}], record["issue"])
+                        if (expected_role != "workflow" or not valid or finish is None
+                                or finish[0] != record["from"]
+                                or int(finish[1]["id"]) != record["event"]
+                                or any(r["to"] == "merged" for r in remote)):
+                            reject_transition(cfg, client, path, entry)
                     attesting = (
                         record["kind"] == "approval"
                         and record["actor"] == cfg["actors"]["workflow"]
@@ -1234,11 +1260,12 @@ def flush(cfg, client):
                         and record["to"]
                         == canonical_state(cfg, client.events(record["issue"]))[0]
                     )
-                    if not (restoring or attesting or assumption) and not permitted(
+                    if not (restoring or attesting or assumption or finishing) and not permitted(
                         cfg, record["from"], record["to"], record["actor"]
                     ):
                         reject_transition(cfg, client, path, entry)
-                    if record["from"] == "needs-owner" and record["to"] == "merged":
+                    if (not finishing and record["from"] == "needs-owner"
+                            and record["to"] == "merged"):
                         pr = client.request("GET", f"/pulls/{record['pr']}") if record["pr"] else None
                         if (expected_role not in {"workflow", "runner"} or pr is None
                                 or not owner_merge_verified(cfg, record["issue"], remote, pr)
@@ -1732,11 +1759,70 @@ def _attest_approval(cfg, client, event):
         reject_labels("Approval publication could not be confirmed; re-approve")
 
 
+def owner_finish_event(cfg, events):
+    """Return the first permitted merge only when its label actor is the owner."""
+    current = "draft"
+    for event in sorted(events, key=lambda e: int(e["id"])):
+        if event.get("event") != "labeled":
+            continue
+        name = event.get("label", {}).get("name", "")
+        target = name[7:] if name.startswith("status:") else None
+        actor = event.get("actor", {}).get("login")
+        if target in STATES and permitted(cfg, current, target, actor):
+            if target == "merged":
+                return (current, event) if actor == cfg["actors"]["owner"] else None
+            current = target
+    return None
+
+
+def finish_by_owner(cfg, client, number, events):
+    finish = owner_finish_event(cfg, events)
+    if finish is None:
+        return False
+    bind_state(cfg)
+    with lock(Path(cfg["state_dir"]) / f"finish-{number}.lock") as acquired:
+        if not acquired:
+            return True
+        return _finish_by_owner(cfg, client, number, finish)
+
+
+def _finish_by_owner(cfg, client, number, finish):
+    issue = client.issue(number)
+    if is_report(cfg, issue):
+        return False
+    source, event = finish
+    evidence = records(cfg, client.comments(number), number)
+    proof = next((r for r in evidence if r["kind"] == "finish"
+                  and r["event"] == int(event["id"])), None)
+    if proof is None and any(r["to"] == "merged" for r in evidence):
+        return False
+    # Replace conflicting labels before the outbox reads the current state.
+    issue = client.issue(number)
+    labels = [x["name"] if isinstance(x, dict) else x for x in issue["labels"]]
+    if [name for name in labels if name.startswith("status:")] != ["status:merged"]:
+        client.set_state(number, "merged")
+    if proof is None:
+        record = public_record(cfg, number, "owner-finish", 0, "merged",
+                               kind="finish", event=int(event["id"]),
+                               reason="finished_by_owner")
+        record.update({"from": source, "actor": cfg["actors"]["workflow"]})
+        queue(cfg, record, role="workflow")
+        flush(cfg, client)
+    # A successful POST alone is insufficient: confirm trusted issue evidence.
+    if any(r["kind"] == "finish" and r["event"] == int(event["id"])
+           for r in records(cfg, client.comments(number), number)):
+        if client.issue(number)["state"] == "open":
+            client.request("PATCH", f"/issues/{number}", {"state": "closed"})
+    return True
+
+
 def guard_issue(cfg, client, number):
     events = client.events(number)
     canonical, event = canonical_state(cfg, events)
     issue = client.issue(number)
     if is_report(cfg, issue):
+        return False
+    if finish_by_owner(cfg, client, number, events):
         return False
     labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
     statuses = {label for label in labels if label.startswith("status:")}
@@ -2055,6 +2141,9 @@ def main(argv=None):
         if "pull_request" in event:
             pr_event(cfg, client, event)
         else:
+            number = event["issue"]["number"]
+            if finish_by_owner(cfg, client, number, client.events(number)):
+                return 0
             attest_approval(cfg, client, event)
             if event.get("action") == "edited" and core_body_changed(event):
                 issue = client.issue(event["issue"]["number"])

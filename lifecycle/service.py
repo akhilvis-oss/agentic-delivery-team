@@ -388,7 +388,12 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
             git(cfg, "update-ref", "--no-deref", "-d", ref)
             claim["removed_continuations"] = claim.get("removed_continuations", 0) + 1
 
-    if owner_closed:
+    finish = (next((r for r in core.records(cfg, client.comments(issue["number"]),
+                                           issue["number"]) if r["kind"] == "finish"), None)
+              if client is not None else None)
+    closed_before_finish = owner_closed and (finish is None or
+        int(closing[-1]["id"]) < finish["event"])
+    if closed_before_finish:
         remove_continuation()
     if core.state(issue) != "merged":
         claim["cleanup_pending"] = "closed_without_merge_requires_owner"
@@ -433,6 +438,10 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
             claim["cleanup_pending"] = "target_branch_fetch_failed"
             return
         ancestor = git(cfg, "merge-base", "--is-ancestor", head, target, check=False)
+        if ancestor.returncode and finish is not None:
+            claim.update(cleaned=True, owner_finish_kept_unmerged=True)
+            claim.pop("cleanup_pending", None)
+            return
         if ancestor.returncode and head != verified_merge_head(cfg, client, issue):
             claim["cleanup_pending"] = "branch_not_verified_merged"
             return
@@ -561,13 +570,22 @@ def publish_poll(cfg, client, issues, at):
     return created
 
 
+def owner_finish_notices(cfg, claims=None):
+    if claims is None:
+        claims = [core.read(p) for p in sorted((Path(cfg["state_dir"]) / "claims").glob("*.json"))]
+    return [f"Issue #{c['issue']}: owner finish kept unmerged work" for c in claims
+            if c.get("owner_finish_kept_unmerged")
+            and git(cfg, "show-ref", "--verify", "refs/heads/" + c["branch"],
+                    check=False).returncode == 0]
+
+
 def poll_body(cfg, at, notices):
     return ("Lifecycle service last poll (last update): " + timestamp(at)
             + ".\nExpected poll interval: " + str(cfg["poll_seconds"])
             + " seconds, plus time spent building or reviewing. If this time stops "
             "updating, ask the operator to restore the service; re-approving alone "
             "will not restart it.\n"
-            + "".join(line + "\n" for line in notices)
+            + "".join(line + "\n" for line in notices + owner_finish_notices(cfg))
             + (cfg["_upgrade_notice"] + "\n" if cfg.get("_upgrade_notice") else "")
             + "<!-- agentic-last-poll-v1 -->")
 
@@ -1115,7 +1133,7 @@ def status(cfg, *, clock=time.time):
         or ["  none"]
     )
     lines.append("Waiting for reconciliation:")
-    pending = []
+    pending = ["  " + line for line in owner_finish_notices(cfg, claims)]
     for c in claims:
         if c.get("error") or c.get("cleanup_pending") or c["stage"] == "suspended":
             pending.append(
