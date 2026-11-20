@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import fcntl
 import importlib.util
@@ -243,7 +244,7 @@ def recover_start_commit(cfg, claim, runner):
             or assignment["kind"] != "work" or assignment["after_task"] is not None
             or not isinstance(start, str) or not re.fullmatch(r"[0-9a-f]{40}", start)
             or head != (job.get("head_commit") or start)):
-        raise ValueError("Claim/job recovery binding mismatch")
+        raise core.IntegrityError("Claim/job recovery binding mismatch")
     git(cfg, "merge-base", "--is-ancestor", start, head, worktree=str(worktree))
     return start
 
@@ -251,7 +252,7 @@ def recover_start_commit(cfg, claim, runner):
 def source_work(cfg, job_id):
     """Load only service-owned state and verify its issue/event assignment."""
     if not core.ID.fullmatch(job_id):
-        raise ValueError("Invalid source job")
+        raise core.IntegrityError("Invalid source job")
     root = Path(cfg["state_dir"]) / "jobs" / job_id
     config = runner_module().load_config(root / "config.json")
     job = core.read(root / "runner-state" / "tasks" / (job_id + ".json"))
@@ -259,7 +260,7 @@ def source_work(cfg, job_id):
     if (job["id"] != job_id or assignment["kind"] != "work"
             or config.get("lifecycle_config") != cfg["config_path"]
             or assignment.get("lifecycle", {}).get("issue") != job.get("github_number")):
-        raise ValueError("Source job binding changed")
+        raise core.IntegrityError("Source job binding changed")
     return config, job
 
 
@@ -276,7 +277,7 @@ def delivery_template(cfg, claim):
         if (binding["issue"] != claim["issue"] or binding["event"] != claim["source_event"]
                 or source["assignment"]["task_text"] != claim["task"]
                 or source.get("head_commit") != claim["start_commit"]):
-            raise ValueError("Primary source binding changed")
+            raise core.IntegrityError("Primary source binding changed")
         template["integration"] = source_config.get("integration", {"enabled": False})
     if "delivery_settings" in claim:
         template["integration"] = claim["delivery_settings"]
@@ -314,7 +315,7 @@ def delivery_candidate(cfg, claim, source_id, history):
                and core.has_role(cfg, r["actor"], "runner") for r in history):
         return None, "review_record_missing"
     if source["github_number"] != claim["issue"]:
-        raise ValueError("Foreign delivery source")
+        raise core.IntegrityError("Foreign delivery source")
     if source.get("integration", {}).get("stage", "new") != "new":
         return None, "publication_already_started"
     # Only the continuation block may change when reusing the old review.
@@ -329,7 +330,11 @@ def delivery_candidate(cfg, claim, source_id, history):
         return None, "approved_scope_changed"
     try:
         runner.integration_api().reviewed(runner, source_config, source)
-    except (ValueError, RuntimeError):
+    except Exception as exc:
+        if getattr(exc, "integrity_error", False):
+            raise
+        if not isinstance(exc, (ValueError, RuntimeError)):
+            raise
         return None, "review_evidence_unavailable"
     base = source.get("review_base", source["base_commit"])
     target = claim["review_base"]
@@ -376,7 +381,7 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
     if claim.get("cleaned") or issue["state"] != "closed":
         return
     if not core.ID.fullmatch(claim["job"]):
-        raise ValueError("Invalid cleanup job")
+        raise core.IntegrityError("Invalid cleanup job")
     # The most recent close/reopen event must attest an owner close.
     closing = [e for e in events if e.get("event") in {"closed", "reopened"}]
     owner_closed = bool(closing and closing[-1].get("event") == "closed"
@@ -403,7 +408,7 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
         path.parent.resolve() != Path(cfg["worktree_root"]).resolve()
         or path.name != claim["job"]
     ):
-        raise ValueError("Worktree ownership binding changed")
+        raise core.IntegrityError("Worktree ownership binding changed")
     if path.exists():
         if (
             git(cfg, "branch", "--show-current", worktree=str(path)).stdout.strip()
@@ -418,7 +423,7 @@ def cleanup(cfg, claim, issue, events=(), *, client=None):
             "worktree " + str(path) + "\n"
             not in git(cfg, "worktree", "list", "--porcelain").stdout
         ):
-            raise ValueError("Worktree registration unavailable")
+            raise core.Unavailable("Worktree registration unavailable")
         dirty = git(cfg, "status", "--porcelain", worktree=str(path)).stdout
         if dirty:
             claim["cleanup_pending"] = "dirty_worktree_requires_owner"
@@ -627,10 +632,89 @@ def error_origin(exc):
         code = trace.tb_frame.f_code
         filename = Path(code.co_filename).resolve()
         if any(filename.is_relative_to(framework / folder)
-               for folder in ("lifecycle", "digest", "runner")):
+               for folder in ("lifecycle", "digest", "runner")) and re.fullmatch(
+                   r"[A-Za-z_][A-Za-z0-9_]{0,79}", code.co_name):
             function = code.co_name
         trace = trace.tb_next
     return function
+
+
+
+def local_errors(cfg):
+    return sorted((Path(cfg["state_dir"]) / "story-errors").glob("*.json"))
+
+
+def remember_error(cfg, number, exc):
+    details = {"issue": number, "exception_class": exception_name(exc),
+               "function": error_origin(exc)}
+    folder = core.private(Path(cfg["state_dir"]) / "story-errors")
+    core.create(folder / (core.key(details) + ".json"), details)
+
+
+def exception_name(exc):
+    name = type(exc).__name__
+    return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", name) else "Exception"
+
+
+@contextlib.contextmanager
+def story_boundary(cfg, client, issue, failed, skipped, claims, *, claim=None,
+                   approval=None, observed=None):
+    """Isolate bugs; unavailable transports and broken bindings still escape."""
+    number = issue["number"]
+    try:
+        yield
+    except core.StatusLabelError:
+        skipped.add(number)
+    except Exception as exc:
+        if isinstance(exc, core.Unavailable) or getattr(exc, "integrity_error", False):
+            raise
+        failed.add(number)
+        issue = observed.get("issue", issue) if observed is not None else issue
+        try:
+            current = core.state(issue)
+        except core.StatusLabelError:
+            skipped.add(number)
+            return
+        candidate = claim
+        event = approval.get("event") if approval is not None else None
+        if claim is None and current in {"approved", "needs-primary"}:
+            if event is None:
+                remember_error(cfg, number, exc)
+                return
+            candidate = next((c for c in claims if c["issue"] == number
+                              and c["event"] == int(event["id"])
+                              and c["stage"] not in {"finished", "suspended"}), None)
+        elif candidate is None:
+            candidate = next((c for c in claims if c["issue"] == number
+                              and c["stage"] not in {"finished", "suspended"}), None)
+        active = (current != "pr-open" and (
+            candidate is not None and candidate["stage"] not in {"finished", "suspended"}
+            or claim is None and current in {"approved", "needs-primary"}
+            and approval is not None and approval.get("event") is not None))
+        if not active:
+            remember_error(cfg, number, exc)
+            return
+        if candidate is None:
+            event = int(approval["event"]["id"])
+            candidate = dict(issue=number, event=event,
+                             job=f"issue-{number}-event-{event}", stage="claimed")
+        record = core.public_record(
+            cfg, number, candidate["job"], 0, "blocked", event=candidate["event"],
+            reason="unexpected_error", exception_class=exception_name(exc),
+            function=error_origin(exc))
+        # Persist terminal ownership before any transport. Never save the runner
+        # job: that could emit its own, duplicate stop on a later poll.
+        core.queue(cfg, record)
+        candidate.update(stage="finished", error="unexpected_error")
+        core.save(Path(cfg["state_dir"]) / "claims" / (candidate["job"] + ".json"), candidate)
+        try:
+            flush_outbox(cfg, client)
+        except core.Unavailable:
+            raise
+        except Exception as flush_error:
+            if getattr(flush_error, "integrity_error", False):
+                raise
+            remember_error(cfg, number, flush_error)
 
 
 def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
@@ -708,121 +792,155 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             for i in all_issues
             if "pull_request" not in i and not core.is_report(cfg, i)
         ]
-        issues = [backfill_owner_merge(cfg, client, i) if i["number"] in changed else i
-                  for i in issues]
+        failed, skipped = set(), set()
+        error_paths = local_errors(cfg)
+        for error_path in error_paths:
+            number = core.read(error_path)["issue"]
+            changed.add(number)
+            if number not in rows:
+                try:
+                    item = client.issue(number)
+                except core.StatusLabelError:
+                    skipped.add(number)
+                    continue
+                except Exception as exc:
+                    if isinstance(exc, core.Unavailable) or getattr(exc, "integrity_error", False):
+                        raise
+                    remember_error(cfg, number, exc)
+                    failed.add(number)
+                    continue
+                rows[number] = item
+                issues.append(item)
+        claims = [core.read(p) for p in sorted(claims_dir.glob("*.json"))]
+        reconciled = []
+        for issue in issues:
+            with story_boundary(cfg, client, issue, failed, skipped, claims):
+                core.state(issue)
+                if issue["number"] in changed:
+                    issue = backfill_owner_merge(cfg, client, issue)
+            reconciled.append(issue)
+        issues = reconciled
         by_number = {i["number"]: i for i in issues}
         for issue in issues:
-            try:
-                action = claim_event(cfg, issue, lambda: client.events(issue["number"]),
-                                     issue["number"] in changed)
-                if action and not action[1]:
-                    proofs = core.records(
+            if issue["number"] in failed | skipped:
+                continue
+            approval = {}
+            with story_boundary(cfg, client, issue, failed, skipped, claims,
+                                approval=approval):
+                core.state(issue)
+                try:
+                    action = claim_event(cfg, issue, lambda: client.events(issue["number"]),
+                                         issue["number"] in changed)
+                    if action:
+                        approval["event"] = action[0]
+                    if action and not action[1]:
+                        proofs = core.records(
+                            cfg, client.comments(issue["number"]), issue["number"]
+                        )
+                        proof = next(
+                            (
+                                r
+                                for r in proofs
+                                if r["kind"] == "approval"
+                                and r["event"] == int(action[0]["id"])
+                            ),
+                            None,
+                        )
+                        if (
+                            not core.can_start(issue, proofs)
+                            or not proof
+                            or proof["scope_sha256"]
+                            != core.hashlib.sha256(
+                                (issue.get("body") or "").encode()
+                            ).hexdigest()
+                        ):
+                            action = None
+                except core.StatusLabelError:
+                    raise
+                if not action:
+                    continue
+                event, primary = action
+                source_job = None
+                if primary:
+                    history = core.records(
                         cfg, client.comments(issue["number"]), issue["number"]
                     )
-                    proof = next(
+                    if not core.can_start(issue, history):
+                        continue
+                    escalated = [
+                        r for r in history if r["to"] == "needs-primary" and r["commit"]
+                    ]
+                    source_job = next(
                         (
-                            r
-                            for r in proofs
-                            if r["kind"] == "approval"
-                            and r["event"] == int(action[0]["id"])
+                            j
+                            for j in jobs(cfg)
+                            if escalated
+                            and j["id"] == escalated[-1]["job"]
+                            and j.get("head_commit") == escalated[-1]["commit"]
                         ),
                         None,
                     )
-                    if (
-                        not core.can_start(issue, proofs)
-                        or not proof
-                        or proof["scope_sha256"]
-                        != core.hashlib.sha256(
-                            (issue.get("body") or "").encode()
-                        ).hexdigest()
-                    ):
-                        action = None
-            except ValueError:
-                continue
-            if not action:
-                continue
-            event, primary = action
-            source_job = None
-            if primary:
-                history = core.records(
-                    cfg, client.comments(issue["number"]), issue["number"]
-                )
-                if not core.can_start(issue, history):
+                    if source_job is None:
+                        continue
+                job = f"issue-{issue['number']}-event-{event['id']}"
+                path = claims_dir / (job + ".json")
+                if path.exists():
                     continue
-                escalated = [
-                    r for r in history if r["to"] == "needs-primary" and r["commit"]
-                ]
-                source_job = next(
-                    (
-                        j
-                        for j in jobs(cfg)
-                        if escalated
-                        and j["id"] == escalated[-1]["job"]
-                        and j.get("head_commit") == escalated[-1]["commit"]
-                    ),
-                    None,
+                # Persist the event-specific claim and frozen scope BEFORE any action.
+                claim = dict(
+                    job=job,
+                    issue=issue["number"],
+                    event=int(event["id"]),
+                    primary=primary,
+                    task=issue.get("body") or "",
+                    stage="claimed",
+                    created_at=core.now(),
+                    branch="runner/" + job,
+                    worktree=str(Path(cfg["worktree_root"]) / job),
                 )
-                if source_job is None:
-                    continue
-            job = f"issue-{issue['number']}-event-{event['id']}"
-            path = claims_dir / (job + ".json")
-            if path.exists():
-                continue
-            # Persist the event-specific claim and frozen scope BEFORE any action.
-            claim = dict(
-                job=job,
-                issue=issue["number"],
-                event=int(event["id"]),
-                primary=primary,
-                task=issue.get("body") or "",
-                stage="claimed",
-                created_at=core.now(),
-                branch="runner/" + job,
-                worktree=str(Path(cfg["worktree_root"]) / job),
-            )
-            if source_job:
-                claim.update(
-                    start_commit=source_job["head_commit"],
-                    review_base=source_job.get(
-                        "review_base", source_job["base_commit"]
-                    ),
-                    primary_context=source_job.get("review_history", []),
-                    source_job=source_job["id"], source_event=source_job["assignment"]["lifecycle"]["event"],
-                )
-            named = None if primary else continuation_commit(claim["task"])
-            if named:
-                history = core.records(cfg, client.comments(issue["number"]), issue["number"])
-                if not core.can_start(issue, history):
-                    continue
-                local_jobs = {j["id"]: j for j in jobs(cfg)}
-                saved = next((r for r in reversed(history)
-                              if r["commit"] == named
-                              and ((r.get("continuation", False) and r["to"] in {"needs-owner", "blocked"})
-                                   or (r["kind"] == "review" and r["outcome"] == "ready_for_integration"))
-                              and core.has_role(cfg, r["actor"], "runner")
-                              and local_jobs.get(r["job"], {}).get("status") in {
-                                  "needs_owner", "blocked", "ready_for_integration"}
-                              and local_jobs[r["job"]].get("blocked_reason", {}).get("reason_code")
-                              != "continuation_not_applied"
-                              and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
-                                          for refusal in local_jobs[r["job"]].get("commit_refusals", []))
-                              and not any(run.get("reason") == "reviewed_worktree_changed"
-                                          or run.get("source_unchanged") is False
-                                          for run in local_jobs[r["job"]].get("verification_runs", []))
-                              and local_jobs[r["job"]].get("head_commit") == named), None)
-                count = sum(1 for p in claims_dir.glob("*.json")
-                            if (c := core.read(p))["issue"] == issue["number"]
-                            and c.get("continued_from"))
-                if saved:
-                    claim.update(start_commit=named, continued_from=named,
-                                 continuation_number=count + 1,
-                                 previous_stop_reason=saved["reason"] or "delivery_disabled",
-                                 continuation_source=saved["job"])
-                else:
-                    claim["continuation_error"] = "continuation_commit_unrecorded"
-                if count >= 2:
-                    claim["continuation_error"] = "continuation_limit"
-            core.create(path, claim)
+                if source_job:
+                    claim.update(
+                        start_commit=source_job["head_commit"],
+                        review_base=source_job.get(
+                            "review_base", source_job["base_commit"]
+                        ),
+                        primary_context=source_job.get("review_history", []),
+                        source_job=source_job["id"], source_event=source_job["assignment"]["lifecycle"]["event"],
+                    )
+                named = None if primary else continuation_commit(claim["task"])
+                if named:
+                    history = core.records(cfg, client.comments(issue["number"]), issue["number"])
+                    if not core.can_start(issue, history):
+                        continue
+                    local_jobs = {j["id"]: j for j in jobs(cfg)}
+                    saved = next((r for r in reversed(history)
+                                  if r["commit"] == named
+                                  and ((r.get("continuation", False) and r["to"] in {"needs-owner", "blocked"})
+                                       or (r["kind"] == "review" and r["outcome"] == "ready_for_integration"))
+                                  and core.has_role(cfg, r["actor"], "runner")
+                                  and local_jobs.get(r["job"], {}).get("status") in {
+                                      "needs_owner", "blocked", "ready_for_integration"}
+                                  and local_jobs[r["job"]].get("blocked_reason", {}).get("reason_code")
+                                  != "continuation_not_applied"
+                                  and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
+                                              for refusal in local_jobs[r["job"]].get("commit_refusals", []))
+                                  and not any(run.get("reason") == "reviewed_worktree_changed"
+                                              or run.get("source_unchanged") is False
+                                              for run in local_jobs[r["job"]].get("verification_runs", []))
+                                  and local_jobs[r["job"]].get("head_commit") == named), None)
+                    count = sum(1 for p in claims_dir.glob("*.json")
+                                if (c := core.read(p))["issue"] == issue["number"]
+                                and c.get("continued_from"))
+                    if saved:
+                        claim.update(start_commit=named, continued_from=named,
+                                     continuation_number=count + 1,
+                                     previous_stop_reason=saved["reason"] or "delivery_disabled",
+                                     continuation_source=saved["job"])
+                    else:
+                        claim["continuation_error"] = "continuation_commit_unrecorded"
+                    if count >= 2:
+                        claim["continuation_error"] = "continuation_limit"
+                core.create(path, claim)
         processed = []
         runner = runner_module()
         for path in sorted(claims_dir.glob("*.json")):
@@ -832,231 +950,249 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             issue = by_number.get(claim["issue"])
             if not issue:
                 continue
-            # The current all-issues listing already proves closed/final stories
-            # cannot execute. Keep fresh evidence checks for claims that can.
-            finished = not core.can_start(issue)
-            if not finished:
-                issue = client.issue(claim["issue"])
-                evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
-                finished = not core.can_start(issue, evidence)
-            if finished:
-                claim["stage"] = "finished"
-                completed_path = (root / "jobs" / claim["job"] / "runner-state"
-                                  / "tasks" / (claim["job"] + ".json"))
-                if completed_path.exists():
-                    claim["head"] = core.read(completed_path).get("head_commit")
-                core.save(path, claim)
-            if claim["stage"] == "finished":
-                if not finished and run_jobs and claim.get("config"):
-                    completed_config = runner.load_config(claim["config"])
-                    completed_job = runner.read(
-                        Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
-                    )
-                    if (completed_job.get("stop_saving")
-                            or completed_job["status"] == "ready_for_integration"
-                            or runner.integration_api().options(completed_config)):
-                        runner.run_once(completed_config, task_id=claim["job"])
-                events = client.events(claim["issue"])
-                canonical, _ = core.canonical_state(cfg, events)
-                if canonical == core.state(issue):
-                    cleanup(cfg, claim, issue, events, client=client)
-                else:
-                    claim["cleanup_pending"] = "untrusted_close_state"
-                core.save(path, claim)
+            if claim["issue"] in failed | skipped:
                 continue
-            if claim["stage"] == "enqueued":
-                recovery_config = runner.load_config(claim["config"])
-                recovery_path = (
-                    Path(recovery_config["state_dir"])
-                    / "tasks"
-                    / (claim["job"] + ".json")
-                )
-                previous = runner.read(recovery_path)
-                if previous["status"] in runner.TERMINAL:
-                    # Completion is durable in the job before the claim. Recover
-                    # that boundary without replaying work or re-admitting it.
-                    if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
-                        if not run_jobs:
-                            continue
-                        runner.run_once(recovery_config, task_id=claim["job"])
-                        previous = runner.read(recovery_path)
+            observed = {"issue": issue}
+            with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
+                                observed=observed):
+                core.state(issue)
+                # The current all-issues listing already proves closed/final stories
+                # cannot execute. Keep fresh evidence checks for claims that can.
+                finished = not core.can_start(issue)
+                if not finished:
+                    issue = client.issue(claim["issue"])
+                    observed["issue"] = issue
+                    evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+                    finished = not core.can_start(issue, evidence)
+                if finished:
+                    claim["stage"] = "finished"
+                    completed_path = (root / "jobs" / claim["job"] / "runner-state"
+                                      / "tasks" / (claim["job"] + ".json"))
+                    if completed_path.exists():
+                        claim["head"] = core.read(completed_path).get("head_commit")
+                    core.save(path, claim)
+                if claim["stage"] == "finished":
+                    # Unexpected stops permanently end runner work, but still
+                    # use the normal evidence-bound cleanup below.
+                    if (claim.get("error") != "unexpected_error"
+                            and not finished and run_jobs and claim.get("config")):
+                        completed_config = runner.load_config(claim["config"])
+                        completed_job = runner.read(
+                            Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
+                        )
+                        if (completed_job.get("stop_saving")
+                                or completed_job["status"] == "ready_for_integration"
+                                or runner.integration_api().options(completed_config)):
+                            runner.run_once(completed_config, task_id=claim["job"])
+                    events = client.events(claim["issue"])
+                    canonical, _ = core.canonical_state(cfg, events)
+                    if canonical == core.state(issue):
+                        cleanup(cfg, claim, issue, events, client=client)
+                    else:
+                        claim["cleanup_pending"] = "untrusted_close_state"
+                    core.save(path, claim)
+                    continue
+                if claim["stage"] == "enqueued":
+                    recovery_config = runner.load_config(claim["config"])
+                    recovery_path = (
+                        Path(recovery_config["state_dir"])
+                        / "tasks"
+                        / (claim["job"] + ".json")
+                    )
+                    previous = runner.read(recovery_path)
+                    if previous["status"] in runner.TERMINAL:
+                        # Completion is durable in the job before the claim. Recover
+                        # that boundary without replaying work or re-admitting it.
                         if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
-                            continue
-                    claim.update(stage="finished", head=previous.get("head_commit"))
-                    core.save(path, claim)
+                            if not run_jobs:
+                                continue
+                            runner.run_once(recovery_config, task_id=claim["job"])
+                            previous = runner.read(recovery_path)
+                            if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
+                                continue
+                        claim.update(stage="finished", head=previous.get("head_commit"))
+                        core.save(path, claim)
+                        continue
+                    if run_jobs and previous["status"].startswith("running_"):
+                        # run_once only marks an unclean phase interrupted; never
+                        # signals a persisted PID or starts a second agent.
+                        runner.run_once(recovery_config)
+                        claim.update(
+                            stage="finished", error="interrupted_requires_reconciliation"
+                        )
+                        core.save(path, claim)
+                        continue
+                if claim["stage"] == "suspended":
                     continue
-                if run_jobs and previous["status"].startswith("running_"):
-                    # run_once only marks an unclean phase interrupted; never
-                    # signals a persisted PID or starts a second agent.
-                    runner.run_once(recovery_config)
+                fresh = client.issue(claim["issue"])
+                observed["issue"] = fresh
+                if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
                     claim.update(
-                        stage="finished", error="interrupted_requires_reconciliation"
+                        stage="suspended", error="admission_changed_requires_reconciliation"
                     )
                     core.save(path, claim)
                     continue
-            if claim["stage"] == "suspended":
-                continue
-            fresh = client.issue(claim["issue"])
-            if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
-                claim.update(
-                    stage="suspended", error="admission_changed_requires_reconciliation"
-                )
-                core.save(path, claim)
-                continue
-            if claim["stage"] == "claimed":
-                if claim.get("continuation_error"):
-                    stop_continuation(cfg, client, path, claim, claim["continuation_error"])
-                    continue
-                try:
-                    template = delivery_template(cfg, claim)
-                except (ValueError, OSError):
-                    stop_continuation(cfg, client, path, claim, "delivery_configuration_invalid")
-                    continue
-                if "delivery_settings" not in claim:
-                    claim["delivery_settings"] = template["integration"]
-                    core.save(path, claim)
-                if claim.get("continued_from"):
-                    if "review_base" not in claim:
+                if claim["stage"] == "claimed":
+                    if claim.get("continuation_error"):
+                        stop_continuation(cfg, client, path, claim, claim["continuation_error"])
+                        continue
+                    try:
+                        template = delivery_template(cfg, claim)
+                    except core.IntegrityError:
+                        raise
+                    except (ValueError, OSError):
+                        stop_continuation(cfg, client, path, claim, "delivery_configuration_invalid")
+                        continue
+                    if "delivery_settings" not in claim:
+                        claim["delivery_settings"] = template["integration"]
+                        core.save(path, claim)
+                    if claim.get("continued_from"):
+                        if "review_base" not in claim:
+                            try:
+                                claim["review_base"] = fetch_target(cfg)
+                            except core.Unavailable:
+                                claim["error"] = "target_branch_fetch_failed"
+                                core.save(path, claim)
+                                continue
+                            claim.pop("error", None)
+                            core.save(path, claim)
+                        if "delivery_resume_checked" not in claim:
+                            source, reason = delivery_candidate(
+                                cfg, claim, claim["continuation_source"],
+                                core.records(cfg, client.comments(claim["issue"]), claim["issue"]))
+                            claim.update(delivery_resume_checked=True, delivery_source=source,
+                                         delivery_resume_fallback=reason)
+                            core.save(path, claim)
+                        files = prepare_continuation(cfg, claim)
+                        if files:
+                            stop_continuation(cfg, client, path, claim, "continuation_conflict", files)
+                            continue
+                    if "start_commit" not in claim:
                         try:
-                            claim["review_base"] = fetch_target(cfg)
+                            claim["start_commit"] = fetch_target(cfg)
                         except core.Unavailable:
                             claim["error"] = "target_branch_fetch_failed"
                             core.save(path, claim)
                             continue
                         claim.pop("error", None)
                         core.save(path, claim)
-                    if "delivery_resume_checked" not in claim:
-                        source, reason = delivery_candidate(
-                            cfg, claim, claim["continuation_source"],
-                            core.records(cfg, client.comments(claim["issue"]), claim["issue"]))
-                        claim.update(delivery_resume_checked=True, delivery_source=source,
-                                     delivery_resume_fallback=reason)
-                        core.save(path, claim)
-                    files = prepare_continuation(cfg, claim)
-                    if files:
-                        stop_continuation(cfg, client, path, claim, "continuation_conflict", files)
-                        continue
-                if "start_commit" not in claim:
-                    try:
-                        claim["start_commit"] = fetch_target(cfg)
-                    except core.Unavailable:
-                        claim["error"] = "target_branch_fetch_failed"
-                        core.save(path, claim)
-                        continue
-                    claim.pop("error", None)
-                    core.save(path, claim)
-                record = core.public_record(
-                    cfg,
-                    claim["issue"],
-                    claim["job"],
-                    0,
-                    "dispatched",
-                    event=claim["event"],
-                )
-                outbox = core.queue(cfg, record)
-                flush_outbox(cfg, client)
-                if core.read(outbox)["status"] != "synced":
-                    continue
-                claim["stage"] = "dispatched"
-                core.save(path, claim)
-                fresh = client.issue(claim["issue"])
-            if claim["stage"] in {"dispatched", "enqueued"}:
-                remote_records = core.records(
-                    cfg, client.comments(claim["issue"]), claim["issue"]
-                )
-                dispatches = [r for r in remote_records if r["to"] == "dispatched"]
-                if (
-                    core.state(fresh)
-                    not in (
-                        {"dispatched"}
-                        if claim["stage"] == "dispatched"
-                        else {
-                            "dispatched",
-                            "in-progress",
-                            "committed",
-                            "in-review",
-                            "changes-requested",
-                        }
-                    )
-                    or not dispatches
-                    or dispatches[-1]["job"] != claim["job"]
-                ):
-                    claim.update(
-                        stage="suspended",
-                        error="admission_changed_requires_reconciliation",
-                    )
-                    core.save(path, claim)
-                    continue
-            if claim["stage"] == "dispatched":
-                # Older dispatches may already have durable work. Preserve its
-                # original start and receipts; fetch only before work exists.
-                if "start_commit" not in claim:
-                    start = recover_start_commit(cfg, claim, runner)
-                    if start is None:
-                        try:
-                            start = fetch_target(cfg)
-                        except core.Unavailable:
-                            claim["error"] = "target_branch_fetch_failed"
-                            core.save(path, claim)
-                            continue
-                    claim["start_commit"] = start
-                    claim.pop("error", None)
-                    core.save(path, claim)
-                ensure_worktree(cfg, claim)
-                job_root = core.private(root / "jobs" / claim["job"])
-                template = delivery_template(cfg, claim)
-                template.update(
-                    worktree=claim["worktree"],
-                    branch=claim["branch"],
-                    state_dir=str(job_root / "runner-state"),
-                    lifecycle_config=cfg["config_path"],
-                )
-                config_path = job_root / "config.json"
-                core.save(config_path, template)
-                run_config = runner.load_config(config_path)
-                job_path = (
-                    Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
-                )
-                binding = dict(
-                    issue=claim["issue"], event=claim["event"], primary=claim["primary"]
-                )
-                if not job_path.exists():
-                    runner.enqueue(
-                        run_config,
+                    record = core.public_record(
+                        cfg,
+                        claim["issue"],
                         claim["job"],
-                        claim["task"],
-                        github_number=claim["issue"],
-                        lifecycle=binding,
-                        review_base=claim.get("review_base"),
-                        primary_context=claim.get("primary_context"),
-                        continuation=({"commit": claim["continued_from"],
-                                       "number": claim["continuation_number"],
-                                       "reason": claim["previous_stop_reason"]}
-                                      if claim.get("continued_from") else None),
+                        0,
+                        "dispatched",
+                        event=claim["event"],
                     )
-                else:
-                    existing = runner.read(job_path)
+                    outbox = core.queue(cfg, record)
+                    flush_outbox(cfg, client)
+                    if core.read(outbox)["status"] != "synced":
+                        continue
+                    claim["stage"] = "dispatched"
+                    core.save(path, claim)
+                    fresh = client.issue(claim["issue"])
+                    observed["issue"] = fresh
+                if claim["stage"] in {"dispatched", "enqueued"}:
+                    remote_records = core.records(
+                        cfg, client.comments(claim["issue"]), claim["issue"]
+                    )
+                    dispatches = [r for r in remote_records if r["to"] == "dispatched"]
                     if (
-                        existing["assignment"].get("lifecycle") != binding
-                        or existing["assignment"]["task_text"] != claim["task"]
+                        core.state(fresh)
+                        not in (
+                            {"dispatched"}
+                            if claim["stage"] == "dispatched"
+                            else {
+                                "dispatched",
+                                "in-progress",
+                                "committed",
+                                "in-review",
+                                "changes-requested",
+                            }
+                        )
+                        or not dispatches
+                        or dispatches[-1]["job"] != claim["job"]
                     ):
-                        raise ValueError("Claim/job binding mismatch")
-                if claim.get("delivery_source"):
-                    existing = runner.read(job_path)
-                    if existing["status"] == "queued":
-                        resume_delivery(cfg, claim, run_config, job_path)
-                claim.update(stage="enqueued", config=str(config_path))
-                core.save(path, claim)
-            if run_jobs and claim["stage"] == "enqueued":
-                run_config = runner.load_config(claim["config"])
-                runner.run_once(run_config)
-                job = runner.read(
-                    Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
-                )
-                if job["status"] in runner.TERMINAL:
-                    claim.update(stage="finished", head=job.get("head_commit"))
-                core.save(path, claim)
-            processed.append(claim["job"])
+                        claim.update(
+                            stage="suspended",
+                            error="admission_changed_requires_reconciliation",
+                        )
+                        core.save(path, claim)
+                        continue
+                if claim["stage"] == "dispatched":
+                    # Older dispatches may already have durable work. Preserve its
+                    # original start and receipts; fetch only before work exists.
+                    if "start_commit" not in claim:
+                        start = recover_start_commit(cfg, claim, runner)
+                        if start is None:
+                            try:
+                                start = fetch_target(cfg)
+                            except core.Unavailable:
+                                claim["error"] = "target_branch_fetch_failed"
+                                core.save(path, claim)
+                                continue
+                        claim["start_commit"] = start
+                        claim.pop("error", None)
+                        core.save(path, claim)
+                    ensure_worktree(cfg, claim)
+                    job_root = core.private(root / "jobs" / claim["job"])
+                    template = delivery_template(cfg, claim)
+                    template.update(
+                        worktree=claim["worktree"],
+                        branch=claim["branch"],
+                        state_dir=str(job_root / "runner-state"),
+                        lifecycle_config=cfg["config_path"],
+                    )
+                    config_path = job_root / "config.json"
+                    core.save(config_path, template)
+                    run_config = runner.load_config(config_path)
+                    job_path = (
+                        Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
+                    )
+                    binding = dict(
+                        issue=claim["issue"], event=claim["event"], primary=claim["primary"]
+                    )
+                    if not job_path.exists():
+                        runner.enqueue(
+                            run_config,
+                            claim["job"],
+                            claim["task"],
+                            github_number=claim["issue"],
+                            lifecycle=binding,
+                            review_base=claim.get("review_base"),
+                            primary_context=claim.get("primary_context"),
+                            continuation=({"commit": claim["continued_from"],
+                                           "number": claim["continuation_number"],
+                                           "reason": claim["previous_stop_reason"]}
+                                          if claim.get("continued_from") else None),
+                        )
+                    else:
+                        existing = runner.read(job_path)
+                        if (
+                            existing["assignment"].get("lifecycle") != binding
+                            or existing["assignment"]["task_text"] != claim["task"]
+                        ):
+                            raise core.IntegrityError("Claim/job binding mismatch")
+                    if claim.get("delivery_source"):
+                        existing = runner.read(job_path)
+                        if existing["status"] == "queued":
+                            resume_delivery(cfg, claim, run_config, job_path)
+                    claim.update(stage="enqueued", config=str(config_path))
+                    core.save(path, claim)
+                if run_jobs and claim["stage"] == "enqueued":
+                    run_config = runner.load_config(claim["config"])
+                    runner.run_once(run_config)
+                    job = runner.read(
+                        Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
+                    )
+                    if job["status"] in runner.TERMINAL:
+                        claim.update(stage="finished", head=job.get("head_commit"))
+                    core.save(path, claim)
+                processed.append(claim["job"])
+        for error_path in error_paths:
+            number = core.read(error_path)["issue"]
+            if number in by_number and number not in failed | skipped:
+                error_path.unlink()
         completed = clock()
         core.save(cursor, {"next_poll": completed + cfg["poll_seconds"]})
         core.save(root / "heartbeat.json", {"last_poll": completed})
@@ -1144,6 +1280,8 @@ def status(cfg, *, clock=time.time):
     )
     lines.append("Waiting for reconciliation:")
     pending = ["  " + line for line in owner_finish_notices(cfg, claims)]
+    pending.extend(f"  Issue #{e['issue']}: {e['exception_class']} in {e['function']}"
+                   for p in local_errors(cfg) if (e := core.read(p)))
     for c in claims:
         if c.get("error") or c.get("cleanup_pending") or c["stage"] == "suspended":
             pending.append(

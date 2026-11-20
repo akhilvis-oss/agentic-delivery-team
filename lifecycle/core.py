@@ -54,6 +54,16 @@ ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?")
 
 
+class IntegrityError(ValueError):
+    """Durable local bindings changed; never isolate as a story bug."""
+
+    integrity_error = True
+
+
+class StatusLabelError(ValueError):
+    """An issue has no unambiguous known lifecycle state."""
+
+
 class Unavailable(RuntimeError):
     pass
 
@@ -300,7 +310,7 @@ def state(issue):
     names = [x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])]
     statuses = [x[7:] for x in names if x.startswith("status:")]
     if len(statuses) != 1 or statuses[0] not in STATES:
-        raise ValueError("Issue needs exactly one known status label")
+        raise StatusLabelError("Issue needs exactly one known status label")
     return statuses[0]
 
 
@@ -344,6 +354,8 @@ def public_record(
     stop_save_failed=False,
     conflict_files=None,
     stop_details=None,
+    exception_class=None,
+    function=None,
 ):
     if (
         type(issue) is not int
@@ -477,11 +489,24 @@ def public_record(
             raise ValueError("Stop details require a stopped task")
         record["stop_details"] = public_stop_details(cfg, stop_details)
         record["key"] = key([record["key"], record["stop_details"]])
+    if exception_class is not None or function is not None:
+        if (reason != "unexpected_error"
+                or exception_class is not None and (not isinstance(exception_class, str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", exception_class))
+                or function is not None and (not isinstance(function, str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function))):
+            raise ValueError("Invalid unexpected error metadata")
+        if exception_class is not None:
+            record["exception_class"] = exception_class
+        if function is not None:
+            record["function"] = function
+        record["key"] = key([record["key"], exception_class, function])
     return record
 
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
     "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
@@ -519,6 +544,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "unexpected_error": "Needs a fix",
     "owner_question": "Needs your decision",
     "question_withheld": "Needs your decision",
     "scope_change": "Needs your decision",
@@ -721,6 +747,10 @@ def record_body(record):
     explanation = ""
     if record["to"] in {"blocked", "needs-owner", "needs-primary"}:
         explanation = STOP_REASONS.get(record.get("reason"), STOP_REASONS["execution_failed"]) + "\n"
+        if record.get("reason") == "unexpected_error" and record.get("function"):
+            explanation = ("An unexpected error stopped this story only, in "
+                           + record["function"]
+                           + ". Owner: ask the operator to investigate, then re-approve.\n")
         if record.get("owner_question"):
             explanation += "\nBuilder question (verbatim):\n" + "\n".join(
                 "> " + line for line in record["owner_question"].split("\n")
@@ -811,6 +841,8 @@ def records(cfg, comments, expected_issue=None):
                 stop_save_failed=item.get("stop_save_failed", False),
                 conflict_files=item.get("conflict_files"),
                 stop_details=item.get("stop_details"),
+                exception_class=item.get("exception_class"),
+                function=item.get("function"),
             )
             if (
                 set(item) != set(expected) | {"from", "actor"}
@@ -1108,7 +1140,7 @@ def validate_state(cfg):
     """Check an existing ownership binding without initializing or modifying state."""
     path = Path(cfg["state_dir"]) / "identity.json"
     if path.exists() and read(path) != state_identity(cfg):
-        raise ValueError(
+        raise IntegrityError(
             "Private state belongs to another repository or actor configuration"
         )
 
@@ -1119,7 +1151,7 @@ def bind_state(cfg):
     path = root / "identity.json"
     create(path, identity)
     if read(path) != identity:
-        raise ValueError(
+        raise IntegrityError(
             "Private state belongs to another repository or actor configuration"
         )
 
@@ -1127,7 +1159,7 @@ def bind_state(cfg):
 def queue(cfg, record, *, role="runner", public_body=None):
     bind_state(cfg)
     if record["repository"] != cfg["repository"]:
-        raise ValueError("Wrong outbox repository")
+        raise IntegrityError("Wrong outbox repository")
     folder = private(Path(cfg["state_dir"]) / "outbox")
     path = folder / (record["key"] + ".json")
     entry = dict(record=record, role=role, status="pending", comment_attempted=False)
@@ -1248,7 +1280,7 @@ def flush(cfg, client):
                 save(path, entry)
                 continue
             if record["repository"] != cfg["repository"]:
-                raise ValueError("Wrong outbox repository")
+                raise IntegrityError("Wrong outbox repository")
             rejecting = (entry["status"] == "conflict"
                          and entry.get("error") == "transition_not_allowed")
             try:
@@ -2353,13 +2385,13 @@ def admit_phase(config_path, job):
                 "changes-requested",
             } | ({"pr-open"} if published else set()))
         ):
-            raise ValueError("Admission changed; owner reconciliation required")
+            raise IntegrityError("Admission changed; owner reconciliation required")
         evidence = records(cfg, client.comments(binding["issue"]), binding["issue"])
         if not can_start(issue, evidence):
-            raise ValueError("Admission changed; owner reconciliation required")
+            raise IntegrityError("Admission changed; owner reconciliation required")
         dispatches = [r for r in evidence if r["to"] == "dispatched"]
         if not dispatches or dispatches[-1]["job"] != job["id"]:
-            raise ValueError("Dispatch ownership changed")
+            raise IntegrityError("Dispatch ownership changed")
         return True
     except Unavailable:
         return False
