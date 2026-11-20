@@ -16,6 +16,12 @@ Real responses captured from GitHub, for tests that must not rely on hand-writte
 | `smoke-review-gate-workflow.json` | `GET /repos/akhilvis-oss/adt-smoke/actions/workflows/review-gate.yml` | Workflow metadata: `id` and `path`, which `trusted_gate` compares with the run's `workflow_id` and `path`. | `test_recorded_gate_binds_open_pr_head` |
 | `smoke-repo-owner-view.json` | `GET /repos/akhilvis-oss/adt-smoke` | A repository with auto-merge disabled (`allow_auto_merge: false`), as seen by the owner. Whether a GitHub App token sees `allow_auto_merge` is recorded by the live smoke test, not here. | `test_recorded_disabled_auto_merge_stops_delivery` |
 | `adt-issue122-one-click-approval-events.json` | `GET /repos/akhilvis-oss/agentic-delivery-team/issues/122/events?per_page=100&page=1` | A one-click approval: the owner adds `status:approved` while `status:draft` is on, and the workflow removes `status:draft` seconds later. | `test_recorded_one_click_approval_ignores_workflow_draft_removal` |
+| `smoke-idle-since-issues.json` | `GET /repos/akhilvis-oss/adt-smoke/issues?state=all&since=2026-11-20T07:25:00Z&per_page=100&page=1` | Incremental all-state issue listing for the idle poll budget. | `test_recorded_idle_poll_budget` |
+| `smoke-status7-comments.json` | `GET /repos/akhilvis-oss/adt-smoke/issues/7/comments?per_page=100&page=1` | Existing pinned service status comment. | `test_recorded_idle_poll_budget` |
+
+The idle-poll recordings were captured unmodified on 20 November 2026 with
+unauthenticated, read-only public GitHub API requests. The setup poll uses a
+synthetic fake; only the counted poll uses these exact recorded routes.
 
 The PR #3 recordings were captured on 16 November 2026. Opening and closing PR #3 in adt-smoke was the only write; the recordings themselves are read-only `GET` responses.
 
