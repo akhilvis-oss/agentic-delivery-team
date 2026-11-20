@@ -162,9 +162,20 @@ supported. A refused commit stays refused until the operator investigates and
 runs `python -m lifecycle.service --config <private-config> upgrade-clear <40-hex-commit>`.
 Clearing takes the poll lock and refuses while it is held; retry later. If a clear
 races launcher startup it may be lost, so run it again. Upgrade and rollback
-notices persist in the status comment. A hung unconfirmed process still requires
-an owner restart after the stale-heartbeat alert; the launcher then rolls it back
-when its start or elapsed-time limit is reached.
+notices persist in the status comment. Under `serve`, an unconfirmed pending
+version starts a daemon timer at its first poll and exits with code 70 once ten
+minutes have passed since `pending_since`, even if polls keep failing or the
+process hangs in a way that lets the timer thread run. An empty `pending_since`
+gets ten minutes from timer startup. Confirmation cancels the timer only after
+the atomic switch write, before claims or jobs. The exit writes no
+`service-error.json`; launchd's `KeepAlive` restarts the launcher, which rolls
+back and records "Rolled back from <commit>: did not confirm".
+A GitHub outage of ten minutes or more straight after upgrading also rolls back
+and refuses a good commit; investigate, then retry it with `upgrade-clear`.
+Hangs before the timer starts (including the first poll's validation, state
+binding and context reads), or in native code holding the interpreter lock,
+still require an owner restart after the stale-heartbeat alert; the launcher
+then rolls back when its start or elapsed-time limit is reached.
 
 ### An issue was labelled `status:draft` automatically
 Expected. Every issue carries one status label, and a new issue starts as a draft. It means "not yet approved for work".
