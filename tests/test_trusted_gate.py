@@ -319,3 +319,18 @@ def test_pr_ci_remains_build_only():
     for command in ["python scripts/check_private_content.py", "python -m ruff", "python -m pytest"]:
         assert command in text
     assert "  review-gate:" not in text
+
+
+def test_pr_ci_macos_steps_do_not_drift():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    # Compare the complete ordered YAML blocks, including env/with and multiline run
+    # content. This deliberately needs no YAML parser or extra test dependency.
+    def steps(job):
+        jobs = re.findall(rf"^  {re.escape(job)}:\n((?:^    .*\n|^\n)*)", text, re.M)
+        assert len(jobs) == 1, f"Expected one {job} job"
+        blocks = re.findall(r"^    steps:\n((?:^      .*\n|^\n)+)", jobs[0], re.M)
+        assert len(blocks) == 1, f"Expected inline steps for {job}"
+        return blocks[0].rstrip()
+
+    assert steps("checks") == steps("checks-macos")
+    assert not re.search(r"(?:^|\s)[&*][A-Za-z_][\w-]*", text), "Use no YAML anchors or aliases"
