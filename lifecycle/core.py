@@ -482,6 +482,7 @@ def public_record(
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
     "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then use the Continue from block and re-approve to publish the reviewed work.",
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
@@ -519,6 +520,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "checks_worktree_changed": "Needs a fix",
     "owner_question": "Needs your decision",
     "question_withheld": "Needs your decision",
     "scope_change": "Needs your decision",
@@ -819,6 +821,8 @@ def records(cfg, comments, expected_issue=None):
             continue
         try:
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if not isinstance(item, dict):
+                continue
             if (item.get("job") == "guard" and item.get("kind") == "guard"
                     and item.get("reason") == "invalid_status_change"):
                 continue
@@ -1979,6 +1983,8 @@ def restoration_noticed(cfg, comments, number, event, target):
             if stamp(comment["updated_at"]) != stamp(comment["created_at"]):
                 continue
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if not isinstance(item, dict):
+                continue
             if (item.get("job") == "guard" and item.get("kind") == "guard"
                     and item.get("reason") == "invalid_status_change"
                     and item.get("repository") == cfg["repository"]
@@ -2057,11 +2063,11 @@ def guard_issue(cfg, client, number):
                            key=lambda e: int(e["id"]), default=None)
             previous = previous or event
             noticed = noticed or any(
-                    r["actor"] == actor and r["to"] == canonical
-                    and r.get("reason") in STOP_REASONS
-                    and r["reason"] != "approval_not_attested"
-                    and stamp(r["timestamp"]) >= stamp(previous["created_at"])
-                    for r in remote)
+                r["actor"] == actor and r["to"] == canonical
+                and r.get("reason") in STOP_REASONS
+                and r["reason"] != "approval_not_attested"
+                and stamp(r["timestamp"]) >= stamp(previous["created_at"])
+                for r in remote)
         if not noticed:
             if actual != canonical:
                 client.set_state(number, canonical)

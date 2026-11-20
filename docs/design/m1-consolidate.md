@@ -75,7 +75,7 @@ Every stop is one of these four kinds:
   - While retrying, the story stays `working`, and the status comment says why and when the next retry is.
   - Each retry re-checks the approval hash and the target branch first.
   - After the last retry, the story stops at `needs-owner`, with the reason.
-- **One notice per stop,** keyed by the stop. Today the guard and the runner can each post one; the second is removed.
+- **One notice per stop,** keyed by the stop. Runner and Product records carry their own notices; the guard adds a manual-stop notice only when needed.
 - **Stop codes stay fixed for automation, with one cause per code.**
   - The notice leads with the kind.
   - The record adds the exception type and the framework function where the stop came from, both public-safe names.
@@ -95,7 +95,7 @@ Every stop is one of these four kinds:
 - **Known versions only.** Each record carries an explicit JSON integer `version`, excluding booleans and floating-point values. Only version 1 currently parses; missing or unsupported versions are ignored. Supported versions are listed in one place in code. The version is not part of the record key.
 - **Validity comes from the unique data block, its author and a known version,** never from text before or after it, including continuation instructions. Existing data, key and author-role checks still apply. Rewording a notice can't orphan earlier records.
 - **Edited records:** when a comment's `updated_at` is later than its `created_at`, it is ignored for state, including stop records. Edited `merged` and `accepted` records retain finality so an edit cannot reopen a story. A comment missing either timestamp counts as unedited.
-- **Follow-ups:** naming ignored records in the status comment and stopping on inconsistent state after a record deletion are separate work. The existing guard-record construction defect is also a separate story (#192).
+- **Follow-ups:** naming ignored records in the status comment and stopping on inconsistent state after a record deletion are separate work. Restoration records remain informational; #202 recognizes their raw data blocks for notice deduplication without granting state authority.
 
 ### 6. Fewer API calls per poll
 

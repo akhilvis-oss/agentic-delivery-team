@@ -136,3 +136,19 @@ def test_missing_restoration_event_readback_claims_no_event(tmp_path, monkeypatc
     core.guard_issue(cfg, client, 1)
     assert len(hub.comments_by_issue[1]) == 2  # Safe fallback: one label-stop notice.
     assert core.records(cfg, hub.comments_by_issue[1], 1)[0]['job'] == 'label-stop'
+
+
+@pytest.mark.parametrize('payload', [[], [1], None, True, 17, 'plain text'])
+def test_non_object_data_block_cannot_crash_or_suppress_stop(tmp_path, payload):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state='in-review')
+    hub.event(1, 'needs-owner', 'workflow')
+    malformed = dict(user={'login': cfg['actors']['workflow']},
+                     body=core.PREFIX + json.dumps(payload) + core.SUFFIX,
+                     created_at=WHEN, updated_at=WHEN)
+    hub.comments_by_issue[1].append(malformed)
+    assert core.records(cfg, [malformed], 1) == []
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert len(hub.comments_by_issue[1]) == 2
+    assert core.records(cfg, hub.comments_by_issue[1], 1)[0]['reason'] == 'owner_requested_stop'

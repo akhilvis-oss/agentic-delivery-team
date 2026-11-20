@@ -21,6 +21,7 @@ DECISION = {
 }
 MERGE = {"owner_merge_required"}
 FIX = {
+    "checks_worktree_changed",
     "commit_refused", "delivery_disabled", "delivery_configuration_invalid",
     "continuation_commit_unrecorded", "continuation_conflict", "continuation_not_applied",
     "invalid_status_change", "approval_not_attested", "prerequisite_failed",
@@ -47,7 +48,7 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
         "Needs your decision": 12, "Needs your merge": 1,
-        "Waiting on the system": 5, "Needs a fix": 80,
+        "Waiting on the system": 5, "Needs a fix": 81,
     }
 
 

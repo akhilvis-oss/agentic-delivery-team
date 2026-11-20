@@ -77,7 +77,7 @@ def test_owner_stop_even_with_product_role_has_one_record_notice(tmp_path, extra
 
 
 @pytest.mark.parametrize('variant', ['none', 'old', 'wrong_actor', 'wrong_status',
-                                     'clarification', 'rejection', 'older_restoration', 'matching'])
+                                     'clarification', 'runner_review', 'rejection', 'older_restoration', 'matching'])
 def test_workflow_stop_requires_current_matching_record(tmp_path, variant):
     cfg = policy(tmp_path)
     hub = Hub(cfg)
@@ -85,14 +85,18 @@ def test_workflow_stop_requires_current_matching_record(tmp_path, variant):
     hub.events_by_issue[1][-1]['created_at'] = '2026-01-02T09:00:00+00:00'
     hub.event(1, 'needs-owner', 'workflow')
     if variant != 'none':
-        actor = 'product' if variant in {'wrong_actor', 'clarification'} else 'workflow'
+        actor = ('product' if variant in {'wrong_actor', 'clarification'} else
+                 'runner' if variant == 'runner_review' else 'workflow')
         record = core.public_record(cfg, 1, 'other', 0,
                                     'blocked' if variant == 'wrong_status' else 'needs-owner',
                                     event=101, reason='approval_not_attested' if variant == 'rejection'
                                     else 'invalid_status_change' if variant == 'older_restoration'
                                     else 'owner_requested_stop',
-                                    kind='clarification' if variant == 'clarification' else 'guard')
-        record.update(actor=cfg['actors'][actor], **{'from': 'needs-owner'})
+                                    kind='clarification' if variant == 'clarification' else
+                                    'review' if variant == 'runner_review' else 'guard',
+                                    outcome='blocked' if variant == 'runner_review' else None)
+        record.update(actor=cfg['actors'][actor],
+                      **{'from': 'in-review' if variant == 'runner_review' else 'needs-owner'})
         record['timestamp'] = '2026-01-01T00:00:00+00:00' if variant in {'old', 'older_restoration'} else WHEN
         hub.comments_by_issue[1].append(dict(user={'login': record['actor']}, body=core.record_body(record)))
     before = len(hub.comments_by_issue[1])
@@ -154,3 +158,31 @@ def test_delivery_stop_posts_only_its_record_notice(delivery, monkeypatch):  # n
     assert 'https://github.com/example/kit/pull/9' in notices[0]
     assert job['reviewed_head'] in notices[0]
     assert core.records(cfg, hub.comments_by_issue[1], 1)[-1]['reason'] == 'owner_merge_required'
+
+
+def test_late_runner_stop_retains_owner_merge_proof(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state='in-review')
+    for target, source, kind, outcome, reason in [
+            ('dispatched', 'approved', 'transition', None, None),
+            ('in-review', 'committed', 'review', 'ready_for_integration', None)]:
+        record = core.public_record(cfg, 1, 'runner-job', 1, target, event=101,
+                                    kind=kind, outcome=outcome, reason=reason, commit='a' * 40)
+        record.update(actor=cfg['actors']['runner'], **{'from': source})
+        hub.comments_by_issue[1].append(dict(user={'login': record['actor']}, body=core.record_body(record)))
+    hub.event(1, 'needs-owner', 'runner')
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert len(hub.comments_by_issue[1]) == 2
+    stop = core.public_record(cfg, 1, 'runner-job', 1, 'needs-owner', event=101,
+                              reason='owner_merge_required', pr=9, commit='a' * 40)
+    core.queue(cfg, stop)
+    core.flush(cfg, hub.client())
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    pr = dict(number=9, merged=True, base={'ref': 'main'},
+              head={'sha': 'a' * 40, 'repo': {'full_name': cfg['repository']}},
+              user={'login': cfg['actors']['runner']}, body='Closes #1')
+    evidence = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert core.owner_merge_verified(cfg, 1, evidence, pr)
+    assert len([r for r in evidence if r['to'] == 'needs-owner']) == 1
+    assert all(r['job'] != 'label-stop' for r in evidence)

@@ -83,3 +83,27 @@ def test_minor_followups_show_each_own_sanitized_finding_before_marker(tmp_path)
     assert 'Finding detail 1.' not in hub.issues[3]['body']
     core.followups(cfg, job, hub.client('product'))
     assert len(hub.issues) == 3
+
+
+def test_review_context_is_rendered_with_current_public_filter_at_send(tmp_path, monkeypatch):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state='committed')
+    record = core.public_record(cfg, 1, 'render-later', 1, 'in-review', event=101,
+                                kind='review', outcome='ready_for_integration')
+    path = core.queue(cfg, record, notice_context={'findings': [dict(
+        severity='P2', criterion='AC-1', detail='Ask newly-private-fixture for the fix.')]})
+    quote = core.public_quote
+    calls = []
+
+    def current_filter(policy, text, limit):
+        calls.append(text)
+        return quote(policy, text, limit).replace('newly-private-fixture', '[removed: account name]')
+
+    monkeypatch.setattr(core, 'public_quote', current_filter)
+    assert calls == []
+    core.flush(cfg, hub.client())
+    body = hub.comments_by_issue[1][0]['body']
+    assert 'newly-private-fixture' not in body
+    assert 'Ask [removed: account name] for the fix.' in body
+    assert core.read(path)['record'].keys() == record.keys() | {'from', 'actor'}

@@ -421,3 +421,10 @@ the follow-up marker. New review notices show at most ten current findings and a
 characters for criteria, 600 for details) at send time; findings already shown in
 stop details are not repeated. Supplemental prose fits within GitHub's 65,536
 character comment limit without changing the record data block or metadata.
+
+A reviewed worktree changed during required checks stops with
+`checks_worktree_changed` (“Needs a fix”) in the job, receipt, lifecycle notice and
+stand-up; smoke category validation recognizes the same registered code. Its
+public text asks the owner to re-approve to build again. Private verification
+retains `reviewed_worktree_changed` and `source_unchanged=False`; this work cannot
+be continued, and no reviewer is dispatched or interrupted check replayed.
