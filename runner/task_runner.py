@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import errno
 import fcntl
 import fnmatch
 import hashlib
@@ -958,12 +959,34 @@ def prompt_for(config, job, role):
     return text + "\n\n" + note + "\nReturn only the supplied result schema.\n"
 
 
-def stop_group(proc):
+def stop_group(proc, *, clock=time.monotonic, sleep=time.sleep):
     # Only this Popen's freshly-created process group is ever signalled.
+    # Bind real defaults independently of the phase timeout's test clock.
+    deadline = None
+
+    def signal_owned_group(sig):
+        nonlocal deadline
+        while True:
+            try:
+                os.killpg(proc.pid, sig)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError as exc:
+                # macOS can report EPERM for an exited, unreaped group. Never
+                # hide a live-root permission failure or a different errno.
+                if exc.errno != errno.EPERM or proc.poll() is None:
+                    raise
+                proc.wait()
+                if deadline is None:
+                    deadline = clock() + 2
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    raise
+                sleep(min(0.05, remaining))
+
     for sig, timeout in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 2)):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
+        if not signal_owned_group(sig):
             break
         try:
             proc.wait(timeout=timeout)
@@ -971,7 +994,6 @@ def stop_group(proc):
             continue
         # Root may exit before descendants; send KILL to the same owned group too.
     proc.wait()
-
 
 # Required tests are executed by the runner, never by granting the reviewer writes.
 def resolve_program(program, config, label):

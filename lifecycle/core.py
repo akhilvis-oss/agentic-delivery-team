@@ -371,7 +371,7 @@ def public_record(
         raise ValueError("Unknown review outcome")
     if pr is not None and (type(pr) is not int or pr < 1):
         raise ValueError("Invalid PR number")
-    if gate not in {None, "pass", "fail", "pending", "unavailable"}:
+    if gate not in {None, "pass", "fail", "pending", "unavailable", "not_checked"}:
         raise ValueError("Invalid gate result")
     if kind == "approval":
         if (
@@ -1094,10 +1094,11 @@ def owner_merge_verified(cfg, issue, evidence, pr):
     )
 
 
-def finished_issue(issue, evidence=()):
-    """Job recovery must not reopen closed or completed stories."""
-    return (issue["state"] == "closed" or state(issue) in {"merged", "accepted"}
-            or bool(evidence and evidence[-1]["to"] in {"merged", "accepted"}))
+def can_start(issue, records=()):
+    """One admission rule for dispatch, continuation, recovery and publication."""
+    return not (issue["state"] == "closed" or state(issue) in {"merged", "accepted"}
+                or any(record["to"] == "merged" for record in records)
+                or bool(records and records[-1]["to"] == "accepted"))
 
 
 def rejection_body(record):
@@ -1192,12 +1193,12 @@ def flush(cfg, client):
                 backfill = (record["to"] == "merged" and record["pr"] is not None
                             and record["job"] == f"pr-{record['pr']}")
                 job_record = expected_role == "runner" and not backfill
-                if job_record and finished_issue(remote_issue):
+                if job_record and not can_start(remote_issue):
                     entry.update(status="superseded", error="finished_issue")
                     save(path, entry)
                     continue
                 remote = records(cfg, client.comments(record["issue"]), record["issue"])
-                if job_record and finished_issue(remote_issue, remote):
+                if job_record and not can_start(remote_issue, remote):
                     entry.update(status="superseded", error="finished_issue")
                     save(path, entry)
                     continue
@@ -1210,7 +1211,7 @@ def flush(cfg, client):
                     entry.update(record=match, status="synced")
                 else:
                     remote_issue = client.issue(record["issue"])
-                    if job_record and finished_issue(remote_issue, remote):
+                    if job_record and not can_start(remote_issue, remote):
                         entry.update(status="superseded", error="finished_issue")
                         save(path, entry)
                         continue
@@ -1986,9 +1987,10 @@ def pr_event(cfg, client, event):
         raise Unavailable("PR targets an unsupported lifecycle base")
     if event["action"] == "closed":
         target = "merged" if pr["merged"] else "needs-owner"
+        gate = "not_checked"
     else:
         target = "pr-open"
-    gate = trusted_gate(cfg, client, pr)
+        gate = trusted_gate(cfg, client, pr)
     if pr.get("head", {}).get("repo", {}).get("full_name") != cfg["repository"]:
         raise Unavailable("Foreign PR cannot drive lifecycle state")
     if pr.get("user", {}).get("login") not in set(cfg["actors"].values()):
@@ -2201,7 +2203,7 @@ def admit_phase(config_path, job):
             "created", "checking", "auto_merge_enabled", "direct_merge_recheck",
         }
         if (
-            issue["state"] != "open"
+            not can_start(issue)
             or (issue.get("body") or "") != job["assignment"]["task_text"]
             or current
             not in ({
@@ -2213,11 +2215,10 @@ def admit_phase(config_path, job):
             } | ({"pr-open"} if published else set()))
         ):
             raise ValueError("Admission changed; owner reconciliation required")
-        dispatches = [
-            r
-            for r in records(cfg, client.comments(binding["issue"]), binding["issue"])
-            if r["to"] == "dispatched"
-        ]
+        evidence = records(cfg, client.comments(binding["issue"]), binding["issue"])
+        if not can_start(issue, evidence):
+            raise ValueError("Admission changed; owner reconciliation required")
+        dispatches = [r for r in evidence if r["to"] == "dispatched"]
         if not dispatches or dispatches[-1]["job"] != job["id"]:
             raise ValueError("Dispatch ownership changed")
         return True

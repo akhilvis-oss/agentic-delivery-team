@@ -232,11 +232,15 @@ repeated. Older attempted rejections require matching trusted comment evidence;
 an attempted flag alone is not confirmation. Missing evidence requires operator
 reconciliation.
 
-Before recovery or delivery, the service checks the current issue and latest
-trusted lifecycle record. Closed issues and stories at `merged` or `accepted` have
-their claims finished locally, and queued job records are superseded without
-GitHub writes. Verified owner-merge backfill, guarded local cleanup and the service
-heartbeat retain their existing behavior.
+One `can_start` decision guards dispatch (including Primary and owner-selected
+continuations), recovery, both delivery-resume paths and phase admission. It
+refuses closed issues, `merged` or `accepted` labels, any trusted `merged` record,
+or a latest trusted `accepted` record. A re-approved accepted story can start
+again, while a merged record remains final. Finished claims are marked locally
+and queued runner records are superseded without GitHub writes. Phase admission
+retains its working-set and dispatch-ownership checks. Verified owner-merge
+backfill, guarded local cleanup and the service heartbeat retain their existing
+behavior.
 
 After the first successful poll and stand-up following failures, the existing
 `agentic-last-poll-v1` status comment adds one line: “Polls first failed: …;

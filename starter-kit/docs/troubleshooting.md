@@ -114,9 +114,13 @@ ask the operator to reconcile history before re-approving.
 
 ### Approval could not be attested
 
-The guard could not uniquely connect the label to an owner event and story
-snapshot. It removes the `status:approved` label it cannot honour and explains
-the recovery on the story. Follow that comment and re-approve. A permitted stop
+**Owner.** The guard could not uniquely connect the label to an owner event and
+story snapshot, or the approval record is missing. It removes the
+`status:approved` label it cannot honour and explains the recovery on the story.
+Review the current story, then open **Labels**, remove `status:approved` if it is
+still present, and re-add it to create a fresh approval event and record.
+Re-running the guard run in **Actions** does not repair a missing approval
+record: a re-run never reposts it. A permitted stop
 and re-approval in the same second use event IDs to distinguish approval cycles;
 duplicate approval events within one cycle still stop safely. Replaying an old
 webhook never approves a later edit.

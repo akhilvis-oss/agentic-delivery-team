@@ -83,10 +83,10 @@ def validate_local(cfg):
 
 def claim_event(cfg, issue, events, changed=True):
     # Defer the event request until changed/open/admission checks pass.
-    if not changed or issue["state"] != "open" or core.state(issue) not in {"approved", "needs-primary"}:
+    if not changed or not core.can_start(issue) or core.state(issue) not in {"approved", "needs-primary"}:
         return None
     current, event = core.canonical_state(cfg, events() if callable(events) else events)
-    if current != core.state(issue) or event is None or issue["state"] != "open":
+    if current != core.state(issue) or event is None or not core.can_start(issue):
         return None
     role = (
         "owner"
@@ -706,7 +706,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         None,
                     )
                     if (
-                        not proof
+                        not core.can_start(issue, proofs)
+                        or not proof
                         or proof["scope_sha256"]
                         != core.hashlib.sha256(
                             (issue.get("body") or "").encode()
@@ -723,6 +724,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 history = core.records(
                     cfg, client.comments(issue["number"]), issue["number"]
                 )
+                if not core.can_start(issue, history):
+                    continue
                 escalated = [
                     r for r in history if r["to"] == "needs-primary" and r["commit"]
                 ]
@@ -766,6 +769,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             named = None if primary else continuation_commit(claim["task"])
             if named:
                 history = core.records(cfg, client.comments(issue["number"]), issue["number"])
+                if not core.can_start(issue, history):
+                    continue
                 local_jobs = {j["id"]: j for j in jobs(cfg)}
                 saved = next((r for r in reversed(history)
                               if r["commit"] == named
@@ -806,11 +811,11 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 continue
             # The current all-issues listing already proves closed/final stories
             # cannot execute. Keep fresh evidence checks for claims that can.
-            finished = core.finished_issue(issue)
+            finished = not core.can_start(issue)
             if not finished:
                 issue = client.issue(claim["issue"])
                 evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
-                finished = core.finished_issue(issue, evidence)
+                finished = not core.can_start(issue, evidence)
             if finished:
                 claim["stage"] = "finished"
                 completed_path = (root / "jobs" / claim["job"] / "runner-state"
@@ -869,7 +874,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             if claim["stage"] == "suspended":
                 continue
             fresh = client.issue(claim["issue"])
-            if fresh["state"] != "open" or (fresh.get("body") or "") != claim["task"]:
+            if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
                 claim.update(
                     stage="suspended", error="admission_changed_requires_reconciliation"
                 )

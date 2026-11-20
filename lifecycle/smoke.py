@@ -68,7 +68,8 @@ def load_config(path):
     fields = {"agent", "agent_home", "worker_model", "reviewer_model", "commit_identity",
               "verification", "profile", "phase_timeout_seconds", "max_rounds"}
     if (set(runner) - fields or not fields - {"phase_timeout_seconds", "max_rounds"} <= set(runner)
-            or runner["agent"].get("environment", {}) not in ({}, {"CODEX_HOME": "{agent_home}"})
+            or runner["agent"].get("environment", {}) not in (
+                {}, {"CODEX_HOME": "{agent_home}"}, {"CLAUDE_CONFIG_DIR": "{agent_home}"})
             or set(runner["verification"]) - {"commands", "timeout_seconds"}):
         raise ValueError("Smoke runner settings must contain only agent and test configuration")
     return cfg
@@ -478,7 +479,7 @@ def failed_runs_directory(cfg):
 def workspace(cfg):
     result = {"passed": False}
     with tempfile.TemporaryDirectory(prefix="lifecycle-smoke-") as folder:
-        root = Path(folder)
+        root = Path(folder).resolve()
         try:
             yield root, result
         finally:
