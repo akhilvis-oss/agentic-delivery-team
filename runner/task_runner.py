@@ -1370,6 +1370,7 @@ class GitHubClient:
         if receipt.get("blocked_reason"):
             reason = public_block_reason(receipt["blocked_reason"])
             body += f"\nBlocked: {reason['reason_code']}: {reason['reason']}"
+            body = lifecycle_api().stop_notice(reason["reason_code"], body)
         for commit in receipt.get("runner_commits", []):
             body += f"\nRunner commit: {commit['commit_sha']} (committed_by: runner)"
         subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/issues/{number}/comments",

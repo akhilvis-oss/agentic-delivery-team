@@ -446,7 +446,7 @@ def advance(runner, config, path, job, client=None):
             try:
                 delivery["reason_notice_attempted"] = True
                 persist()
-                message = REASONS[reason]
+                message = core.stop_notice(reason, REASONS[reason])
                 if reason == "owner_merge_required" and delivery.get("pr"):
                     message += f"\nhttps://github.com/{cfg['repository']}/pull/{delivery['pr']}"
                     if opts.get("smoke_reporting", False):

@@ -47,27 +47,40 @@ Read the lifecycle comment on the story. Every new stop has a fixed reason code
 and an action; replies to a stand-up do not approve work. To re-approve, resolve
 the stop, remove the stopped status in **Labels**, then add `status:approved` as
 the configured owner. The next build reads the complete story, including
-**Owner decisions**. The reason families mean:
+**Owner decisions**. Every stop notice starts with one of four kinds. Only a
+condition that can clear by itself is **Waiting on the system**. Until automatic
+system retries are available, retry these stops by re-approving too. Uncertain
+writes need reconciliation before retrying; they are **Needs a fix**.
 
-| Stop reason | What happened and what to do |
-| --- | --- |
-| `owner_question` | The builder's exact question is quoted. Add your answer to the story under **Owner decisions**, then re-approve. |
-| `question_withheld` | A question looked private and was withheld in full. Write "Please ask a public-safe question" under **Owner decisions**, then re-approve. Do not paste private logs into GitHub. |
-| `scope_change`, `acceptance_criteria_change`, `story_approval` | Product needs an owner decision. Update the story or its decisions, then re-approve. |
-| `clarification_unverified`, `product_request_unclassified`, `repository_evidence` | Repository evidence did not settle the owner decision. Record the answer under **Owner decisions**, then re-approve. |
-| `worker_*_unavailable`, `prerequisite_failed`, `assignment_preflight` | Setup or a required safety check could not run. Ask the operator to fix setup, then re-approve. |
-| `worker_*_unrelated_failure` | A check failed outside the builder's changes. Arrange a fix for that failure, then re-approve. |
-| `worker_*_attempts_exhausted_N` | The builder used its correction attempts. Arrange further correction, then re-approve. |
-| `worker_preflight`, `worker_build`, `worker_story_tests`, `worker_runner_checks`, `worker_prerequisite`, `worker_reported_blocked` | The builder stopped without a more specific cause. Ask the operator to resolve the named check, then re-approve. |
-| `required_check_failed` | Runner or PR checks failed. The comment includes the failure count and up to five bare test function names when reported. Arrange correction, then re-approve. Paths, parameters and logs are never published. Older results or unknown test formats may lack names or counts. |
-| `reviewer_reported_blocked` | Review needs further work or primary triage. Resolve the review on the linked PR before re-approving. |
-| `execution_failed` | Execution stopped or was interrupted. Ask the operator to reconcile the interrupted work, then re-approve. |
-| `publication_failed`, `publication_uncertain`, `auto_merge_disable_uncertain` | Publishing or cancelling auto-merge failed or has an unknown outcome. Inspect the PR on GitHub and ask the operator to reconcile it before retrying. |
-| `stale_head`, `gate_category_higher`, `merge_conditions_missing` | The reviewed head or required evidence is no longer sufficient. Arrange a fresh review or complete the missing evidence on the PR. |
-| `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
-| `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
-| `approved_scope_changed` | The issue changed after approval. Review the revised story, then re-approve. |
-| `approval_not_attested`, `invalid_status_change`, `owner_requested_stop` | Approval was rejected, the guard restored a stopped status, or a permitted actor stopped the task. Read the preceding comment, resolve it and re-approve. |
+The table covers all stop codes. In worker families, `*` means one of `preflight`,
+`build`, `story_tests`, `runner_checks` or `prerequisite`; `N` means 1 through 10.
+Each code belongs to exactly one kind.
+
+| Kind | Stop reason | What happened and what to do |
+| --- | --- | --- |
+| Needs your decision | `owner_question` | The builder's exact question is quoted. Add your answer to the story under **Owner decisions**, then re-approve. |
+| Needs your decision | `question_withheld` | A question looked private and was withheld in full. Write "Please ask a public-safe question" under **Owner decisions**, then re-approve. Do not paste private logs into GitHub. |
+| Needs your decision | `scope_change`, `acceptance_criteria_change`, `story_approval` | Product needs an owner decision. Update the story or its decisions, then re-approve. |
+| Needs your decision | `clarification_unverified`, `product_request_unclassified`, `repository_evidence` | Repository evidence did not settle the owner decision. Record the answer under **Owner decisions**, then re-approve. |
+| Needs your decision | `approved_scope_changed` | The issue changed after approval. Review the revised story, then re-approve. |
+| Needs your decision | `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
+| Needs your decision | `owner_requested_stop` | A permitted actor stopped the task. Record any decision under **Owner decisions**, resolve the stop and re-approve. |
+| Needs your decision | `continuation_limit` | The story reached its two-continuation limit. Restart fresh or split the story, then re-approve. |
+| Needs your merge | `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
+| Waiting on the system | `worker_*_unavailable` | A required tool, dependency or environment was unavailable. Restore the prerequisite if needed, then re-approve to retry. |
+| Needs a fix | `prerequisite_failed`, `assignment_preflight` | Setup or a required safety check could not run or failed. Ask the operator to fix setup, then re-approve. |
+| Needs a fix | `worker_*_unrelated_failure` | A check failed outside the builder's changes. Arrange a fix for that failure, then re-approve. |
+| Needs a fix | `worker_*_attempts_exhausted_N` | The builder used its correction attempts. Arrange further correction, then re-approve. |
+| Needs a fix | `worker_preflight`, `worker_build`, `worker_story_tests`, `worker_runner_checks`, `worker_prerequisite`, `worker_reported_blocked` | The builder stopped without a more specific cause. Ask the operator to resolve the named check, then re-approve. |
+| Needs a fix | `required_check_failed` | Runner or PR checks failed. The comment includes the failure count and up to five bare test function names when reported. Arrange correction, then re-approve. Paths, parameters and logs are never published. Older results or unknown test formats may lack names or counts. |
+| Needs a fix | `reviewer_reported_blocked` | Review needs further work or primary triage. Resolve the review on the linked PR before re-approving. |
+| Needs a fix | `execution_failed` | Execution stopped or was interrupted. Ask the operator to reconcile the interrupted work, then re-approve. |
+| Needs a fix | `publication_failed`, `publication_uncertain`, `auto_merge_disable_uncertain` | Publishing (including refused writes and failed pushes) or cancelling auto-merge failed or has an unknown outcome. Inspect the PR on GitHub and ask the operator to reconcile it before retrying. |
+| Needs a fix | `stale_head`, `gate_category_higher`, `merge_conditions_missing` | The reviewed head or required evidence is no longer sufficient. Arrange a fresh review or complete the missing evidence on the PR. |
+| Needs a fix | `approval_not_attested`, `invalid_status_change` | Approval was rejected or the guard restored a stopped status. Read the preceding comment, resolve it and re-approve. |
+| Needs a fix | `delivery_disabled`, `delivery_configuration_invalid` | Delivery is off or its settings are incomplete. Ask the operator to enable delivery or fix its configuration, then re-approve. |
+| Needs a fix | `commit_refused` | The runner refused to commit. Arrange an owner-delivered PR for the refused change before re-approving. |
+| Needs a fix | `continuation_commit_unrecorded`, `continuation_conflict`, `continuation_not_applied` | Saved work could not be verified, conflicts with the target branch, or is missing from the built head. Ask the operator to reconcile it, or restart fresh where appropriate, then re-approve. |
 
 ### Continue saved work or restart fresh
 

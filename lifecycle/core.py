@@ -516,10 +516,50 @@ STOP_REASONS = {
     "pr_closed_unmerged": "The pull request closed without merging; owner: decide whether further work is needed.",
     "approved_scope_changed": "The approved scope changed; owner: review the new scope and approve it before further work.",
 }
+# Explicit classification: adding a reason requires choosing its kind here.
+# Keep reason texts and persisted records independent of this presentation table.
+STOP_KINDS = {
+    "owner_question": "Needs your decision",
+    "question_withheld": "Needs your decision",
+    "scope_change": "Needs your decision",
+    "acceptance_criteria_change": "Needs your decision",
+    "story_approval": "Needs your decision",
+    "clarification_unverified": "Needs your decision",
+    "product_request_unclassified": "Needs your decision",
+    "repository_evidence": "Needs your decision",
+    "approved_scope_changed": "Needs your decision",
+    "pr_closed_unmerged": "Needs your decision",
+    "owner_requested_stop": "Needs your decision",
+    "continuation_limit": "Needs your decision",
+    "owner_merge_required": "Needs your merge",
+    "commit_refused": "Needs a fix",
+    "delivery_disabled": "Needs a fix",
+    "delivery_configuration_invalid": "Needs a fix",
+    "continuation_commit_unrecorded": "Needs a fix",
+    "continuation_conflict": "Needs a fix",
+    "continuation_not_applied": "Needs a fix",
+    "invalid_status_change": "Needs a fix",
+    "approval_not_attested": "Needs a fix",
+    "prerequisite_failed": "Needs a fix",
+    "assignment_preflight": "Needs a fix",
+    "worker_reported_blocked": "Needs a fix",
+    "reviewer_reported_blocked": "Needs a fix",
+    "execution_failed": "Needs a fix",
+    "publication_failed": "Needs a fix",
+    "publication_uncertain": "Needs a fix",
+    "stale_head": "Needs a fix",
+    "gate_category_higher": "Needs a fix",
+    "required_check_failed": "Needs a fix",
+    "merge_conditions_missing": "Needs a fix",
+    "auto_merge_disable_uncertain": "Needs a fix",
+}
 for _check, _label in {
     "preflight": "Preflight", "build": "Build", "story_tests": "Story tests",
     "runner_checks": "Runner checks", "prerequisite": "A required prerequisite",
 }.items():
+    STOP_KINDS["worker_" + _check] = "Needs a fix"
+    STOP_KINDS["worker_" + _check + "_unavailable"] = "Waiting on the system"
+    STOP_KINDS["worker_" + _check + "_unrelated_failure"] = "Needs a fix"
     STOP_REASONS["worker_" + _check] = (
         _label + ": worker reported blocked without a specific cause; "
         "owner: ask the operator to resolve the failed check, then re-approve."
@@ -534,10 +574,17 @@ for _check, _label in {
         "owner: resolve the existing failure and authorize a new task."
     )
     for _attempts in range(1, 11):
+        STOP_KINDS[f"worker_{_check}_attempts_exhausted_{_attempts}"] = "Needs a fix"
         STOP_REASONS[f"worker_{_check}_attempts_exhausted_{_attempts}"] = (
             f"{_label} still failing after {_attempts} check attempts; "
             "owner: arrange further correction and authorize a new task."
         )
+
+
+def stop_notice(reason, body):
+    """Add the kind only at transport time; non-stop prose stays unchanged."""
+    kind = STOP_KINDS.get(reason)
+    return kind + ": " + body if kind else body
 
 
 def inert_mentions(text):
@@ -1342,7 +1389,8 @@ def flush(cfg, client):
                         client.request(
                             "POST",
                             f"/issues/{record['issue']}/comments",
-                            {"body": entry.get("public_body", record_body(record))},
+                            {"body": stop_notice(record.get("reason"),
+                                                 entry.get("public_body", record_body(record)))},
                         )
                     except Unavailable as exc:
                         if not isinstance(exc, Uncertain):
