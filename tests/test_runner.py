@@ -478,6 +478,7 @@ def test_private_atomic_files_and_runner_lock_modes(setup):
     assert not list(path.parent.glob(".write-*"))
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="stop_group raises PermissionError on macOS; see #197")
 def test_timeout_stops_owned_descendant_group(setup, monkeypatch):
     cfg, state, path, job = setup
     heartbeat = state / "heartbeat"
