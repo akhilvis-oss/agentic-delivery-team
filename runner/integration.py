@@ -104,16 +104,6 @@ def client_for(core, cfg, config=None):
     integration_enabled = options({} if config is None else config) is not None
 
     class DeliveryGitHub(core.GitHub):
-        def smoke_statuses(self, head):
-            # Delivery tokens deliberately lack commit-status authority. Reuse
-            # the harness's isolated status-only scope for this advisory read.
-            spec = importlib.util.spec_from_file_location(
-                "_smoke_notice_tokens", Path(__file__).resolve().parents[1] / "lifecycle/app_tokens.py")
-            tokens = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(tokens)
-            token, _ = tokens.mint(cfg, "runner", status_only=True)
-            return core.GitHub(cfg, token=token).pages(f"/commits/{head}/statuses")
-
         def write_allowed(self, method, path):
             return super().write_allowed(method, path) or (
                 method == "POST" and bool(re.fullmatch(r"/pulls(?:/[1-9]\d*/reviews)?", path))) or (

@@ -1004,6 +1004,16 @@ class GitHub:
             raise Unavailable(str(error)) from None
         self.identity_verified = False
 
+    def smoke_statuses(self, head):
+        # Ordinary job-sync clients and delivery clients share the existing
+        # isolated status-only scope; issue/delivery tokens do not gain it.
+        spec = importlib.util.spec_from_file_location(
+            "_smoke_notice_tokens", Path(__file__).with_name("app_tokens.py"))
+        tokens = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tokens)
+        token, _ = tokens.mint(self.cfg, "runner", status_only=True)
+        return GitHub(self.cfg, token=token).pages(f"/commits/{head}/statuses")
+
     def ensure_actor(self):
         if self.token_expiry is not None and time.time() >= self.token_expiry - 60:
             self.refresh_app_token()
@@ -1981,7 +1991,9 @@ def restoration_noticed(cfg, comments, number, event, target):
                 or body.count(PREFIX) != 1 or body.count(SUFFIX) != 1):
             continue
         try:
-            if stamp(comment["updated_at"]) != stamp(comment["created_at"]):
+            if (not isinstance(comment.get("updated_at"), str)
+                    or not isinstance(comment.get("created_at"), str)
+                    or stamp(comment["updated_at"]) != stamp(comment["created_at"])):
                 continue
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
             if not isinstance(item, dict):

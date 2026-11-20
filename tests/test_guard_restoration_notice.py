@@ -152,3 +152,24 @@ def test_non_object_data_block_cannot_crash_or_suppress_stop(tmp_path, payload):
     core.guard_issue(cfg, hub.client('workflow'), 1)
     assert len(hub.comments_by_issue[1]) == 2
     assert core.records(cfg, hub.comments_by_issue[1], 1)[0]['reason'] == 'owner_requested_stop'
+
+
+@pytest.mark.parametrize('fields', [('created_at',), ('updated_at',),
+                                    ('created_at', 'updated_at')])
+@pytest.mark.parametrize('value', [None, 0, False, [], {}, 'missing'])
+def test_malformed_comment_timestamps_cannot_crash_or_suppress_stop(tmp_path, fields, value):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state='in-review')
+    event = hub.event(1, 'needs-owner', 'workflow')
+    notice = comment(cfg, restoration(cfg, event['id']))
+    for field in fields:
+        if value == 'missing':
+            del notice[field]
+        else:
+            notice[field] = value
+    hub.comments_by_issue[1].append(notice)
+    assert core.restoration_noticed(cfg, [notice], 1, event, 'needs-owner') is False
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert len(hub.comments_by_issue[1]) == 2
+    assert core.records(cfg, hub.comments_by_issue[1][-1:], 1)[0]['job'] == 'label-stop'
