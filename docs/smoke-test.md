@@ -4,7 +4,7 @@ Run one tiny story with the real configured agent before adopting candidate fram
 
 ## Setup
 
-Copy `runner/smoke.example.json` to a private local file and populate every placeholder. Use numeric App IDs, an agent name of at most 80 lowercase letters/digits/underscores/hyphens starting with a letter or digit, absolute executable and agent home paths, and the CLI version and model settings used by your agent. No dependency is installed by the harness. Its Python must already provide the required development tools. `runner.agent` follows the standalone runner interface; the supplied command is a Codex example. The only permitted agent environment setting is `CODEX_HOME={agent_home}`. Agent sign-in lives in the separately configured smoke agent home. The candidate's operating-system HOME is disposable.
+Copy `runner/smoke.example.json` to a private local file and populate every placeholder. Use numeric App IDs, an agent name of at most 80 lowercase letters/digits/underscores/hyphens starting with a letter or digit, absolute executable and agent home paths, and the CLI version and model settings used by your agent. No dependency is installed by the harness. Its Python must already provide the required development tools. `runner.agent` follows the standalone runner interface; the supplied command is a Codex example. The permitted agent environment mappings are empty, `CODEX_HOME={agent_home}`, or `CLAUDE_CONFIG_DIR={agent_home}`; no other keys or combinations are accepted. Agent authentication lives in the separately configured smoke agent home. The candidate's operating-system HOME is disposable.
 
 Use a dedicated public scratch repository, different from the framework repository. Install the starter rules, trusted lifecycle workflow/policy and review gate from your approved release there. Match the scratch policy's owner and runner to the smoke Apps; the runner also has the Product role. Use the standard template transitions, a `main` base, and set `trusted_gate_workflow` to the installed gate workflow path. Require `checks` and `review-gate` on main, and disable auto-merge. The scratch owner must be an App identity distinct from the smoke runner. The smoke story adds only `smoke_add.py` and `test_smoke_add.py`; remove previous merged copies before running it.
 
@@ -16,6 +16,70 @@ Create two Apps installed **only** on that scratch repository:
 Store their private keys in the local Keychain using the existing App authentication setup. The framework runner App remains installed on the framework repository. The owner must add **Commit statuses: Read and write** to that App and accept the updated installation permissions. The harness requests a separate, one-repository token with only `statuses: write` (plus GitHub's mandatory metadata read). No Contents or Issues write permission is requested for this token.
 
 Use the same private `lock_dir` for every invocation targeting a scratch repository. Keep it outside the running service's state. The per-repository nonblocking lock refuses concurrent runs; any open issue or PR also refuses admission. Use a separate scratch repository for each independent harness machine; the local lock is not a distributed lock.
+
+## Claude Code agent
+
+Keep the base `runner/smoke.example.json` unchanged. In your private copy, set
+`agent_name`, `runner.agent_home`, and both model placeholders for Claude Code,
+and replace `runner.agent` with this entry:
+
+<!-- claude-smoke-agent -->
+```json
+{
+  "command": ["<ABSOLUTE_CLAUDE_EXECUTABLE>", "--bare", "--settings", "{agent_home}/settings.json", "--print", "--no-session-persistence", "--model", "{model}", "{role_flags}"],
+  "version_command": ["<ABSOLUTE_CLAUDE_EXECUTABLE>", "--version"],
+  "version_pattern": "^2\\.1\\.311 \\(Claude Code\\)$",
+  "worker_flags": ["--tools", "Read,Edit,Bash", "--permission-mode", "dontAsk", "--allowedTools", "Read", "Edit", "Bash"],
+  "reviewer_flags": ["--tools", "Read,Edit", "--permission-mode", "dontAsk", "--allowedTools", "Edit(/{output_file})"],
+  "environment": {"CLAUDE_CONFIG_DIR": "{agent_home}"}
+}
+```
+
+These argv templates were checked against installed `claude --help` and
+`claude --version`, version **2.1.311 (Claude Code)**. Recheck your installed
+version's help before changing the pinned pattern. The runner supplies the
+prompt on stdin and starts each phase in its worktree; no shell wrapper or
+stdout redirection is needed. Its prompt supplies the answer-file path and JSON
+schema. Each phase must write its JSON answer there using Edit; stdout is not
+the runner's answer channel. The worker can edit files and run the required
+tests. The reviewer has exactly Read and Edit, no shell, and only the answer
+file is allowed for edits. The existing runner fingerprint check rejects any
+reviewer worktree mutation.
+
+In the private agent home's `settings.json`, use only an `apiKeyHelper` setting:
+
+```json
+{
+  "apiKeyHelper": "/usr/bin/security find-generic-password -w -s '<KEYCHAIN_SERVICE>' -a '<KEYCHAIN_ACCOUNT>' '<ABSOLUTE_KEYCHAIN_FILE>'"
+}
+```
+
+Replace all placeholders privately. Store a capped Anthropic API key in that
+Keychain item; never put the key itself in settings, smoke/runner/candidate
+configuration or environment. The framework never reads, stores or passes the
+Anthropic key. Only Claude Code invokes the helper, whose stdout must contain
+the key. The helper names the Keychain file explicitly because its HOME is the
+harness's disposable HOME. Do not add allow rules to this settings file.
+Both phases use `--bare` **and** `--settings`: bare mode ignores the agent home's
+automatic settings loading and excludes OAuth and built-in Keychain auth.
+Unattended Claude smoke runs use API billing only, never a subscription login.
+
+The [official CLI reference](https://code.claude.com/docs/en/cli-reference)
+describes the command flags. For permission syntax, the
+[official Read and Edit rules](https://code.claude.com/docs/en/permissions#read-and-edit)
+cover writes (including creating a file), and its
+[path pattern table](https://code.claude.com/docs/en/permissions#how-path-patterns-match)
+defines `//` as the filesystem-root prefix. Thus `Edit(/{output_file})` expands
+to `Edit(//...)` for the runner's absolute output path. The harness resolves its
+temporary root before constructing candidate paths, avoiding macOS's symlinked
+temporary-directory prefix in this exact-file permission rule.
+
+Offline tests check the documented argv against an allowlist and run the
+unchanged runner with a stand-in Claude command. They do not establish live
+Claude permission or authentication behavior. After merge, the owner creates
+the capped key, configures this private home and smoke config, and runs the
+smoke test with Claude Code on main; main must pass. The schema-regression
+exit test remains Codex-only because it exercises Codex's strict schema check.
 
 ## Run
 
@@ -41,7 +105,7 @@ Exit status is zero only when every stage and cleanup passed and the commit stat
 
 Offline tests use synthetic clients and the existing GitHub recordings; they never contact GitHub or run an agent. Run `python -m pytest -q -p no:cacheprovider`, `python -m ruff check --no-cache .`, and `python scripts/check_private_content.py` before review.
 
-The live exit test is an owner step after merge: grant status permission, write the private config, re-pin the service, then smoke-test main and the owner-prepared schema-regression branch. Main must pass; the regression must fail at review. This worker does not perform the live run or change the scratch repository.
+The live exit test is an owner step after merge: grant status permission, write the private config, re-pin the service, then smoke-test main with each configured agent. With Codex, also test the owner-prepared schema-regression branch: main must pass and that regression must fail at review. Claude Code must pass on main. This worker does not perform the live run or change the scratch repository.
 
 Known limit: the candidate runs as the **same OS user** as the harness. Its configuration and environment contain no framework key, token, Keychain reference or framework repository authority. Only scratch runner App references are exported; the smoke owner key stays in the harness. This is credential minimization, not an OS security boundary: candidate code can still attempt to access that user's files or Keychain. Operating-system separation of keys from code under test comes in M4. Use only owner-approved candidate code under this temporary exception.
 
