@@ -172,17 +172,39 @@ before builder execution never adopt pre-existing dirty work.
 
 A stopped job with runner-committed work pins its head locally at
 `refs/agentic/continue/<job>`. The lifecycle record's `commit` identifies that
-head, and its comment ends with a `### Continue from` heading, a
-`Commit: <40-character commit ID>` line, and paste/re-approval instructions.
-There is no continuation block when no builder work was committed. The ref is
-not pushed; it survives local garbage collection and is deleted after successful
-merge cleanup or a verified owner close of the issue. Owner-close cleanup only
-releases the ref; existing dirty/unmerged worktree safeguards still apply.
+head. Its notice explains how to continue or restart. The ref is local and is
+deleted after successful merge cleanup or verified owner close; dirty/unmerged
+worktree safeguards still apply.
 
-Continuing from the pasted commit on re-approval requires #110. Until then,
-re-approval starts fresh. Preserve assignments, private results and receipts, and
-use a separately exported approved release as the tool. This does not reset jobs
-to queued, discard dirty work, or replay workers.
+Re-approving continues the newest local saved work for this story, merged with
+the latest target branch. No commit ID is needed. Jobs without saved work are
+skipped; an integrity failure in the newest saved job stops with
+`continuation_commit_unrecorded`, never silently starts fresh. Saved work includes
+runner-saved stops, reviewed heads and heads awaiting automatic Primary review.
+There are at most two counted continuations per story, each with one correction
+round. Automatic Primary continuation uses the same path with no correction
+round and does not count against that limit. Delivery settings always come from
+the main runner template.
+
+To start over, add exactly `Restart: fresh` on its own line under `## Owner decisions`
+or `### Owner decisions`, then re-approve. It takes effect only when absent from
+the last dispatched approval's text and resets the count. Remove the line before
+a later re-approval; editing a story during a run stops it. Claims stopped before
+dispatch do not become the comparison text.
+
+If the reviewed saved head is current against the fetched target and the approved
+scope is unchanged, the service only delivers it. Legacy continuation blocks,
+the old Saved work field and the restart directive are ignored for that scope
+comparison. A legacy block never selects a commit; the dispatched notice explains
+that the latest saved work is used.
+
+With an open PR, re-approval or restart stops with `pr_open_reapproval` (Needs your
+decision). Close the PR and re-approve to rebuild, or merge it and add
+`status:merged` to finish (#184). The old delivery loop ends permanently without
+another notice; the PR and auto-merge setting stay as they are. A merge may first
+produce a public "blocked → merged was rejected" comment and one failing lifecycle
+check; adding `status:merged` finishes the story. Auto-merge may still merge it
+by itself.
 
 A failed/uncertain comment does not change the local execution result or erase its receipt. Delivery is marked attempted **before** sending and is not retried automatically, preventing duplicate comments after a crash/ambiguous response. Inspect GitHub before any manual retry. The fake-client tests verify payload boundaries, default-off behavior and failures; this PR does not post a live receipt or install launchd.
 
@@ -450,19 +472,13 @@ head binding, category, failure, recovery and concurrency cases.
 
 ### Continuation delivery
 
-The lifecycle service requires an explicit `integration` choice in both runner
-and Primary templates: a complete enabled block as above, or `{"enabled": false}`.
-Incomplete settings stop before dispatch with a public explanation. A Primary job
-copies the delivery settings from the generated config of the job it continues;
-its template cannot enable delivery that the original job had disabled.
+The lifecycle service requires an explicit `integration` choice in the main runner
+template: a complete enabled block, or `{"enabled": false}`. Incomplete settings
+stop before dispatch. The Primary template supplies its agent configuration;
+delivery settings come from the main runner template.
 
-A passing review with delivery off stops at `needs-owner` with reason
-`delivery_disabled`, the reviewed commit and a ready-to-paste “Continue from”
-block. To publish later, configure delivery, paste that block into the same story
-and re-approve. The service reuses the recorded review and required checks only
-when the approved scope is unchanged apart from the continuation block, the
-freshly fetched target still equals the review base, and its trusted gate is
-unchanged. Otherwise it records the fallback reason in the claim and runs the
-normal continuation, merging the fetched target before building and reviewing.
-Delivery-only resumes use the existing continuation limit and publication and
-merge controls. No new command or label is needed.
+A passing review with delivery off saves the reviewed work at `needs-owner`
+with `delivery_disabled`. Configure delivery and re-approve the story. The service
+reuses the recorded review and checks only when scope, fetched target and trusted
+gate still match. Otherwise it records the fallback reason and builds and reviews
+the continuation. Existing publication and merge controls remain in force.
