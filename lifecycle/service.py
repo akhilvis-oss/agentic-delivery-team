@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.error
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -80,8 +81,11 @@ def validate_local(cfg):
         raise ValueError("Invalid base branch")
 
 
-def claim_event(cfg, issue, events):
-    current, event = core.canonical_state(cfg, events)
+def claim_event(cfg, issue, events, changed=True):
+    # Defer the event request until changed/open/admission checks pass.
+    if not changed or issue["state"] != "open" or core.state(issue) not in {"approved", "needs-primary"}:
+        return None
+    current, event = core.canonical_state(cfg, events() if callable(events) else events)
     if current != core.state(issue) or event is None or issue["state"] != "open":
         return None
     role = (
@@ -519,35 +523,46 @@ def publish_poll(cfg, client, issues, at):
     statuses = [i for i in issues if i.get("user", {}).get("login") == cfg["actors"]["runner"]
                 and marker in (i.get("body") or "")]
     targets = standups or statuses
+    created = None
     if targets:
         number = max(targets, key=lambda i: i["number"])["number"]
     else:
         issue = client.request("POST", "/issues", {
             "title": "Lifecycle service status",
-            "body": "The pinned comment shows the service's last poll. "
+            "body": "The pinned comment shows the service's last update. "
                     "If it stops updating, ask the operator to restore the service.\n" + marker,
         })
         number = issue["number"]
+        created = issue
     comment_marker = "<!-- agentic-last-poll-v1 -->"
     comments = [c for c in client.comments(number)
                 if c.get("user", {}).get("login") == cfg["actors"]["runner"]
                 and comment_marker in c.get("body", "")]
     body = poll_body(cfg, at, journal.get("notices", []))
+    content = poll_body(cfg, 0, journal.get("notices", []))
+    edited = False
     if comments:
         comment = min(comments, key=lambda c: c["id"])
-        client.request("PATCH", f"/issues/comments/{comment['id']}", {"body": body})
+        if (journal.get("content") != content or journal.get("comment") != comment["id"]
+                or at - journal.get("last_edit", 0) >= 600):
+            comment = client.request("PATCH", f"/issues/comments/{comment['id']}", {"body": body})
+            edited = True
     else:
         comment = client.request("POST", f"/issues/{number}/comments", {"body": body})
+        edited = True
     if not comment.get("pin"):
         client.request("PUT", f"/issues/comments/{comment['id']}/pin")
     journal.update(issue=number, comment=comment["id"], last_poll=at)
+    if edited:
+        journal.update(last_edit=at, content=content)
     journal.pop("issue_attempted", None)
     journal.pop("comment_attempted_for", None)
     core.save(path, journal)
+    return created
 
 
 def poll_body(cfg, at, notices):
-    return ("Lifecycle service last poll: " + timestamp(at)
+    return ("Lifecycle service last poll (last update): " + timestamp(at)
             + ".\nExpected poll interval: " + str(cfg["poll_seconds"])
             + " seconds, plus time spent building or reviewing. If this time stops "
             "updating, ask the operator to restore the service; re-approving alone "
@@ -579,6 +594,7 @@ def report_recovery(cfg, client, failure, restart):
         client.request("PATCH", f"/issues/comments/{journal['comment']}",
                        {"body": poll_body(cfg, journal["last_poll"], notices)})
         journal["notices"] = notices
+        journal.update(last_edit=journal["last_poll"], content=poll_body(cfg, 0, notices))
         core.save(path, journal)
     for name in ("poll-failure.json", "service-error.json"):
         (root / name).unlink(missing_ok=True)
@@ -600,7 +616,7 @@ def error_origin(exc):
 
 
 def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
-         pending_hook=None):
+         pending_hook=None, full_list=False):
     validate_local(cfg)
     core.bind_state(cfg)
     root = core.private(cfg["state_dir"])
@@ -618,19 +634,46 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
         if pending and pending_hook is not None:
             pending_hook(ctx)
         cursor = root / "poll.json"
-        if not pending and cursor.exists() and clock() < core.read(cursor)["next_poll"]:
+        if not pending and not full_list and cursor.exists() and clock() < core.read(cursor)["next_poll"]:
             return []
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
         if upgrade_enabled and upgrade.attempt(cfg, ctx):
             return upgrade.SWITCH
         flush_outbox(cfg, client)
-        all_issues = client.pages("/issues?state=all")
+        listing_at = clock()
+        cache = cfg.get("_poll_cache")
+        journal_path = root / "public-heartbeat.json"
+        journal = core.read(journal_path) if journal_path.exists() else {}
+        full = (full_list or cache is None or listing_at - cache["full_at"] >= 3600
+                or journal.get("issue") not in cache["issues"]
+                or "completed_listing_at" not in cache)
+        route = "/issues?state=all"
+        if not full:
+            since = timestamp(cache["completed_listing_at"] - 300).replace("+00:00", "Z")
+            route += "&since=" + since
+        updates = client.pages(route)
+        changed = {i["number"] for i in updates}
+        rows = {} if full else dict(cache["issues"])
+        rows.update((i["number"], i) for i in updates)
+        cache = {"issues": rows, "full_at": listing_at if full else cache["full_at"],
+                 **({"completed_listing_at": cache["completed_listing_at"]}
+                    if cache and "completed_listing_at" in cache else {})}
+        cfg["_poll_cache"] = cache
+        all_issues = list(rows.values())
         heartbeat_failure = root / "public-heartbeat-failure.json"
         try:
-            publish_poll(cfg, client, all_issues, clock())
+            created = publish_poll(cfg, client, all_issues, clock())
+            if created:
+                rows[created["number"]] = created
         except Exception as exc:
             # Status publication is advisory; no message or agent text is saved.
             core.save(heartbeat_failure, {"exception_class": type(exc).__name__})
+            if isinstance(exc.__context__, urllib.error.HTTPError) and exc.__context__.code == 404:
+                updates = client.pages("/issues?state=all")
+                rows = {i["number"]: i for i in updates}
+                cache.update(issues=rows, full_at=listing_at)
+                all_issues = list(rows.values())
+                changed = set(rows)
             if pending:
                 return upgrade.DEFER
         else:
@@ -642,11 +685,13 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             for i in all_issues
             if "pull_request" not in i and not core.is_report(cfg, i)
         ]
-        issues = [backfill_owner_merge(cfg, client, i) for i in issues]
+        issues = [backfill_owner_merge(cfg, client, i) if i["number"] in changed else i
+                  for i in issues]
         by_number = {i["number"]: i for i in issues}
         for issue in issues:
             try:
-                action = claim_event(cfg, issue, client.events(issue["number"]))
+                action = claim_event(cfg, issue, lambda: client.events(issue["number"]),
+                                     issue["number"] in changed)
                 if action and not action[1]:
                     proofs = core.records(
                         cfg, client.comments(issue["number"]), issue["number"]
@@ -987,6 +1032,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
         completed = clock()
         core.save(cursor, {"next_poll": completed + cfg["poll_seconds"]})
         core.save(root / "heartbeat.json", {"last_poll": completed})
+        cache["completed_listing_at"] = listing_at
         return processed
 
 
@@ -1254,6 +1300,8 @@ def run_loop(cfg, client, action):
             previous_poll = heartbeat(cfg) if serving else None
             options = {"upgrade_enabled": True, "pending_hook": upgrade.start_pending_timer
                        } if serving and "upgrade" in cfg else {}
+            if action == "run-once":
+                options["full_list"] = True
             result = poll(cfg, client, run_jobs=action != "enqueue-only", **options)
             if result is upgrade.SWITCH:
                 return 0
