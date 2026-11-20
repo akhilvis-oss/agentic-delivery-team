@@ -215,13 +215,31 @@ def reviewed(runner, config, job):
         raise ValueError("Reviewed checkout changed") from None
 
 
+def story_section(text, title):
+    """Read a story section through the next peer/higher heading or separator.
+
+    Issue forms use level-three headings; product stories use level two.
+    Horizontal whitespace and an optional CR keep LF and CRLF boundaries alike.
+    """
+    heading = re.search(r"^(#{2,3})[ \t]+" + re.escape(title) + r"[ \t]*\r?$",
+                        text, re.M | re.I)
+    if not heading:
+        return None
+    return re.split(r"(?m)^#{1," + str(len(heading[1])) + r"}[ \t]+|^---[ \t]*\r?$",
+                    text[heading.end():], maxsplit=1)[0].strip()
+
+
 def criteria(text):
     # Preserve every criterion byte, including continuation lines. The immutable
     # owner-approved story, never a worker paraphrase, is the sole source.
-    match = re.search(r"(?m)^- AC-[1-9]\d*:", text)
+    section = story_section(text, "Acceptance criteria")
+    source = text if section is None else section
+    match = re.search(r"(?m)^- AC-[1-9]\d*:", source)
     if not match:
         raise ValueError("Approved story requires AC-N criteria")
-    block = re.split(r"(?m)^##? |^---\s*$", text[match.start():], maxsplit=1)[0].rstrip()
+    block = source[match.start():].rstrip()
+    if section is None:
+        block = re.split(r"(?m)^##? |^---\s*$", block, maxsplit=1)[0].rstrip()
     ids = re.findall(r"(?m)^- (AC-[1-9]\d*):", block)
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate criteria")
@@ -230,6 +248,10 @@ def criteria(text):
 
 def body_for(runner, config, job, cfg, opts, receipt_url):
     original, ids = criteria(job["assignment"]["task_text"])
+    decisions = story_section(job["assignment"]["task_text"], "Owner decisions")
+    quoted_decisions = ("\n".join("> " + line for line in decisions.splitlines())
+                        if decisions and decisions != "_No response_"
+                        else "None in the approved story.")
     head = job["head_commit"]
     receipt = runner.public_receipt(runner.read(
         Path(config["state_dir"]) / "receipts" / (job["id"] + ".json")))
@@ -245,6 +267,7 @@ def body_for(runner, config, job, cfg, opts, receipt_url):
             "## Assumptions\nNone beyond the immutable approved assignment.\n\n"
             f"## Original acceptance criteria\nIssue: https://github.com/{cfg['repository']}/issues/"
             f"{job['github_number']}\n{original}\n\n"
+            f"## Owner decisions\n{quoted_decisions}\n\n"
             "## Acceptance evidence\n| Criterion | Evidence | Result |\n| --- | --- | --- |\n")
     body += "".join(f"| {ac} | {receipt_url}; fresh review {job['review_session']} | PASS: reviewed on {head} |\n"
                     for ac in ids)
