@@ -92,10 +92,10 @@ Every stop is one of these four kinds:
 
 ### 5. Records
 
-- **A version field.** Each record carries an explicit `version`. Records without one are version 1 and parse forever.
-- **Validity comes from the data block only,** never from the human-readable sentence above it (review change 17). Rewording a notice can't orphan earlier records.
-- **Edited records:** a record comment edited after it was posted is ignored for state and named in the status comment.
-- **Deleted records:** if one is deleted, state is recomputed from the records that remain. If that leaves the story inconsistent, it stops as "needs a fix"; it never acts on a guess.
+- **Known versions only.** Each record carries an explicit JSON integer `version`, excluding booleans and floating-point values. Only version 1 currently parses; missing or unsupported versions are ignored. Supported versions are listed in one place in code. The version is not part of the record key.
+- **Validity comes from the unique data block, its author and a known version,** never from text before or after it, including continuation instructions. Existing data, key and author-role checks still apply. Rewording a notice can't orphan earlier records.
+- **Edited records:** when a comment's `updated_at` is later than its `created_at`, it is ignored for state, including stop records. Edited `merged` and `accepted` records retain finality so an edit cannot reopen a story. A comment missing either timestamp counts as unedited.
+- **Follow-ups:** naming ignored records in the status comment and stopping on inconsistent state after a record deletion are separate work. The existing guard-record construction defect is also a separate story (#192).
 
 ### 6. Fewer API calls per poll
 
