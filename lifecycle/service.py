@@ -599,7 +599,8 @@ def error_origin(exc):
     return function
 
 
-def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False):
+def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
+         pending_hook=None):
     validate_local(cfg)
     core.bind_state(cfg)
     root = core.private(cfg["state_dir"])
@@ -614,6 +615,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False):
             ctx = None
             cfg["_upgrade_notice"] = upgrade.UNREADABLE
         pending = upgrade.is_pending(ctx)
+        if pending and pending_hook is not None:
+            pending_hook(ctx)
         cursor = root / "poll.json"
         if not pending and cursor.exists() and clock() < core.read(cursor)["next_poll"]:
             return []
@@ -1249,7 +1252,8 @@ def run_loop(cfg, client, action):
     while True:
         try:
             previous_poll = heartbeat(cfg) if serving else None
-            options = {"upgrade_enabled": True} if serving and "upgrade" in cfg else {}
+            options = {"upgrade_enabled": True, "pending_hook": upgrade.start_pending_timer
+                       } if serving and "upgrade" in cfg else {}
             result = poll(cfg, client, run_jobs=action != "enqueue-only", **options)
             if result is upgrade.SWITCH:
                 return 0

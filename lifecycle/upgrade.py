@@ -9,6 +9,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 
 from lifecycle import app_tokens, core, smoke, smoke_watch
@@ -18,6 +20,45 @@ SWITCH = object()
 DEFER = []
 MISMATCH = "Upgrades are off: versions_dir does not match the launcher's folder."
 UNREADABLE = "Upgrades are off: the switch record is unreadable."
+_pending_timer = None
+
+
+class PendingTimer(threading.Timer):
+    """One daemon thread, checking the launcher's whole-second wall clock."""
+
+    def __init__(self, deadline, clock, exit_func):
+        super().__init__(0, self.watch)
+        self.daemon = True
+        self.deadline = deadline
+        self.clock = clock
+        self.exit_func = exit_func
+
+    def watch(self):
+        while not self.finished.is_set():
+            remaining = self.deadline - int(self.clock())
+            if remaining <= 0:
+                self.exit_func(70)
+                return
+            self.finished.wait(min(remaining, 1))
+
+
+def start_pending_timer(ctx, *, clock=time.time, limit=600, exit_func=os._exit):
+    """Called only by serve's poll hook; an expired deadline exits synchronously."""
+    global _pending_timer
+    if _pending_timer is not None:
+        return
+    since = ctx[1]['pending_since']
+    deadline = (int(since) if since else int(clock())) + limit
+    if int(clock()) >= deadline:
+        exit_func(70)
+        return
+    _pending_timer = PendingTimer(deadline, clock, exit_func)
+    _pending_timer.start()
+
+
+def cancel_pending_timer():
+    if _pending_timer is not None:
+        _pending_timer.cancel()
 
 
 def validate(settings):
@@ -125,6 +166,7 @@ def confirm(cfg, ctx):
     record.update(previous=record['current'], current=new, pending='', pending_since='',
                   pending_starts='', notice=f'Upgraded from {old} to {new}')
     write(folder, record)
+    cancel_pending_timer()
     cfg['_upgrade_notice'] = record['notice']
 
 
