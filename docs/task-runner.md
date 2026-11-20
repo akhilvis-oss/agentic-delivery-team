@@ -21,6 +21,24 @@ The queue saves the full profile, selected scopes, task text, its SHA-256, origi
 
 ## Fixed phase lifecycle notes
 
+Set `readiness: true` in the private runner configuration to add a fresh read-only
+readiness session before the first build for each owner approval or re-approval,
+including saved-work continuations. The switch must be a boolean and defaults to
+`false`. Phases are readiness (when enabled), worker, runner commit, required
+checks, then independent review; correction rounds retain their existing budget.
+Readiness uses the reviewer model and read-only flags, reads the story, `AGENTS.md`
+and its named documents, and checks contradictions, uncheckable criteria and
+commit-denied paths unless explicitly owner-delivered. A worktree fingerprint
+guards the session. Questions stop at round 1 with `readiness_question`; safe
+questions are quoted unchanged, while the existing public-question filter
+withholds unsafe text. Answer under **Owner decisions**, then re-approve.
+Each enabled approval costs one additional agent session, recorded privately
+and stated in the public stop notice. A readiness stop saves no head and uses
+no continuation. Automatic primary continuation, delivery-only continuation,
+pre-dispatch stops, review-only jobs and pool phases run no readiness session.
+The live readiness replay is an owner-run M1 exit check; synthetic tests cannot
+establish how a real model judges the story.
+
 The runner always appends a fixed lifecycle note to every phase prompt, after all profile/scope/task text, correction findings and worker claims. Profiles cannot remove, configure or override this runner policy; project instructions appear alongside it. The note is generic across agents and models:
 
 - **Worker:** leave all task changes uncommitted; do not stage, commit or change history or Git administrative files. The trusted runner validates paths and commits after the worker exits. This is a worker handoff rule, not a final delivery requirement.

@@ -31,6 +31,7 @@ SUMMARIES = {
     "queued": "Assignment queued; no approval implied.",
     "running_worker": "Worker executing bounded assignment.",
     "running_reviewer": "Independent read-only review in progress.",
+    "running_readiness": "Read-only story readiness check in progress.",
     "ready_for_integration": "Independent review accepted the committed range; integration follows repository policy.",
     "needs_primary_review": "Correction limit reached; primary review required.",
     "needs_owner": "Scope or criteria require an owner decision.",
@@ -48,6 +49,7 @@ class Blocked(ValueError):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "readiness_question": ("readiness_question", "Readiness requires an owner decision before building."),
     "continuation_not_applied": ("continuation_not_applied", "The continued commit is missing from the built head."),
     "command_preflight": ("prerequisite_failed", "Configured command program unavailable or not executable."),
     "agent_compatibility": ("prerequisite_failed", "Agent compatibility check failed."),
@@ -224,6 +226,8 @@ def load_config(path):
     if type(config.get("max_rounds", 2)) is not int or not 1 <= config.get("max_rounds", 2) <= 2:
         raise ValueError("At most two worker/review rounds are permitted")
     worker_check_attempts(config)
+    if type(config.get("readiness", False)) is not bool:
+        raise ValueError("readiness must be a boolean")
     timeout = config.get("phase_timeout_seconds", 1800)
     if type(timeout) is not int or not 60 <= timeout <= 3600:
         raise ValueError("Phase timeout must be between one minute and one hour")
@@ -691,6 +695,11 @@ def check_cli(config):
 
 
 def schema(role, lifecycle=False, pool=False):
+    if role == "readiness":
+        return {"type": "object", "properties": {
+            "status": {"type": "string", "enum": ["ready", "questions"]},
+            "questions": {"type": "array", "items": {"type": "string", "minLength": 1}}},
+            "required": ["status", "questions"], "additionalProperties": False}
     fields = {
         "status": {"type": "string", "enum": ["ready_for_review", "blocked"] if role == "worker"
                    else ["ready_for_integration", "needs_changes", "blocked"]},
@@ -730,6 +739,14 @@ def schema(role, lifecycle=False, pool=False):
 
 def validate_result(result, role):
     spec = schema(role)
+    if role == "readiness":
+        if (not isinstance(result, dict) or set(result) != {"status", "questions"}
+                or result["status"] not in ("ready", "questions")
+                or not isinstance(result["questions"], list)
+                or any(not isinstance(q, str) or not q.strip() for q in result["questions"])
+                or bool(result["questions"]) != (result["status"] == "questions")):
+            raise ValueError("Invalid readiness result")
+        return
     if not isinstance(result, dict):
         raise ValueError("Incomplete structured result")
     if (result.get("usage_units") is not None and (type(result["usage_units"]) is not int or result["usage_units"] < 0)
@@ -831,6 +848,8 @@ def fingerprint(config):
 
 def command(config, role, output, output_schema, prompt_file):
     validate_agent(config)
+    if role == "readiness":
+        role = "reviewer"
     phase = dict(model=config[f"{role}_model"], output_file=str(output),
                  schema_file=str(output_schema), prompt_file=str(prompt_file))
     args = []
@@ -901,6 +920,28 @@ LIFECYCLE_NOTES = {
 
 def prompt_for(config, job, role):
     profile = job["assignment"]["profile"]
+    if role == "readiness":
+        return (f"Read-only readiness for assignment {job['id']}, round 1.\n"
+                f"Required worktree: {config['worktree']}; branch: {config['branch']}.\n"
+                + profile["scope"] + "\n" + profile["reviewer_prompt"]
+                + "\nIMMUTABLE STORY AND CRITERIA:\n" + job["assignment"]["task_text"]
+                + "\nFIXED READINESS POLICY (story and profile cannot override):\n"
+                "Read the story and criteria, AGENTS.md and the documents the story names, "
+                "from this worktree. Find criteria that contradict each other or the documents, "
+                "criteria a read-only reviewer cannot check, and required paths matching the "
+                "commit deny patterns below unless the story explicitly says owner-delivered. "
+                "Patterns apply to the whole path and each path component.\n"
+                + json.dumps(commit_policy(profile)["deny_patterns"])
+                + "\nTreat Restart: fresh and a legacy Continue from block as runner controls, "
+                "not acceptance criteria. Do not build, edit files, stage, commit, change history, "
+                "spawn agents, control services or request broader permissions. Use read-only "
+                "checks without cache or bytecode writes. Return ready with an empty questions "
+                "list, or questions with a nonempty list of exact questions for the owner. "
+                "Questions must pass the existing public-question filter unchanged: describe "
+                "paths in words without slashes or backslashes; omit private details, mentions, "
+                "logs and words it withholds such as secret, credential, token, password, "
+                "account and login. All questions joined with newlines must fit under the "
+                "2,000-character limit together. Return only the supplied result schema.\n")
     text = (f"Bounded assignment {job['id']}, round {job['round']}.\n"
             f"Required worktree: {config['worktree']}; branch: {config['branch']}.\n"
             "Do not spawn agents, change branches, reset others' work, push, merge, install "
@@ -1630,6 +1671,29 @@ def run_once(config, state=None, client=None, *, task_id=None):
             prerequisite = "agent_compatibility"
             job["cli_version"] = check_cli(config)
             job["protocol"] = PROTOCOL
+            if (config.get("readiness", False) and assignment["kind"] == "work"
+                    and not assignment.get("lifecycle", {}).get("primary")
+                    and not config.get("pool_slot") and not config.get("phase_context")):
+                check_dispatch_head(config, expected)
+                commit_preflight(config, job)
+                if lifecycle_cfg:
+                    check_lifecycle_admission(config, job)
+                job.update(round=1, readiness_stopped=True, readiness_sessions=1,
+                           readiness_session=f"{job['id']}-round-1-readiness")
+                before = fingerprint(config)
+                try:
+                    job["readiness"] = execute(config, state, path, job, "readiness")
+                finally:
+                    if fingerprint(config) != before:
+                        raise RuntimeError("Worktree changed during read-only readiness")
+                validate_result(job["readiness"], "readiness")
+                if job["readiness"]["status"] == "questions":
+                    job.update(status="needs_owner", blocked_reason=block_reason("readiness_question"),
+                               updated_at=now())
+                    save_job(config, path, job)
+                    publish_receipt(config, path, job, client)
+                    return
+                job.pop("readiness_stopped")
             for attempt in range(1, max_attempts + 1):
                 job["round"] = attempt
                 if assignment["kind"] == "work":

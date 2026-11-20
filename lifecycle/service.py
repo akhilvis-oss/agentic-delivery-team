@@ -212,7 +212,9 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
         claim["continuation_error"] = "continuation_commit_unrecorded"
         return
     count = sum(1 for c in previous if c.get("continued_from")
-                and not c.get("primary") and c["event"] >= boundary)
+                and not c.get("primary") and c["event"] >= boundary
+                and not c.get("readiness_stopped")
+                and not any(j["id"] == c["job"] and j.get("readiness_stopped") for j in local))
     if not claim["primary"] and count >= 2:
         claim["continuation_error"] = "continuation_limit"
         return
@@ -938,6 +940,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
                             continue
                     claim.update(stage="finished", head=previous.get("head_commit"))
+                    if previous.get("readiness_stopped"):
+                        claim["readiness_stopped"] = True
                     core.save(path, claim)
                     continue
                 if run_jobs and previous["status"].startswith("running_"):
@@ -1109,6 +1113,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 )
                 if job["status"] in runner.TERMINAL:
                     claim.update(stage="finished", head=job.get("head_commit"))
+                    if job.get("readiness_stopped"):
+                        claim["readiness_stopped"] = True
                 core.save(path, claim)
             processed.append(claim["job"])
         completed = clock()
