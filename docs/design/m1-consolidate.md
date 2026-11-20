@@ -115,10 +115,11 @@ Approving again continues from the saved work.
 
 ### 8. Owner-attested finish
 
-- **What it does:** adding `status:merged` to a story that isn't finished records `finished_by_owner` and closes the issue. The cleanup then runs as for any merge.
-- **How it's attested:** as with approval, the attestation comes from the label event's actor, verified as the owner, and never from comment text.
-- **What it replaces:** the `accepted` status and the hand-signed records used after bootstrap PRs.
-- **#49:** a PR built by hand that closes a lifecycle story no longer fails the lifecycle check. The check reports "finished by the owner" instead of "no trusted review".
+- **What it does:** the owner adds `status:merged` from any status except `merged`, leaving the previous label selected. The guard removes the old status, publishes one `finish` record per owner label event with `reason: finished_by_owner` and its event ID, then closes the issue only after confirming the record. A later issue event recovers a dropped run, including an edit with both labels still present. A closed story without a merged record or label can be finished too; a history that already reached merged gets no second finish.
+- **How it's attested:** publication verifies the label event actor against owner history. Readers accept only strict workflow-authored finish records carrying that ID, as with approval attestations. Owner-account comments never count as merged records, including for an owner with the Product role. The workflow gains no transition rights; other actors retain existing policy handling.
+- **Cleanup:** remove a clean managed worktree. Remove its branch and saved-work reference only when merged into the target; otherwise keep both, mark the claim cleaned and show `Issue #N: owner finish kept unmerged work` until the owner removes the branch. An owner close before finishing already removes the saved-work reference.
+- **Hand-built PRs:** use `Refs #N`. Close any open runner PR before finishing; closing it afterwards fails the lifecycle check once and changes nothing. The check is unchanged and discovers issues only through `Closes #N`. This replaces #49 without changing that check.
+- **Limits:** a finish is final; a mistake needs a new story. Removing `accepted` and `delegate_acceptance` belongs to the later status change. No hand-signed record path exists to delete. The rules and example allow owner finishes; the `.github/` policy change is owner-delivered.
 
 ### 9. A minimal readiness pass
 

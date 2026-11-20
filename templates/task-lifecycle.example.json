@@ -34,6 +34,9 @@
       ],
       "accepted": [
         "owner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "approved": {
@@ -56,6 +59,9 @@
       ],
       "dispatched": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "dispatched": {
@@ -84,6 +90,9 @@
       ],
       "in-progress": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "in-progress": {
@@ -112,6 +121,9 @@
       ],
       "committed": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "committed": {
@@ -143,6 +155,9 @@
       ],
       "in-review": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "in-review": {
@@ -174,6 +189,9 @@
       ],
       "needs-primary": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "changes-requested": {
@@ -205,6 +223,9 @@
       ],
       "in-progress": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "needs-primary": {
@@ -236,6 +257,9 @@
       ],
       "dispatched": [
         "runner"
+      ],
+      "merged": [
+        "owner"
       ]
     },
     "blocked": {
@@ -254,6 +278,9 @@
         "owner"
       ],
       "accepted": [
+        "owner"
+      ],
+      "merged": [
         "owner"
       ]
     },
@@ -280,7 +307,8 @@
       ],
       "merged": [
         "workflow",
-        "runner"
+        "runner",
+        "owner"
       ]
     },
     "pr-open": {
@@ -305,7 +333,8 @@
         "owner"
       ],
       "merged": [
-        "workflow"
+        "workflow",
+        "owner"
       ]
     },
     "accepted": {
@@ -330,7 +359,8 @@
         "owner"
       ],
       "merged": [
-        "workflow"
+        "workflow",
+        "owner"
       ]
     },
     "merged": {
