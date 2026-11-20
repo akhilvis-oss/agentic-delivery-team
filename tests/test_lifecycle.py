@@ -1110,6 +1110,32 @@ def test_pr_lifecycle_requires_exact_trusted_review(tmp_path, action, merged, ta
     assert len(h.comments_by_issue[1]) == 3
 
 
+@pytest.mark.parametrize("merged,target", [(False, "needs-owner"), (True, "merged")])
+def test_closed_pr_records_gate_not_checked(tmp_path, monkeypatch, merged, target):
+    cfg = policy(tmp_path)
+    h = Hub(cfg)
+    pr = pr_fixture(cfg, h)
+    h.event(1, "pr-open", "workflow")
+    pr.update(state="closed", merged=merged,
+              merge_commit_sha="b" * 40 if merged else None)
+    gate_queries = []
+    monkeypatch.setattr(
+        core, "trusted_gate", lambda *a: gate_queries.append(True) or "unavailable"
+    )
+
+    core.pr_event(
+        cfg, h.client("workflow"),
+        {"action": "closed", "pull_request": copy.deepcopy(pr)},
+    )
+
+    record, = [r for r in core.records(cfg, h.comments_by_issue[1], 1)
+               if r["job"] == "pr-7"]
+    assert record["gate"] == "not_checked"
+    assert record["to"] == target
+    assert core.state(h.issues[1]) == target
+    assert gate_queries == []
+
+
 @pytest.mark.parametrize("mutation", ["fork", "head", "author"])
 def test_unrelated_pr_cannot_advance_task(tmp_path, mutation):
     cfg = policy(tmp_path)

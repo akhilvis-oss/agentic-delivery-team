@@ -371,7 +371,7 @@ def public_record(
         raise ValueError("Unknown review outcome")
     if pr is not None and (type(pr) is not int or pr < 1):
         raise ValueError("Invalid PR number")
-    if gate not in {None, "pass", "fail", "pending", "unavailable"}:
+    if gate not in {None, "pass", "fail", "pending", "unavailable", "not_checked"}:
         raise ValueError("Invalid gate result")
     if kind == "approval":
         if (
@@ -1938,9 +1938,10 @@ def pr_event(cfg, client, event):
         raise Unavailable("PR targets an unsupported lifecycle base")
     if event["action"] == "closed":
         target = "merged" if pr["merged"] else "needs-owner"
+        gate = "not_checked"
     else:
         target = "pr-open"
-    gate = trusted_gate(cfg, client, pr)
+        gate = trusted_gate(cfg, client, pr)
     if pr.get("head", {}).get("repo", {}).get("full_name") != cfg["repository"]:
         raise Unavailable("Foreign PR cannot drive lifecycle state")
     if pr.get("user", {}).get("login") not in set(cfg["actors"].values()):
