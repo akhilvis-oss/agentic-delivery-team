@@ -92,7 +92,7 @@ def test_edited_finished_record_preserves_finality(tmp_path, target):
     comment["updated_at"] = LATER
     evidence = core.records(cfg, [comment], 1)
     assert evidence == [record]
-    assert core.finished_issue({"state": "open", "labels": [{"name": "status:approved"}]}, evidence)
+    assert not core.can_start({"state": "open", "labels": [{"name": "status:approved"}]}, evidence)
 
 
 @pytest.mark.parametrize("missing", [("created_at",), ("updated_at",), ("created_at", "updated_at")])
