@@ -138,6 +138,84 @@ PUBLIC = ("## Security review\nSecrets: synthetic fixtures only.\n"
           "External access/cost: synthetic clients only.\nData/provenance: temporary test data.\n")
 
 
+@pytest.fixture
+def story_pr(tmp_path):
+    """Render approved text and verify the standard-tier public contract."""
+    from types import SimpleNamespace
+
+    gate = integration.load_gate()
+    rules = gate.load_config(fixtures.ROOT / ".github/review-gate.json")
+    receipt_runner = SimpleNamespace(read=lambda _: {}, public_receipt=lambda _: {})
+
+    def render(story):
+        job = {"id": "story-test", "assignment": {"task_text": story},
+               "head_commit": "a" * 40, "github_number": 1,
+               "verification_runs": [{"results": []}], "review_session": "fresh-checker"}
+        body = integration.body_for(
+            receipt_runner, {"state_dir": str(tmp_path)}, job,
+            {"repository": rules["repo_url"].removeprefix("https://github.com/")},
+            {"declared_tier": "standard", "public_evidence": PUBLIC},
+            rules["repo_url"] + "/issues/1#issuecomment-2")
+        pr = {"body": body, "head": {"sha": job["head_commit"]}, "base": {"ref": "main"}}
+        assert gate.validate(pr, ["application.py"], rules) == []
+        original, remainder = body.split("## Original acceptance criteria\n", 1)[1].split(
+            "\n\n## Owner decisions\n", 1)
+        decisions = remainder.split("\n\n## Acceptance evidence\n", 1)[0]
+        return original, decisions
+
+    return render
+
+
+@pytest.mark.parametrize("heading", ["##", "###"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("decision", [None, "", "_No response_", "replacement"])
+def test_story_pr_quotes_owner_decisions(story_pr, heading, newline, decision):
+    criteria = "- AC-1: Keep the first criterion.\n- AC-2: Keep the original wording."
+    # The replacement line is the public failure case: it must never be parsed
+    # by the gate as an original criterion, including with CRLF form headings.
+    replacement = "- AC-2 is replaced by:\n  Use the approved replacement.\n\nKeep this decision too."
+    story = f"{heading} Acceptance criteria\n{criteria}\n\n"
+    if decision is not None:
+        content = replacement if decision == "replacement" else decision
+        story += f"{heading} oWnEr DeCiSiOnS\n{content}\n\n"
+    story += f"{heading} Saved work\nDo not quote saved work.\n\n{heading} Dependencies\nNone."
+
+    original, quoted = story_pr(story.replace("\n", newline))
+
+    assert original.split("\n", 1)[1] == criteria.replace("\n", newline)
+    assert quoted == ("> - AC-2 is replaced by:\n>   Use the approved replacement.\n> \n"
+                      "> Keep this decision too." if decision == "replacement"
+                      else "None in the approved story.")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_story_pr_keeps_deeper_criteria_and_decision_headings(story_pr, newline):
+    criteria = ("- AC-1: Preserve the approved text.\n\n### Details\n"
+                "Continuation under a deeper heading.\n- AC-2: Preserve this too.")
+    story = (f"## Acceptance criteria\n{criteria}\n\n## Owner decisions\n"
+             "Keep the detail.\n### Reason\nA nested decision.\n\n## Dependencies\nNone.")
+
+    original, quoted = story_pr(story.replace("\n", newline))
+
+    assert original.split("\n", 1)[1] == criteria.replace("\n", newline)
+    assert quoted == "> Keep the detail.\n> ### Reason\n> A nested decision."
+
+
+@pytest.mark.parametrize("heading", ["##", "###"])
+@pytest.mark.parametrize("boundary", ["# Next section", "---"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_story_pr_stops_at_higher_heading_or_separator(story_pr, heading, boundary, newline):
+    story = (f"{heading} Acceptance criteria\n- AC-1: Only this criterion.\n\n"
+             f"{boundary}\nExcluded criteria tail.\n\n"
+             f"{heading} Owner decisions\nQuote this decision.\n\n"
+             f"{boundary}\nExcluded decision tail.")
+
+    original, quoted = story_pr(story.replace("\n", newline))
+
+    assert original.split("\n", 1)[1] == "- AC-1: Only this criterion."
+    assert quoted == "> Quote this decision."
+
+
 class Client:
     def __init__(self, job, config):
         self.job, self.config = job, config
