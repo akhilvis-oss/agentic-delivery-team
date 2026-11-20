@@ -310,3 +310,9 @@ Examples of the public details and next actions:
 - Over-long text: a summary ends with **[truncated]** within 1,500 characters;
   each finding description ends with the same marker within 600 characters.
   Use the visible explanation and next step; never publish the raw receipt.
+
+### Finish a story built by hand
+
+**Owner.** Use `Refs #N` in a hand-built PR, merge it, and close any open runner PR before finishing. Add `status:merged` as the configured owner; leave the previous status selected. The guard removes that label and verifies your label event, publishes a workflow-authored `finish` record (`finished_by_owner`, with the event ID), then closes the issue after confirming the record. A later issue event recovers a dropped run, even a body edit while both labels remain. Read the Actions run if the record is missing. A closed issue without a merged record or label can also be finished. Owner-account comments never substitute for attestation.
+
+A finish is final; a mistaken finish needs a new story. Closing an open runner PR afterwards fails its lifecycle check once and changes nothing; the check itself is unchanged. `accepted` remains available. Cleanup removes a clean managed worktree, and removes its branch and saved-work reference only if merged into the target. Otherwise it keeps both and reports `Issue #N: owner finish kept unmerged work` until you remove the branch. An owner close before finishing already removes the saved-work reference. Dirty or changed worktrees still require reconciliation.
