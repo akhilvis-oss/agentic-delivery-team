@@ -63,7 +63,10 @@ def cancel_pending_timer():
 
 def validate(settings):
     if (not isinstance(settings, dict)
-            or set(settings) != {'track', 'smoke_agent', 'versions_dir', 'initial_commit'}
+            or set(settings) not in (
+                {'track', 'smoke_agent', 'versions_dir', 'initial_commit'},
+                {'track', 'smoke_agent', 'versions_dir', 'initial_commit',
+                 'framework_repository', 'framework_runner'})
             or settings['track'] != 'main'
             or not isinstance(settings['versions_dir'], str)
             or not Path(settings['versions_dir']).is_absolute()
@@ -72,6 +75,13 @@ def validate(settings):
             or not isinstance(settings['smoke_agent'], str)
             or not core.ID.fullmatch(settings['smoke_agent'])):
         raise ValueError('Invalid private upgrade settings')
+    if 'framework_repository' in settings:
+        if (not isinstance(settings['framework_repository'], str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*',
+                                    settings['framework_repository'])
+                or not isinstance(settings['framework_runner'], str)
+                or not core.LOGIN.fullmatch(settings['framework_runner'])):
+            raise ValueError('Invalid private upgrade settings')
 
 
 def empty():
@@ -184,7 +194,7 @@ def start_check(install, cfg):
     ).returncode
 
 
-def attempt(cfg, ctx):
+def attempt(cfg, ctx, on_read=None):
     """Upgrade errors are advisory: every failure leaves normal polling available."""
     if ctx is None:
         return False
@@ -194,17 +204,25 @@ def attempt(cfg, ctx):
         if record['pending'] or any(c['stage'] != 'finished' or c.get('error')
                                     or c.get('cleanup_pending') for c in claims):
             return False
-        product = core.GitHub(cfg, 'product')
+        settings = cfg['upgrade']
+        repository = settings.get('framework_repository', cfg['repository'])
+        public = 'framework_repository' in settings
+        product = core.PublicGitHub(repository) if public else core.GitHub(cfg, 'product')
+        if on_read is not None:
+            on_read()
         commit = product.request('GET', '/commits/main')['sha']
         if not isinstance(commit, str) or not core.SHA.fullmatch(commit):
             return False
         running = record['current'] or cfg['upgrade']['initial_commit']
         if commit in {running, record['previous']} or commit in record['refused'].split():
             return False
-        token, _ = app_tokens.mint(cfg, 'runner', status_only=True)
-        statuses = core.GitHub(cfg, token=token)
+        if public:
+            statuses = product
+        else:
+            token, _ = app_tokens.mint(cfg, 'runner', status_only=True)
+            statuses = core.GitHub(cfg, token=token)
         status = smoke_watch.smoke_status(statuses, commit, cfg['upgrade']['smoke_agent'],
-                                          cfg['actors']['runner'])
+                                          settings.get('framework_runner', cfg['actors']['runner']))
         if not status or status.get('state') != 'success':
             return False
         if product.request('GET', f'/compare/{running}...{commit}').get('status') != 'ahead':
@@ -217,7 +235,7 @@ def attempt(cfg, ctx):
         core.private(root)
         try:
             install, exported = smoke.export_candidate(
-                {'framework_repository': cfg['repository']}, commit, root, smoke.environment(core.private(root / 'home')))
+                {'framework_repository': repository}, commit, root, smoke.environment(core.private(root / 'home')))
         except core.Unavailable as error:
             if str(error) == 'Unsafe candidate archive':
                 refuse(folder, record, commit)
