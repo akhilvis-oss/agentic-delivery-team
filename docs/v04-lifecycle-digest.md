@@ -287,7 +287,7 @@ The owner may copy them into private files named `org.example.agentic-lifecycle.
 and `org.example.agentic-lifecycle-watchdog.plist` under `$HOME/Library/LaunchAgents`.
 Use a distinct pair of labels and filenames for each private state root.
 
-For this repository's opt-in `main` upgrades, do one final manual re-pin and
+For a framework service's opt-in `main` upgrades, do one final manual re-pin and
 record its commit as private `upgrade.initial_commit`. Confirm that the smoke
 watcher's `framework_runner` equals the service's `actors.runner`, enable
 `smoke_reporting`, and load the watcher if needed. Copy
@@ -301,6 +301,10 @@ command. Use the absolute Python from your existing environment. Set the private
 is the fixed install from the last manual re-pin. The original serve template
 remains compatible and unchanged. Watchdog and smoke-watch stay on fixed approved
 installs, updated by the owner by hand.
+An adopting project uses the same launcher with paired `framework_repository`
+and `framework_runner` settings for public framework reads and exports; see
+[Upgrading](quickstart.md#upgrading) for its framework `smoke_agent`, first-install
+`initial_commit` and the owner-maintained workflow, guard, gate and rules copies.
 
 The private `<versions folder>/switch` has line-based keys `current`, `previous`,
 `pending`, `pending_since`, `pending_starts`, `refused` and `notice`. Both writers

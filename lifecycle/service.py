@@ -621,7 +621,12 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
         if not pending and cursor.exists() and clock() < core.read(cursor)["next_poll"]:
             return []
         core.save(cursor, {"next_poll": clock() + cfg["poll_seconds"]})
-        if upgrade_enabled and upgrade.attempt(cfg, ctx):
+        def upgrade_read_started():
+            cfg["_upgrade_last_check"] = clock()
+
+        last_check = cfg.get("_upgrade_last_check")
+        if (upgrade_enabled and (last_check is None or clock() >= last_check + 600)
+                and upgrade.attempt(cfg, ctx, upgrade_read_started)):
             return upgrade.SWITCH
         flush_outbox(cfg, client)
         all_issues = client.pages("/issues?state=all")

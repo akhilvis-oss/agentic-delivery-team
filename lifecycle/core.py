@@ -794,6 +794,56 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class PublicGitHub:
+    """Unauthenticated, repository-scoped upgrade reads; no credential discovery."""
+
+    def __init__(self, repository):
+        if not isinstance(repository, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repository):
+            raise ValueError("Invalid public repository")
+        self.repository = repository
+        self.opener = urllib.request.build_opener(NoRedirect)
+
+    def request(self, method, path, data=None):
+        allowed = re.fullmatch(
+            r"/(?:commits/main|commits/[0-9a-f]{40}/statuses"
+            r"(?:\?per_page=100&page=[1-9][0-9]*)?|"
+            r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40})", path)
+        if method != "GET" or data is not None or not allowed:
+            raise ValueError("Only public upgrade GET requests are permitted")
+        req = urllib.request.Request(
+            "https://api.github.com/repos/" + self.repository + path,
+            method="GET",
+            headers={"Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28"},
+        )
+        try:
+            with self.opener.open(req, timeout=30) as response:
+                self.has_next_page = 'rel="next"' in response.headers.get("Link", "")
+                return json.loads(response.read())
+        except (OSError, ValueError):
+            # Includes 403 and 429: unavailable reads never refuse a candidate.
+            raise Unavailable("Public GitHub read unavailable") from None
+
+    def pages(self, path):
+        result, seen = [], set()
+        for page in range(1, 1001):
+            batch = self.request("GET", f"{path}?per_page=100&page={page}")
+            if not isinstance(batch, list):
+                raise Unavailable("Incomplete GitHub collection")
+            for item in batch:
+                if (not isinstance(item, dict) or type(item.get("id")) is not int
+                        or item["id"] in seen):
+                    raise Unavailable("Partial, duplicate or unstable GitHub collection")
+                seen.add(item["id"])
+            result.extend(batch)
+            # Do not probe an empty page at exact multiples of 100. Never follow
+            # a server-supplied URL: construct the next repository path ourselves.
+            if not self.has_next_page:
+                return result
+        raise Unavailable("GitHub collection exceeds safety bound")
+
+
 class GitHub:
     """Only this repository; no shell, credential discovery or arbitrary URLs."""
 

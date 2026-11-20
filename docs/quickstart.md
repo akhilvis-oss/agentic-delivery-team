@@ -69,8 +69,9 @@ For adopting projects, upgrade every piece together, from one release tag:
 
 For example, v0.5.5 requires an explicit `integration` setting in both private runner templates, and a new `needs-owner` → `merged` rule in `.github/task-lifecycle.json`.
 
-This repository alone can opt into automatic `main` upgrades. Add a private
-`upgrade` object (omit it to stay off):
+A framework service or an adopting project can opt into automatic `main`
+upgrades; release-tag upgrades are not yet supported. For a service whose own
+repository is the framework, add a private `upgrade` object (omit it to stay off):
 
 ```json
 {"track": "main", "smoke_agent": "example-agent", "versions_dir": "/absolute/private/versions", "initial_commit": "0123456789abcdef0123456789abcdef01234567"}
@@ -78,13 +79,17 @@ This repository alone can opt into automatic `main` upgrades. Add a private
 
 Use the launcher's exact versions folder; symlinks and trailing slashes resolve
 to the same folder. `initial_commit` is the last manually pinned commit and stays
-the running baseline until the first confirmation. The configured service
-repository is the framework repository; this is not an adopter release updater.
-Only `serve` checks for upgrades. An idle poll requires the newest main commit's
+the running baseline until the first confirmation. With neither framework field
+set, reads and exports use the configured service repository.
+Only `serve` checks for upgrades. In this mode an idle poll requires the newest main commit's
 successful `smoke/<smoke_agent>` status from `actors.runner`, read using a separate
 runner status-only token, and a Product-token comparison proving it is ahead.
 Active claims, finished claims with reconciliation errors and pending switches
 all delay upgrades. Read/export outages retry while claims continue normally.
+In both modes, checks start at least ten minutes apart, measured from the start
+of the last check that reached a GitHub read, whatever its outcome. Local skips
+for claims or a pending switch do not start that interval; restarting the service
+allows an earlier check.
 
 The service exports into `<versions_dir>/<commit>/install`, removes the download,
 and runs `upgrade-check` in an isolated Python child with a 120-second limit.
@@ -116,6 +121,30 @@ not supervise the process. Keep watchdog and smoke-watch
 jobs on a fixed approved install, rarely updated by hand. An unreadable switch
 runs the first install and turns upgrades off until repaired or removed. Folder
 mismatches also disable upgrades, with an explanatory status-comment notice.
+
+For an adopting project, add both framework fields together (or omit both):
+
+```json
+{"track": "main", "smoke_agent": "<AGENT_NAME>", "versions_dir": "/absolute/private/versions", "initial_commit": "0123456789abcdef0123456789abcdef01234567", "framework_repository": "<FRAMEWORK_OWNER>/<FRAMEWORK_REPOSITORY>", "framework_runner": "<FRAMEWORK_RUNNER_BOT_LOGIN>"}
+```
+
+These placeholders match `runner/smoke.example.json`. `framework_repository` may
+be any public repository, including the service's own. `smoke_agent` is the
+framework smoke watcher's agent name, not the adopting project's agent.
+`initial_commit` is the framework commit used for the adopting project's first
+install, at or after the merge that introduced this adopter mode. Install the
+launcher as described above. Main, smoke-status and comparison reads use a new
+GET-only public client with no token; the successful status must come from
+`framework_runner`, and the export comes from `framework_repository`. Nothing
+is written to that repository. HTTP 403 and 429 are unavailable reads, retried
+at the next check without refusing the commit. Each check uses at most three
+requests, plus one for each further 100 statuses, within GitHub's unauthenticated
+limit of 60 requests per hour.
+
+Only the service follows `main`. The adopting project's workflows, guard copy,
+gate and rules stay as last copied; the owner updates them by hand when a
+framework change needs it. Until then, a new `main` commit may run against older
+copies of those files.
 
 ### Files to carry by feature
 
