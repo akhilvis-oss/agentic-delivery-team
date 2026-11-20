@@ -33,6 +33,7 @@ except (ImportError, OSError, SyntaxError):
 
 PREFIX = "<!-- agentic-lifecycle-v1\n"
 SUFFIX = "\n-->"
+SUPPORTED_RECORD_VERSIONS = frozenset({1})
 STATES = {
     "draft",
     "approved",
@@ -722,6 +723,15 @@ def records(cfg, comments, expected_issue=None):
             continue
         try:
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if type(item["version"]) is not int or item["version"] not in SUPPORTED_RECORD_VERSIONS:
+                continue
+            created = comment.get("created_at")
+            updated = comment.get("updated_at")
+            # Retain finality even if a finished record was edited later.
+            if (item["to"] not in {"merged", "accepted"}
+                    and created is not None and updated is not None
+                    and stamp(updated) > stamp(created)):
+                continue
             expected = public_record(
                 cfg,
                 item["issue"],
@@ -745,8 +755,6 @@ def records(cfg, comments, expected_issue=None):
                 conflict_files=item.get("conflict_files"),
                 stop_details=item.get("stop_details"),
             )
-            if body.split(SUFFIX, 1)[1] != record_body(expected).split(SUFFIX, 1)[1]:
-                continue
             if (
                 set(item) != set(expected) | {"from", "actor"}
                 or item["key"] != expected["key"]
