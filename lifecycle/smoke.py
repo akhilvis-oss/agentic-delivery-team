@@ -166,11 +166,13 @@ class SmokeGitHub(core.GitHub):
     def guard_runs(self, query=None, *, timeout):
         """Read Actions with the guard wait's remaining request budget.
 
-        Admission has already authenticated this client. This read cannot
-        refresh credentials or make writes while waiting for the guard.
+        Admission already authenticated this client. A rejected or expiring App
+        token refreshes before the next read; this transport never makes writes.
         """
         if query is not None and not re.fullmatch(r"(?:queued|in_progress|waiting|pending|requested|success)", query):
             raise ValueError("Invalid guard run query")
+        if self.token_expiry is not None and time.time() >= self.token_expiry - 300:
+            self.ensure_actor()
         status = "" if query is None else f"&status={query}"
         req = urllib.request.Request(
             "https://api.github.com/repos/" + self.cfg["repository"]
@@ -180,6 +182,10 @@ class SmokeGitHub(core.GitHub):
         try:
             with self.opener.open(req, timeout=timeout) as response:
                 return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
+            raise core.Unavailable("Issue workflow activity unavailable") from None
         except (OSError, ValueError, http.client.HTTPException):
             raise core.Unavailable("Issue workflow activity unavailable") from None
 
@@ -196,6 +202,8 @@ class SmokeGitHub(core.GitHub):
             with self.opener.open(req, timeout=30):
                 return None
         except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
             if exc.code == 404:
                 return None
             raise core.Unavailable("Smoke reference cleanup unavailable") from None
@@ -205,7 +213,7 @@ class SmokeGitHub(core.GitHub):
 
 class StatusGitHub(core.GitHub):
     def refresh_app_token(self):
-        self.token, self.token_expiry = app_tokens.mint(self.cfg, "runner", status_only=True)
+        self.token, self.token_expiry = app_tokens.get(self.cfg, "runner", status_only=True)
         self.identity_verified = False
 
     def write_allowed(self, method, path):

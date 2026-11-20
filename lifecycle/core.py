@@ -7,7 +7,6 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,6 +23,7 @@ import urllib.request
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
+    from lifecycle import app_tokens
     from lifecycle import private_content as check
 except (ImportError, OSError, SyntaxError):
     raise SystemExit(
@@ -953,6 +953,7 @@ class GitHub:
             raise Unavailable("Invalid integration authentication opt-in")
         self.cfg, self.role = cfg, role
         self.integration_enabled = integration_enabled
+        self.token_options = {"integration_enabled": integration_enabled}
         self.use_app_auth = token is None and role in cfg.get("app_auth", {})
         self.token_expiry = None
         self.token = (
@@ -976,21 +977,22 @@ class GitHub:
     def refresh_app_token(self):
         # Also works when core.py is executed in isolated mode by the guard or
         # imported by the standalone runner; no path from config is executable.
-        spec = importlib.util.spec_from_file_location(
-            "_agentic_app_tokens", Path(__file__).with_name("app_tokens.py")
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         try:
-            self.token, self.token_expiry = module.mint(
-                self.cfg, self.role, integration_enabled=self.integration_enabled
+            self.token, self.token_expiry = app_tokens.get(
+                self.cfg, self.role, **self.token_options
             )
-        except module.AuthenticationError as error:
+        except app_tokens.AuthenticationError as error:
             raise Unavailable(str(error)) from None
         self.identity_verified = False
 
+    def invalidate_app_token(self):
+        app_tokens.invalidate(self.token)
+        if self.use_app_auth:
+            self.token_expiry = 0
+        self.identity_verified = False
+
     def ensure_actor(self):
-        if self.token_expiry is not None and time.time() >= self.token_expiry - 60:
+        if self.token_expiry is not None and time.time() >= self.token_expiry - 300:
             self.refresh_app_token()
         if self.identity_verified:
             return
@@ -1007,6 +1009,10 @@ class GitHub:
         try:
             with self.opener.open(req, timeout=30) as response:
                 actor = json.loads(response.read())["data"]["viewer"]["login"]
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
+            raise Unavailable("Cannot verify automation identity; no write made") from None
         except (OSError, ValueError, KeyError, TypeError):
             raise Unavailable(
                 "Cannot verify automation identity; no write made"
@@ -1056,6 +1062,8 @@ class GitHub:
             with self.opener.open(req, timeout=30) as response:
                 value = json.loads(response.read())
         except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
             if method != "GET" and exc.code >= 500:
                 raise Uncertain("GitHub write outcome unknown") from None
             raise Unavailable("GitHub request rejected") from None
@@ -1126,6 +1134,15 @@ class GitHub:
             f"/issues/{number}/assignees",
             {"assignees": [self.cfg["actors"]["owner"]]},
         )
+
+
+def app_client(cfg, role="runner", **token_options):
+    token, expiry = app_tokens.get(cfg, role, **token_options)
+    client = GitHub(cfg, role, token=token)
+    client.use_app_auth = True
+    client.token_options = token_options
+    client.token_expiry = expiry
+    return client
 
 
 def state_identity(cfg):

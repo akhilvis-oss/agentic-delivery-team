@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 import urllib.parse
 
@@ -107,12 +108,8 @@ def client_for(core, cfg, config=None):
         def smoke_statuses(self, head):
             # Delivery tokens deliberately lack commit-status authority. Reuse
             # the harness's isolated status-only scope for this advisory read.
-            spec = importlib.util.spec_from_file_location(
-                "_smoke_notice_tokens", Path(__file__).resolve().parents[1] / "lifecycle/app_tokens.py")
-            tokens = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(tokens)
-            token, _ = tokens.mint(cfg, "runner", status_only=True)
-            return core.GitHub(cfg, token=token).pages(f"/commits/{head}/statuses")
+            return core.app_client(cfg, status_only=True).pages(
+                f"/commits/{head}/statuses")
 
         def write_allowed(self, method, path):
             return super().write_allowed(method, path) or (
@@ -154,6 +151,10 @@ def client_for(core, cfg, config=None):
                 if result.get("errors") or not result.get("data", {}).get(mutation):
                     raise core.Unavailable("Auto-merge rejected")
                 return True
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
+                    self.invalidate_app_token()
+                raise core.Uncertain("Auto-merge outcome unknown") from None
             except (OSError, ValueError):
                 raise core.Uncertain("Auto-merge outcome unknown") from None
 
@@ -171,12 +172,16 @@ def client_for(core, cfg, config=None):
                            GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
                            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
                            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + auth)
-                subprocess.run(
-                    ["git", "-C", str(checkout), "-c", "credential.helper=",
-                     "-c", "core.hooksPath=" + os.devnull, "-c", "http.followRedirects=false",
-                     "push", "--porcelain", "https://github.com/" + cfg["repository"] + ".git",
-                     head + ":refs/heads/" + config["branch"]],
-                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(checkout), "-c", "credential.helper=",
+                         "-c", "core.hooksPath=" + os.devnull, "-c", "http.followRedirects=false",
+                         "push", "--porcelain", "https://github.com/" + cfg["repository"] + ".git",
+                         head + ":refs/heads/" + config["branch"]],
+                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
+                except (OSError, subprocess.SubprocessError):
+                    self.invalidate_app_token()
+                    raise
 
     return (DeliveryGitHub(cfg, integration_enabled=True) if integration_enabled
             else DeliveryGitHub(cfg))

@@ -176,7 +176,7 @@ def fetch_target(cfg):
         template = core.read(cfg["runner_config"])
         template["lifecycle_config"] = cfg["config_path"]
         enabled = runner_module().integration_api().options(template) is not None
-        token, _ = app_tokens.mint(
+        token, _ = app_tokens.get(
             cfg, "runner", fetch_enabled=True, integration_enabled=enabled
         )
         with tempfile.TemporaryDirectory(prefix="fetch-", dir=cfg["state_dir"]) as scratch:
@@ -193,13 +193,18 @@ def fetch_target(cfg):
                         GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
                         GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + auth,
                     )
-                return subprocess.run(
-                    ["git", "-C", scratch, "-c", "credential.helper=",
-                     "-c", "core.hooksPath=" + os.devnull,
-                     "-c", "http.followRedirects=false", *args],
-                    env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    check=True, timeout=120,
-                ).stdout
+                try:
+                    return subprocess.run(
+                        ["git", "-C", scratch, "-c", "credential.helper=",
+                         "-c", "core.hooksPath=" + os.devnull,
+                         "-c", "http.followRedirects=false", *args],
+                        env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        check=True, timeout=120,
+                    ).stdout
+                except (OSError, subprocess.SubprocessError):
+                    if authenticated:
+                        app_tokens.invalidate(token)
+                    raise
 
             isolated("init", "--bare", "--template=")
             isolated("fetch", "--no-tags", "--no-recurse-submodules",
