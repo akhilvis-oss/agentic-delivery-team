@@ -63,9 +63,9 @@ M1 design note section 1 replaces today's 13 statuses with 7:
 
 ### F. One function writes status labels
 
-- **`set_status(issue, target)`** removes every other `status:*` label and adds the target, in one `PUT`.
-- **Every other status write goes,** including the guard's direct `DELETE` calls, which become calls to it. A test fails if another call site writes a `status:*` label.
-- **The smoke harness's own scratch-issue labels are the one exception.** It acts as the owner there, and the exception is named in the test.
+- **`set_status(issue, target)`** adds the target, then removes each other `status:*` label it read. `remove_status` removes one named label. A single `PUT` would lose a label added after its read, so it isn't used. If a guard run sees the brief two-label moment, it restores the same target with one extra notice, which is accepted (#221).
+- **Every other status write goes,** including the guard's direct `DELETE` calls, which become calls to these. A test fails if another call site writes a `status:*` label. `set_state` stays as a wrapper.
+- **The exceptions,** named in the test: the smoke harness's own scratch-issue labels, and creating an issue with its first label (`followups`).
 
 ### G. Migration
 
@@ -87,10 +87,10 @@ M1 design note section 1 replaces today's 13 statuses with 7:
 | Story | Contains | Delivery | Weight (of #180's 15%) |
 | --- | --- | --- | --- |
 | **#180a, one status function** | F only, with today's 13 names. No visible change. | Codex may merge (rule 9) | 4% |
-| **#180b, read-side mapping and versioned rules** | A and B, accepting both versions for now. No label changes yet. | Owner-delivered (`.github/` gains the version field) | 4% |
+| **#180b, read-side mapping and versioned rules** | A and B. Version 1 only; a missing field means 1. No label changes yet. | Codex may merge (no `.github/` change) | 4% |
 | **#180c, seven statuses** | C, D, E and G, the docs, and dropping version 1 | Owner-delivered | 7% |
 
-#180a can start as soon as #203 merges. #180b and #180c follow, and each needs the owner's merge.
+These are filed as #221 (after #202), #222 (after #203) and #180, which is last. Only #180 needs the owner's merge.
 
 ## Questions for the owner
 
