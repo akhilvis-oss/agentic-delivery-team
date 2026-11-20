@@ -125,9 +125,107 @@ def ensure_worktree(cfg, claim):
         raise core.Unavailable("Managed branch changed")
 
 
-def continuation_commit(body):
-    matches = re.findall(r"^### Continue from\nCommit: ([0-9a-f]{40})$", body.replace("\r\n", "\n"), re.MULTILINE)
-    return matches[0] if len(matches) == 1 else None
+def restart_fresh(body):
+    """An exact directive in the Owner decisions section starts over."""
+    body = body.replace("\r\n", "\n")
+    section = runner_module().integration_api().story_section(body, "Owner decisions", trim=False)
+    return section is not None and "Restart: fresh" in section.splitlines()
+
+
+def continuation(cfg, client, claim, claims_dir, *, prepare=False):
+    """One continuation path; prepare only after the target has been fetched."""
+    if prepare:
+        if "delivery_resume_checked" not in claim:
+            source, reason = delivery_candidate(
+                cfg, claim, claim["continuation_source"],
+                core.records(cfg, client.comments(claim["issue"]), claim["issue"]))
+            claim.update(delivery_resume_checked=True, delivery_source=source,
+                         delivery_resume_fallback=reason)
+            core.save(claims_dir / (claim["job"] + ".json"), claim)
+        return prepare_continuation(cfg, claim)
+    history = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+    previous = [core.read(p) for p in claims_dir.glob("*.json")]
+    previous = [c for c in previous if c["issue"] == claim["issue"]
+                and c["event"] < claim["event"]]
+    dispatched = {r["job"] for r in history if r["to"] == "dispatched"
+                  and core.has_role(cfg, r["actor"], "runner")}
+    earlier = [c for c in previous if c["job"] in dispatched
+               or c.get("was_dispatched") or c.get("config")
+               or c["stage"] in {"dispatched", "enqueued"}]
+    last = max(earlier, key=lambda c: c["event"], default=None)
+    fresh = (not claim["primary"] and restart_fresh(claim["task"])
+             and (last is None or not restart_fresh(last["task"])))
+    claim["restart_fresh"] = fresh
+    boundary = max((c["event"] for c in earlier if c.get("restart_fresh")), default=0)
+    local = [j for j in jobs(cfg) if j.get("github_number") == claim["issue"]]
+    # Retire the previous delivery loop before either a restart or budget stop.
+    for old in local:
+        number = old.get("integration", {}).get("pr")
+        if number and client.request("GET", f"/pulls/{number}").get("state") == "open":
+            old["delivery_retired"] = True
+            job_path = (Path(cfg["state_dir"]) / "jobs" / old["id"]
+                        / "runner-state" / "tasks" / (old["id"] + ".json"))
+            core.save(job_path, old)
+            claim["continuation_error"] = "pr_open_reapproval"
+            return
+    if fresh:
+        return
+    saved = [j for j in local if j.get("head_commit")
+             and (j.get("continuation") or j["status"] in
+                  {"ready_for_integration", "needs_primary_review"})
+             and j.get("assignment", {}).get("lifecycle", {}).get("event", 0) >= boundary]
+    if not saved:
+        return False if claim["primary"] else None
+    source = max(saved, key=lambda j: (j.get("created_at", ""),
+                                      j["assignment"]["lifecycle"]["event"], j["id"]))
+    head = source["head_commit"]
+    targets = {"needs_owner": "needs-owner", "blocked": "blocked",
+               "failed": "blocked", "needs_primary_review": "needs-primary"}
+
+    def matches(record):
+        if (record["job"] != source["id"] or record["commit"] != head
+                or not core.has_role(cfg, record["actor"], "runner")):
+            return False
+        if source["status"] == "ready_for_integration":
+            return record["kind"] == "review" and record["outcome"] == "ready_for_integration"
+        return (record["to"] == targets.get(source["status"])
+                and (source["status"] == "needs_primary_review" or record.get("continuation")))
+
+    valid = (any(matches(r) for r in history)
+             and source.get("blocked_reason", {}).get("reason_code") != "continuation_not_applied"
+             and not any(r.get("reason") in {"history_changed", "concurrent_change"}
+                         for r in source.get("commit_refusals", []))
+             and not any(r.get("reason") == "reviewed_worktree_changed"
+                         or r.get("source_unchanged") is False
+                         for r in source.get("verification_runs", [])))
+    try:
+        _, checked = source_work(cfg, source["id"])
+        valid = (valid and checked == source and isinstance(head, str)
+                 and re.fullmatch(r"[0-9a-f]{40}", head) is not None)
+        if claim["primary"]:
+            valid = valid and source["assignment"]["task_text"] == claim["task"]
+        if valid:
+            git(cfg, "cat-file", "-e", head + "^{commit}")
+    except (ValueError, OSError, KeyError, core.Unavailable):
+        valid = False
+    if not valid:
+        claim["continuation_error"] = "continuation_commit_unrecorded"
+        return
+    count = sum(1 for c in previous if c.get("continued_from")
+                and not c.get("primary") and c["event"] >= boundary)
+    if not claim["primary"] and count >= 2:
+        claim["continuation_error"] = "continuation_limit"
+        return
+    reason = next((r["reason"] for r in reversed(history) if matches(r) and r["reason"]),
+                  "delivery_disabled")
+    claim.update(start_commit=head, continued_from=head, continuation_source=source["id"],
+                 previous_stop_reason=reason)
+    if claim["primary"]:
+        claim.update(primary_context=source.get("review_history", []),
+                     source_job=source["id"],
+                     source_event=source["assignment"]["lifecycle"]["event"])
+    else:
+        claim["continuation_number"] = count + 1
 
 
 def stop_continuation(cfg, client, path, claim, reason, files=None):
@@ -265,19 +363,12 @@ def source_work(cfg, job_id):
 
 def delivery_template(cfg, claim):
     template = core.read(cfg["primary_runner_config"] if claim["primary"] else cfg["runner_config"])
+    main = core.read(cfg["runner_config"])
     template["lifecycle_config"] = cfg["config_path"]
-    # Service dispatch requires an explicit choice, including on Primary templates.
-    if "integration" not in template:
+    if "integration" not in main:
         raise ValueError("Explicit delivery mode required")
+    template["integration"] = main["integration"]
     runner_module().integration_api().options(template)
-    if claim["primary"]:
-        source_config, source = source_work(cfg, claim["source_job"])
-        binding = source["assignment"]["lifecycle"]
-        if (binding["issue"] != claim["issue"] or binding["event"] != claim["source_event"]
-                or source["assignment"]["task_text"] != claim["task"]
-                or source.get("head_commit") != claim["start_commit"]):
-            raise ValueError("Primary source binding changed")
-        template["integration"] = source_config.get("integration", {"enabled": False})
     if "delivery_settings" in claim:
         template["integration"] = claim["delivery_settings"]
     runner_module().integration_api().options(template)
@@ -317,12 +408,30 @@ def delivery_candidate(cfg, claim, source_id, history):
         raise ValueError("Foreign delivery source")
     if source.get("integration", {}).get("stage", "new") != "new":
         return None, "publication_already_started"
-    # Only the continuation block may change when reusing the old review.
+    # Only continuation metadata may change when reusing the old review.
     def scope(text):
         text = re.sub(r"(?m)^### Continue from\nCommit: [0-9a-f]{40}$", "",
                       text.replace("\r\n", "\n"))
         # The story form replaces its optional empty answer when the owner
         # pastes the block; that wrapper is continuation metadata too.
+        # Only a directive within Owner decisions is continuation metadata.
+        owner = None
+        seen_owner = False
+        kept = []
+        for line in text.splitlines(keepends=True):
+            heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t]*\n?$", line)
+            if heading:
+                level = len(heading[1])
+                if owner is not None and level <= owner:
+                    owner = None
+                if not seen_owner and level in {2, 3} and heading[2].lower() == "owner decisions":
+                    owner = level
+                    seen_owner = True
+            elif re.fullmatch(r"---[ \t]*\n?", line):
+                owner = None
+            if owner is None or line.rstrip("\n") != "Restart: fresh":
+                kept.append(line)
+        text = "".join(kept)
         return re.sub(r"(?m)^### Saved work \(optional\)\n\n*(?:_No response_(?:\n|$))?\n*",
                       "", text).strip()
     if scope(source["assignment"]["task_text"]) != scope(claim["task"]):
@@ -742,27 +851,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             if not action:
                 continue
             event, primary = action
-            source_job = None
             if primary:
-                history = core.records(
-                    cfg, client.comments(issue["number"]), issue["number"]
-                )
+                history = core.records(cfg, client.comments(issue["number"]), issue["number"])
                 if not core.can_start(issue, history):
-                    continue
-                escalated = [
-                    r for r in history if r["to"] == "needs-primary" and r["commit"]
-                ]
-                source_job = next(
-                    (
-                        j
-                        for j in jobs(cfg)
-                        if escalated
-                        and j["id"] == escalated[-1]["job"]
-                        and j.get("head_commit") == escalated[-1]["commit"]
-                    ),
-                    None,
-                )
-                if source_job is None:
                     continue
             job = f"issue-{issue['number']}-event-{event['id']}"
             path = claims_dir / (job + ".json")
@@ -780,48 +871,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 branch="runner/" + job,
                 worktree=str(Path(cfg["worktree_root"]) / job),
             )
-            if source_job:
-                claim.update(
-                    start_commit=source_job["head_commit"],
-                    review_base=source_job.get(
-                        "review_base", source_job["base_commit"]
-                    ),
-                    primary_context=source_job.get("review_history", []),
-                    source_job=source_job["id"], source_event=source_job["assignment"]["lifecycle"]["event"],
-                )
-            named = None if primary else continuation_commit(claim["task"])
-            if named:
-                history = core.records(cfg, client.comments(issue["number"]), issue["number"])
-                if not core.can_start(issue, history):
-                    continue
-                local_jobs = {j["id"]: j for j in jobs(cfg)}
-                saved = next((r for r in reversed(history)
-                              if r["commit"] == named
-                              and ((r.get("continuation", False) and r["to"] in {"needs-owner", "blocked"})
-                                   or (r["kind"] == "review" and r["outcome"] == "ready_for_integration"))
-                              and core.has_role(cfg, r["actor"], "runner")
-                              and local_jobs.get(r["job"], {}).get("status") in {
-                                  "needs_owner", "blocked", "ready_for_integration"}
-                              and local_jobs[r["job"]].get("blocked_reason", {}).get("reason_code")
-                              != "continuation_not_applied"
-                              and not any(refusal.get("reason") in {"history_changed", "concurrent_change"}
-                                          for refusal in local_jobs[r["job"]].get("commit_refusals", []))
-                              and not any(run.get("reason") == "reviewed_worktree_changed"
-                                          or run.get("source_unchanged") is False
-                                          for run in local_jobs[r["job"]].get("verification_runs", []))
-                              and local_jobs[r["job"]].get("head_commit") == named), None)
-                count = sum(1 for p in claims_dir.glob("*.json")
-                            if (c := core.read(p))["issue"] == issue["number"]
-                            and c.get("continued_from"))
-                if saved:
-                    claim.update(start_commit=named, continued_from=named,
-                                 continuation_number=count + 1,
-                                 previous_stop_reason=saved["reason"] or "delivery_disabled",
-                                 continuation_source=saved["job"])
-                else:
-                    claim["continuation_error"] = "continuation_commit_unrecorded"
-                if count >= 2:
-                    claim["continuation_error"] = "continuation_limit"
+            if continuation(cfg, client, claim, claims_dir) is False:
+                continue
             core.create(path, claim)
         processed = []
         runner = runner_module()
@@ -852,9 +903,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     completed_job = runner.read(
                         Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
                     )
-                    if (completed_job.get("stop_saving")
+                    if (not completed_job.get("delivery_retired") and (completed_job.get("stop_saving")
                             or completed_job["status"] == "ready_for_integration"
-                            or runner.integration_api().options(completed_config)):
+                            or runner.integration_api().options(completed_config))):
                         runner.run_once(completed_config, task_id=claim["job"])
                 events = client.events(claim["issue"])
                 canonical, _ = core.canonical_state(cfg, events)
@@ -872,6 +923,10 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     / (claim["job"] + ".json")
                 )
                 previous = runner.read(recovery_path)
+                if previous.get("delivery_retired"):
+                    claim.update(stage="finished", head=previous.get("head_commit"))
+                    core.save(path, claim)
+                    continue
                 if previous["status"] in runner.TERMINAL:
                     # Completion is durable in the job before the claim. Recover
                     # that boundary without replaying work or re-admitting it.
@@ -925,14 +980,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                             continue
                         claim.pop("error", None)
                         core.save(path, claim)
-                    if "delivery_resume_checked" not in claim:
-                        source, reason = delivery_candidate(
-                            cfg, claim, claim["continuation_source"],
-                            core.records(cfg, client.comments(claim["issue"]), claim["issue"]))
-                        claim.update(delivery_resume_checked=True, delivery_source=source,
-                                     delivery_resume_fallback=reason)
-                        core.save(path, claim)
-                    files = prepare_continuation(cfg, claim)
+                    files = continuation(cfg, client, claim, claims_dir, prepare=True)
                     if files:
                         stop_continuation(cfg, client, path, claim, "continuation_conflict", files)
                         continue
@@ -953,11 +1001,17 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     "dispatched",
                     event=claim["event"],
                 )
-                outbox = core.queue(cfg, record)
+                notice = {}
+                if "### Continue from" in claim["task"]:
+                    record.update({"from": core.state(fresh), "actor": cfg["actors"]["runner"]})
+                    notice["public_body"] = (core.record_body(record)
+                        + "\nContinuing from the latest saved work; the pasted block is ignored.")
+                outbox = core.queue(cfg, record, **notice)
                 flush_outbox(cfg, client)
                 if core.read(outbox)["status"] != "synced":
                     continue
                 claim["stage"] = "dispatched"
+                claim["was_dispatched"] = True
                 core.save(path, claim)
                 fresh = client.issue(claim["issue"])
             if claim["stage"] in {"dispatched", "enqueued"}:
@@ -1032,7 +1086,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         continuation=({"commit": claim["continued_from"],
                                        "number": claim["continuation_number"],
                                        "reason": claim["previous_stop_reason"]}
-                                      if claim.get("continued_from") else None),
+                                      if claim.get("continued_from") and not claim["primary"] else None),
                     )
                 else:
                     existing = runner.read(job_path)

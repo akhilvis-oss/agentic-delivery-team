@@ -66,6 +66,7 @@ Each code belongs to exactly one kind.
 | Needs your decision | `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
 | Needs your decision | `owner_requested_stop` | A permitted actor stopped the task. Record any decision under **Owner decisions**, resolve the stop and re-approve. |
 | Needs your decision | `continuation_limit` | The story reached its two-continuation limit. Restart fresh or split the story, then re-approve. |
+| Needs your decision | `pr_open_reapproval` | Close the open PR and re-approve to rebuild, or merge it and add `status:merged` to finish. |
 | Needs your merge | `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
 | Waiting on the system | `worker_*_unavailable` | A required tool, dependency or environment was unavailable. Restore the prerequisite if needed, then re-approve to retry. |
 | Needs a fix | `checks_worktree_changed` | The worktree changed while the required checks ran. Owner: re-approve to build the story again. Saved work from this integrity failure cannot be continued. |
@@ -85,33 +86,39 @@ Each code belongs to exactly one kind.
 
 ### Continue saved work or restart fresh
 
-**Owner.** After resolving a stop, paste the runner's block into the story exactly:
+Re-approving continues the newest local saved work for this story, merged with
+the latest target branch. No commit ID is needed. Jobs without saved work are
+skipped; an integrity failure in the newest saved job stops with
+`continuation_commit_unrecorded`, never silently starts fresh. Saved work includes
+runner-saved stops, reviewed heads and heads awaiting automatic Primary review.
+There are at most two counted continuations per story, each with one correction
+round. Automatic Primary continuation uses the same path with no correction
+round and does not count against that limit. Delivery settings always come from
+the main runner template.
 
-```text
-### Continue from
-Commit: <the full 40-character lowercase commit ID from the stop comment>
-```
+To start over, add exactly `Restart: fresh` on its own line under `## Owner decisions`
+or `### Owner decisions`, then re-approve. It takes effect only when absent from
+the last dispatched approval's text and resets the count. Remove the line before
+a later re-approval; editing a story during a run stops it. Claims stopped before
+dispatch do not become the comparison text.
 
-Replace the placeholder with the saved commit, then re-approve the complete story.
-In the story form's **Saved work (optional)** field, paste both lines, including
-the heading. When editing an existing issue body, insert the same complete block.
-Keep the two lines adjacent: GitHub inserts a blank line after form labels, so
-relying on a form label as the heading and pasting only the Commit line starts fresh.
-Only runner-recorded saved work from `needs-owner` or `blocked` can continue;
-integrity failures cannot. The service fetches the target branch and merges it
-into the saved work before starting the builder. Review covers the full change
-from that fetched target. The acceptance criteria take priority over pasted
-findings. Each continuation permits a build and review plus one correction and
-fresh review. A story permits at most two continuations, counted from its claims.
+If the reviewed saved head is current against the fetched target and the approved
+scope is unchanged, the service only delivers it. Legacy continuation blocks,
+the old Saved work field and the restart directive are ignored for that scope
+comparison. A legacy block never selects a commit; the dispatched notice explains
+that the latest saved work is used.
 
-To restart fresh, remove the entire **Continue from** section and re-approve.
-Malformed blocks are ignored and start fresh. `continuation_commit_unrecorded`
-means the commit could not be verified as eligible saved work on this issue.
-`continuation_conflict` lists repository-relative conflicting files and stops
-before any builder runs; arrange resolution or restart fresh.
-`continuation_limit` means restart fresh or split the story.
-`continuation_not_applied` means the saved commit is missing from the built head;
-ask the operator to reconcile history before re-approving.
+With an open PR, re-approval or restart stops with `pr_open_reapproval` (Needs your
+decision). Close the PR and re-approve to rebuild, or merge it and add
+`status:merged` to finish (#184). The old delivery loop ends permanently without
+another notice; the PR and auto-merge setting stay as they are. A merge may first
+produce a public "blocked → merged was rejected" comment and one failing lifecycle
+check; adding `status:merged` finishes the story. Auto-merge may still merge it
+by itself.
+
+`continuation_conflict` stops before a builder starts; arrange resolution or restart.
+`continuation_not_applied` means the saved head is missing from the built history;
+ask the operator to reconcile it before re-approving.
 
 ### Approval could not be attested
 
