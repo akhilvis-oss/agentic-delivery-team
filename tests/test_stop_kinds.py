@@ -27,7 +27,7 @@ FIX = {
     "assignment_preflight", "worker_reported_blocked", "reviewer_reported_blocked",
     "execution_failed", "publication_failed", "publication_uncertain", "stale_head",
     "gate_category_higher", "required_check_failed", "merge_conditions_missing",
-    "auto_merge_disable_uncertain",
+    "auto_merge_disable_uncertain", "unexpected_error",
 }
 CHECKS = ("preflight", "build", "story_tests", "runner_checks", "prerequisite")
 WAITING = {f"worker_{check}_unavailable" for check in CHECKS}
@@ -47,7 +47,7 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
         "Needs your decision": 12, "Needs your merge": 1,
-        "Waiting on the system": 5, "Needs a fix": 80,
+        "Waiting on the system": 5, "Needs a fix": 81,
     }
 
 

@@ -252,7 +252,18 @@ After the first successful poll and stand-up following failures, the existing
 `agentic-last-poll-v1` status comment adds one line: “Polls first failed: …;
 recovered: …; failed polls: N; exception class: Unavailable.” Times are UTC;
 the class can also be `Uncertain`. The next successful cycle removes the line.
-Other exceptions propagate and exit non-zero. Before exiting, the loop writes
+Unexpected errors while handling a story are isolated to that story. Active work
+stops at `blocked` with `unexpected_error`, and its claim is finished permanently;
+re-approval creates a new job rather than replaying the stopped job. The public
+notice names only the exception class and originating framework function, never
+the exception message. A story at `pr-open`, a finished or suspended claim, or an
+approval whose event is not yet known gets a private reconciliation record instead.
+`lifecycle status` lists these records under “Waiting for reconciliation”. Their
+issues are retried even when incremental listings omit them, and records clear
+only after the issue and all its claims are handled without error. Ambiguous
+status labels are silently skipped. GitHub unavailability still pauses polling;
+durable state integrity mismatches and errors outside a story remain service-wide.
+Those service-wide exceptions propagate and exit non-zero. Before exiting, the loop writes
 only the exception class and originating framework function to private
 `service-error.json`. On the next start, after a successful cycle, the same comment
 adds “Service restarted after … in ….” and removes the private record. This line
@@ -261,7 +272,7 @@ messages, request paths, URLs or tokens. Failed notice publication retains the
 private receipts for retry; these notices do not resolve ambiguous writes.
 
 Run `serve` under the supplied launchd template with `KeepAlive` (see below), so
-unexpected errors restart automatically. Retrying temporary GitHub failures does
+service-wide errors restart automatically. Retrying temporary GitHub failures does
 not replace process supervision. Polls skipped by the interval or lock do not
 consume recovery receipts or count as successful recovery.
 
@@ -397,3 +408,9 @@ are not queried for PRs again;
 issue updates or a new stop allow a fresh scan. Read failures remain retryable,
 and a verified candidate is retained before writes for recovery without rescanning.
 Cached candidates still require fresh merge-authority verification before writes.
+
+App installation tokens are reused in process memory per repository, App, role
+and permission set until five minutes before expiry. Tokens are never cached on
+disk or shared across processes. A 401, or an authenticated git failure, invalidates
+the rejected token; the affected client refreshes on its next request. All token
+consumers, including standalone runner imports, share the same locked cache.

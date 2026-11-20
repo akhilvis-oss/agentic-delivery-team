@@ -64,7 +64,7 @@ def transport(monkeypatch, cfg):
         return 'synthetic-status-token', 999
 
     monkeypatch.setattr(core, 'GitHub', client)
-    monkeypatch.setattr(app_tokens, 'mint', mint)
+    monkeypatch.setattr(app_tokens, 'get', mint)
     return remote, roles
 
 
@@ -429,7 +429,7 @@ def test_upgrade_check_mint_error_codes(tmp_path, monkeypatch, message, exit_cod
     def mint(*a):
         raise app_tokens.AuthenticationError(message)
 
-    monkeypatch.setattr(app_tokens, 'mint', mint)
+    monkeypatch.setattr(app_tokens, 'get', mint)
     assert upgrade.check(Path(cfg['config_path'])) == exit_code
 
 
@@ -438,7 +438,7 @@ def test_upgrade_check_mints_all_roles_and_never_runs_agent(tmp_path, monkeypatc
     cfg['app_auth'] = {'runner': {}, 'product': {}}
     monkeypatch.setattr(core, 'load_config', lambda p: cfg)
     roles = []
-    monkeypatch.setattr(app_tokens, 'mint', lambda cfg, role: roles.append(role))
+    monkeypatch.setattr(app_tokens, 'get', lambda cfg, role: roles.append(role))
     monkeypatch.setattr(service, 'poll', lambda *a, **kw: pytest.fail('check dispatched'))
     assert upgrade.check(Path(cfg['config_path'])) == 0
     assert roles == ['runner', 'product']
@@ -505,7 +505,7 @@ def test_temporary_upgrade_failures_leave_poll_available(tmp_path, monkeypatch, 
         raise OSError('synthetic temporary failure')
 
     if failure_stage == 'mint':
-        monkeypatch.setattr(app_tokens, 'mint', fail)
+        monkeypatch.setattr(app_tokens, 'get', fail)
     elif failure_stage == 'export':
         monkeypatch.setattr(upgrade.smoke, 'export_candidate', fail)
     else:

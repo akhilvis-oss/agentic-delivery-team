@@ -15,3 +15,14 @@ def cancel_upgrade_timer():
         if timer.ident is not None:
             timer.join(timeout=2)
         upgrade._pending_timer = None
+
+
+@pytest.fixture(autouse=True)
+def clear_app_token_cache():
+    tokens = sys.modules.get("lifecycle.app_tokens")
+    if tokens is not None:
+        tokens.clear_cache()
+    yield
+    tokens = sys.modules.get("lifecycle.app_tokens")
+    if tokens is not None:
+        tokens.clear_cache()
