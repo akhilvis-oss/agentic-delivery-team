@@ -605,7 +605,20 @@ def record_refusal(config, job_path, job, refusal):
     save_job(config, job_path, job)
 
 
-def public_receipt(receipt):
+def safe_receipt_question(config, question):
+    # Context comes from the operator, never from the serialized receipt. An
+    # omitted/unavailable policy must not fall back to standalone identity rules.
+    if config is None:
+        return False
+    try:
+        policy = (lifecycle_api().load_config(config["lifecycle_config"])
+                  if config.get("lifecycle_config") else {"identity_roles": {}})
+        return lifecycle_api().safe_question(policy, question)
+    except Exception:
+        return False
+
+
+def public_receipt(receipt, config=None):
     public = {key: receipt[key] for key in ("status", "base_commit", "head_commit", "summary", "timestamp")}
     commits = [{"commit_sha": c["commit_sha"], "committed_by": "runner"}
                for c in receipt.get("runner_commits", []) if c["state"] == "committed"]
@@ -615,7 +628,7 @@ def public_receipt(receipt):
         public["blocked_reason"] = public_block_reason(receipt.get("blocked_reason"))
     question = receipt.get("readiness_question")
     if (public.get("blocked_reason", {}).get("reason_code") == "readiness_question"
-            and lifecycle_api().safe_question({"identity_roles": {}}, question)):
+            and safe_receipt_question(config, question)):
         public["readiness_question"] = question
     if receipt.get("readiness_sessions") and receipt["status"] in TERMINAL - {"ready_for_integration"}:
         public["readiness_sessions"] = 1
@@ -1410,6 +1423,9 @@ def read_answer(path):
 
 
 class GitHubClient:
+    def __init__(self, config=None):
+        self.config = config
+
     def post(self, repository, number, receipt):
         # Only fixed runner summaries are eligible, never agent-produced summaries.
         body = (f"Task receipt: {receipt['status']}\nCommits: {receipt['base_commit']}.."
@@ -1420,7 +1436,7 @@ class GitHubClient:
             body = lifecycle_api().stop_notice(reason["reason_code"], body)
         question = receipt.get("readiness_question")
         if (receipt.get("blocked_reason", {}).get("reason_code") == "readiness_question"
-                and lifecycle_api().safe_question({"identity_roles": {}}, question)):
+                and safe_receipt_question(self.config, question)):
             question = lifecycle_api().inert_mentions(question)
             body += "\n" + "\n".join("> " + line for line in question.splitlines())
         if receipt.get("readiness_sessions") and receipt["status"] in TERMINAL - {"ready_for_integration"}:
@@ -1477,9 +1493,9 @@ def save_job(config, path, job):
     if (job.get("readiness_stopped")
             and receipt.get("blocked_reason", {}).get("reason_code") == "readiness_question"):
         question = "\n".join(job["readiness"]["questions"])
-        # Standalone receipts have no lifecycle identities configured. Reuse the
-        # public-question policy unchanged, checking the aggregate before copying.
-        if lifecycle_api().safe_question({"identity_roles": {}}, question):
+        # Check the aggregate under the actual configured identity policy before
+        # copying any agent text into a receipt artifact.
+        if safe_receipt_question(config, question):
             receipt["readiness_question"] = question
     if job.get("readiness_sessions") and job["status"] in TERMINAL - {"ready_for_integration"}:
         receipt["readiness_sessions"] = 1
@@ -1503,8 +1519,9 @@ def publish_receipt(config, path, job, client=None):
     job["receipt_delivery"] = "attempted"
     save_job(config, path, job)
     try:
-        (client or GitHubClient()).post(options["repository"], job["github_number"],
-                                       public_receipt(read(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json")))
+        (client or GitHubClient(config)).post(
+            options["repository"], job["github_number"],
+            public_receipt(read(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json"), config))
         job["receipt_delivery"] = "posted"
     except Exception:
         job["receipt_delivery"] = "unconfirmed; inspect GitHub before any manual retry"

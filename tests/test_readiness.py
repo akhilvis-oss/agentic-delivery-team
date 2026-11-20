@@ -447,3 +447,130 @@ def test_standalone_receipts_disabled_adds_no_notice(setup, monkeypatch):
     _, _, posts, calls = capture_standalone_receipt(
         setup, monkeypatch, {"status": "questions", "questions": [QUESTION]}, enabled=False)
     assert posts == [] and calls == ["readiness"]
+
+
+@pytest.mark.parametrize("question,visible", [
+    ("May fixture-owner choose the expected behavior?", False),
+    ("Which criterion should take precedence?", True),
+], ids=["configured-actor", "safe-question"])
+def test_combined_receipts_obey_configured_question_policy(setup, tmp_path, monkeypatch,
+                                                          question, visible):
+    config_path, cfg = fixtures.populated_config(setup, tmp_path)
+    lifecycle_cfg = policy(tmp_path)
+    lifecycle_cfg["identity_roles"].pop(lifecycle_cfg["actors"]["owner"])
+    lifecycle_cfg["actors"]["owner"] = "fixture-owner"
+    lifecycle_cfg["identity_roles"]["fixture-owner"] = ["owner", "product"]
+    core.save(lifecycle_cfg["config_path"], lifecycle_cfg)
+    cfg.update(lifecycle_config=lifecycle_cfg["config_path"], readiness=True,
+               github_receipts=dict(enabled=True, repository="example/project"))
+    runner.save(config_path, cfg)
+    cfg = runner.load_config(config_path)
+    trusted = core.load_config(cfg["lifecycle_config"])
+    assert core.safe_question(trusted, question) is visible
+    _, state, path, job = setup
+    job.update(status="needs_owner", round=1, github_number=7, readiness_stopped=True,
+               readiness_sessions=1, readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    job["assignment"]["lifecycle"] = {"issue": 7, "event": 101}
+    records, posts = [], []
+
+    def sync(config_path, saved):
+        records.extend(core.job_records(core.load_config(config_path), saved))
+
+    def transport(argv, **kwargs):
+        assert argv == ["gh", "api", "--method", "POST",
+                        "repos/example/project/issues/7/comments", "--input", "-"]
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.lifecycle_api(), "sync_job", sync)
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    runner.save_job(cfg, path, job)
+    runner.publish_receipt(cfg, path, job)
+    assert job["receipt_delivery"] == "posted" and len(posts) == 1
+    assert (question in posts[0]) is visible
+    receipt = runner.read(state / "receipts/task.json")
+    assert (question in json.dumps(receipt)) is visible
+    assert "identity_roles" not in json.dumps(receipt)
+    assert posts[0].splitlines().count(COST_LINE) == 1
+    assert runner.read(path)["readiness"]["questions"] == [question]
+    assert all(r["reason"] == ("readiness_question" if visible else "question_withheld")
+               for r in records)
+    assert records and all(r["round"] == 1 for r in records)
+
+
+@pytest.mark.parametrize("context", ["configured", "missing", "unreadable", "invalid", "standalone"])
+@pytest.mark.parametrize("question", ["May owner-fixture choose the expected behavior?",
+                                     "Which criterion should take precedence?"])
+def test_each_receipt_boundary_requires_trusted_policy(setup, tmp_path, monkeypatch,
+                                                     context, question):
+    cfg, state, path, job = setup
+    lifecycle_cfg = policy(tmp_path)
+    cfg["lifecycle_config"] = lifecycle_cfg["config_path"]
+    job.update(status="needs_owner", round=1, readiness_stopped=True, readiness_sessions=1,
+               readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    if context == "standalone":
+        cfg.pop("lifecycle_config")
+    elif context == "unreadable":
+        Path(cfg["lifecycle_config"]).unlink()
+    elif context == "invalid":
+        core.save(cfg["lifecycle_config"], {"identity_roles": {}})
+    visible = (context == "standalone" or
+               context in {"configured", "missing"} and core.safe_question(lifecycle_cfg, question))
+    # Persisting a local job still works when its configured policy is unavailable.
+    runner.save_job(cfg, path, job)
+    receipt = runner.read(state / "receipts/task.json")
+    assert (question in json.dumps(receipt)) is visible
+    assert runner.read(path)["readiness"]["questions"] == [question]
+
+    # Re-inject raw agent text so neither downstream boundary can rely on a
+    # previous filter, a serialized approval marker, or a stale receipt.
+    receipt["readiness_question"] = question
+    receipt["identity_roles"] = {}
+    boundary_config = None if context == "missing" else cfg
+    expected = visible and context != "missing"
+    public = (runner.public_receipt(receipt) if boundary_config is None
+              else runner.public_receipt(receipt, boundary_config))
+    assert (question in json.dumps(public)) is expected
+    assert "identity_roles" not in public
+    posts = []
+
+    def transport(argv, **kwargs):
+        assert argv[0] == "gh"
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    client = runner.GitHubClient() if boundary_config is None else runner.GitHubClient(boundary_config)
+    client.post("example/project", 7, receipt)
+    assert len(posts) == 1 and (question in posts[0]) is expected
+    assert posts[0].splitlines().count(COST_LINE) == 1
+
+
+def test_receipt_boundaries_recheck_policy_after_persistence(setup, tmp_path, monkeypatch):
+    cfg, state, path, job = setup
+    lifecycle_cfg = policy(tmp_path)
+    cfg["lifecycle_config"] = lifecycle_cfg["config_path"]
+    question = "May fixture-owner choose the expected behavior?"
+    job.update(status="needs_owner", readiness_stopped=True,
+               readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    runner.save_job(cfg, path, job)
+    receipt = runner.read(state / "receipts/task.json")
+    assert receipt["readiness_question"] == question
+    client = runner.GitHubClient(cfg)
+    lifecycle_cfg["identity_roles"]["fixture-owner"] = ["product"]
+    core.save(cfg["lifecycle_config"], lifecycle_cfg)
+    assert not core.safe_question(core.load_config(cfg["lifecycle_config"]), question)
+    assert "readiness_question" not in runner.public_receipt(receipt, cfg)
+    posts = []
+
+    def transport(argv, **kwargs):
+        assert argv[0] == "gh"
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    client.post("example/project", 7, receipt)
+    assert len(posts) == 1 and question not in posts[0]
