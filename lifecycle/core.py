@@ -799,6 +799,9 @@ def records(cfg, comments, expected_issue=None):
             continue
         try:
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if (item.get("job") == "guard" and item.get("kind") == "guard"
+                    and item.get("reason") == "invalid_status_change"):
+                continue
             if type(item["version"]) is not int or item["version"] not in SUPPORTED_RECORD_VERSIONS:
                 continue
             created = comment.get("created_at")
@@ -1939,6 +1942,33 @@ def _finish_by_owner(cfg, client, number, finish):
     return True
 
 
+def restoration_noticed(cfg, comments, number, event, target):
+    """Recognize only an unedited workflow notice's exact raw restoration block.
+
+    Restoration records intentionally remain outside records(), including older
+    parseable shapes. Opening prose conveys no authority.
+    """
+    for comment in comments:
+        body = comment.get("body", "")
+        if (comment.get("user", {}).get("login") != cfg["actors"]["workflow"]
+                or body.count(PREFIX) != 1 or body.count(SUFFIX) != 1):
+            continue
+        try:
+            if stamp(comment["updated_at"]) != stamp(comment["created_at"]):
+                continue
+            item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if (item.get("job") == "guard" and item.get("kind") == "guard"
+                    and item.get("reason") == "invalid_status_change"
+                    and item.get("repository") == cfg["repository"]
+                    and type(item.get("issue")) is int and item["issue"] == number
+                    and type(item.get("event")) is int and item["event"] == int(event["id"])
+                    and item.get("to") == target):
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
 def guard_issue(cfg, client, number):
     events = client.events(number)
     canonical, event = canonical_state(cfg, events)
@@ -1993,6 +2023,8 @@ def guard_issue(cfg, client, number):
         noticed = actor == cfg["actors"]["runner"]
         comments = client.comments(number)  # Re-read after the producer's label write.
         remote = records(cfg, comments, number)
+        if actor == cfg["actors"]["workflow"]:
+            noticed = noticed or restoration_noticed(cfg, comments, number, event, canonical)
         noticed = noticed or any(r["job"] == "label-stop" and r["event"] == int(event["id"])
                                  and r["to"] == canonical for r in remote)
         if actor != cfg["actors"]["owner"] and actor in {
@@ -2020,20 +2052,24 @@ def guard_issue(cfg, client, number):
     if actual == canonical:
         return False
     client.set_state(number, canonical)
+    # Bind to the event just written, never to the rejected prior change.
+    restored_event = None
+    try:
+        written = [e for e in client.events(number) if e.get("event") == "labeled"
+                   and int(e["id"]) > max((int(old["id"]) for old in events), default=0)
+                   and e.get("actor", {}).get("login") == cfg["actors"]["workflow"]
+                   and e.get("label", {}).get("name") == "status:" + canonical]
+        if written:
+            restored_event = int(max(written, key=lambda e: int(e["id"]))["id"])
+    except Unavailable:
+        pass  # No identity is safer than claiming an unrelated event.
     record = public_record(
         cfg,
         number,
         "guard",
         0,
         canonical,
-        event=max(
-            (
-                int(e["id"])
-                for e in events
-                if e.get("label", {}).get("name", "").startswith("status:")
-            ),
-            default=None,
-        ),
+        event=restored_event,
         kind="guard",
         reason="invalid_status_change",
     )

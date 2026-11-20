@@ -168,7 +168,7 @@ Approving again continues from the saved work.
 - **Less code.** Each replaced path is deleted in the same PR that replaces it. Together, `lifecycle/` and `runner/` have fewer lines than at this note's base commit: 6,817 at `651068f`. They're measured together so that code doesn't just move between them.
 - **No pasted commit IDs.** No owner step anywhere in the docs asks for a commit ID.
 - **Finished stories stay finished.** Replaying the #75 and #110 reopen cases leaves both stories closed.
-- **Old records still parse.** Every record comment in this repository still parses.
+- **Old records still parse.** Every record comment in this repository still parses, except restoration records with job `guard`, kind `guard` and reason `invalid_status_change`: these remain informational and are explicitly excluded from state.
 - **The migration runs cleanly.** `migrate-labels --dry-run` completes on a copy of an adopting project's issues.
 - **Readiness catches #113.** Replaying #113's criteria through the readiness pass produces the builder's question before any build.
 - **Smoke test.** Every M1 PR passes the live smoke test on its own code before merge.

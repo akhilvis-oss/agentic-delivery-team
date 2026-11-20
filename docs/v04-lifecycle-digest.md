@@ -397,3 +397,20 @@ are not queried for PRs again;
 issue updates or a new stop allow a fresh scan. Read failures remain retryable,
 and a verified candidate is retained before writes for recovery without rescanning.
 Cached candidates still require fresh merge-authority verification before writes.
+
+### Stop notice identity
+
+Runner stop records are keyed by issue, lifecycle event and code; Product requests
+before approval keep their own record keys. Manual stops use the stop label event.
+Delivery evidence (PR link, reviewed head and optional smoke result) is rendered in
+the stop record's notice at send time. Approval rejections retain their existing
+notices. An owner stop is always noticed, even when the previous label remains.
+
+Restorations with exactly job `guard`, kind `guard` and reason
+`invalid_status_change` are excluded by `records()` from status, dispatch ownership
+and owner-merge evidence, including the 25 older parseable restoration records.
+`label-stop` records retain their existing behavior. A later guard recognizes a
+restoration only through an unedited workflow-authored data block naming the exact
+restored label event. If that event cannot be read back, no event is claimed and a
+later run may add one notice. Product and workflow stops without a matching recent
+record still receive a notice; a lost producer comment retried later may duplicate it.
