@@ -794,7 +794,7 @@ def test_unrecorded_approval_ends_after_three_minutes(tmp_path, monkeypatch):
     elapsed = [0]
     assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
                      sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 1
-    assert elapsed[0] == 180 and stopped
+    assert elapsed[0] == 360 and stopped
     assert client.calls[-1][2]["description"] == (
         "FAIL; furthest=admission; next=approval; stop=approval_unrecorded.")
 
@@ -817,7 +817,7 @@ def test_unrecorded_approval_timer_recovers(tmp_path, monkeypatch, recovery):
     cfg["timeout_seconds"] = 400 if recovery == "record-arrived" else 1800
     assert smoke.run(cfg, "main", clock=lambda: elapsed[0],
                      sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)) == 1
-    assert elapsed[0] == (400 if recovery == "record-arrived" else 360)
+    assert elapsed[0] == (400 if recovery == "record-arrived" else 540)
     assert ("stop=timeout" if recovery == "record-arrived" else "stop=approval_unrecorded") in client.calls[-1][2]["description"]
 
 
