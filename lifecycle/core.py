@@ -482,6 +482,7 @@ def public_record(
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
     "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
     "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then re-approve to publish the reviewed work.",
@@ -521,6 +522,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "readiness_question": "Needs your decision",
     "checks_worktree_changed": "Needs a fix",
     "owner_question": "Needs your decision",
     "question_withheld": "Needs your decision",
@@ -1526,6 +1528,7 @@ def job_records(cfg, job):
     mapping = {
         "queued": "dispatched",
         "running_worker": "in-progress",
+        "running_readiness": "in-progress",
         "running_reviewer": "in-review",
         "changes_requested": "changes-requested",
         "needs_primary_review": "needs-primary",
@@ -1604,8 +1607,17 @@ def job_records(cfg, job):
             else:
                 reason = "question_withheld"
         details = {}
+        if job.get("readiness_stopped") and reason == "readiness_question":
+            supplied = "\n".join(job["readiness"]["questions"])
+            if safe_question(cfg, supplied):
+                question, reason = supplied, "readiness_question"
+            else:
+                question, reason = None, "question_withheld"
         if worker.get("status") == "blocked" and isinstance(worker.get("summary"), str):
             details["summary"] = worker["summary"]
+        if job.get("readiness_sessions"):
+            details["summary"] = ("Readiness cost: one extra agent session for this approval."
+                                  + ("\n" + details["summary"] if details.get("summary") else ""))
         if review.get("findings"):
             details["findings"] = review["findings"]
         if job.get("commit_refusals"):
