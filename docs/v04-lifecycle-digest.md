@@ -534,4 +534,49 @@ dispatched stories continue normally.
 Status and stand-up show what each waiting story depends on, rather than calling
 it stale. Status may lag one poll. Unchanged waiting adds no dependency requests;
 an occupied slot's PR is read once per poll. Waiting does not block a service
-upgrade. Configurable parallel lanes and PR refresh are separate work.
+upgrade. Configurable parallel lanes are separate work; PR refresh follows the protocol below.
+
+## Refreshing a behind pull request
+
+The slot holder reuses the queue's authoritative PR snapshot. When GitHub says
+`behind`, the runner fetches the configured target and checks local ancestry. A
+refresh runs only in the job and branch that opened the PR: `pr-open` delivery
+waiting for checks/auto-merge, or that job's own `owner_merge_required` stop.
+Retired delivery, unrelated stops and a head moved by someone else are excluded.
+The original delivery settings stay hash-bound. Normal `admit_phase` and delivery
+authorization are unchanged; `admit_refresh` admits this separate operation.
+
+Every write has a persisted intent. Auto-merge is canceled and confirmed before
+the `--no-ff` merge. The runner records that merge, executes required tests once
+in an independent disposable copy, then starts a fresh read-only reviewer on
+**fetched target..merged head**. Release detection uses the same range. Output
+and session names are per refresh, with no builder, new claim, continuation
+count, round change or `running_*` job status.
+
+A runner review record is synced before push. The narrow `pr-open` informational
+record belongs to the newest dispatched job and, at publication, its owned local
+merge whose first parent is the PR head. Readers accept only that review shape
+and dispatch owner; downstream merge evidence still checks the live head. At
+`needs-owner` the review includes the PR and one line, "Refreshed and re-reviewed
+at <head>." The owner still merges control-critical work.
+
+After push, `edit_pr_body` alone may PATCH the bound PR, with a body-only payload
+and changes limited to Test evidence, Acceptance evidence and, for a
+control-critical PR, Acceptance and evidence matrix. All other sections remain
+byte-for-byte unchanged. The delivery client refuses PATCH on issue endpoints.
+A trusted gate may briefly fail between push and the description edit. The
+reviewed head, reviewer session and saved description become one durable local
+update; `pr-open` delivery returns to `created` to post the new Checker review
+and re-enable auto-merge only after exact-head merge evidence passes.
+
+A conflict is aborted locally; the runner verifies the original PR head, clean
+index and clean worktree before recording `continuation_conflict`. Failed tests
+(`required_check_failed`) and blocked/blocking review (`reviewer_reported_blocked`)
+discard the merge before the stop. Nothing is pushed and the body stays intact;
+auto-merge remains canceled. If abort/cleanup fails, or a refresh is interrupted,
+`publication_uncertain` requires owner reconciliation; it is never replayed,
+including after a partially completed push makes the PR no longer look behind.
+A newer owner stop or approval takes precedence over private refresh state; it
+is not overwritten by a refresh stop. Unexpected local edits during rollback
+are preserved for reconciliation. This refresh-local rollback does not change
+normal continuation conflict handling.

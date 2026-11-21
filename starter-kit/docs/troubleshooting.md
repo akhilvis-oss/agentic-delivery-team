@@ -21,7 +21,9 @@ The owner should never need to run Git commands. If a step needs the terminal, r
 **Agent (the Checker).** The independent Checker recorded its verdict on an older head. The Checker re-verifies the current head and updates its record. Nobody else may edit the Checker's record.
 
 ### "Required to update: Update your branch with the base branch before merging"
-**Agent.** Another pull request merged first, so this one is out of date. The agent updates the branch, re-runs the checks and refreshes "Tested head". If the owner clicks **Update branch** instead, the gate fails as described above until the agent refreshes the description.
+**Runner.** For the story holding the repository slot, a behind PR is refreshed in its own job: cancel and confirm auto-merge, merge the fetched target without force-pushing, run the required checks once and a fresh read-only review, then publish the review, push and update only the evidence sections. No builder or continuation is consumed. A control-critical PR still waits for the owner's merge and reports "Refreshed and re-reviewed at <head>."
+
+If the owner moves the PR head, the runner does not refresh it. A failed refresh restores the original PR head before its stop; a conflict names the files. Abort or cleanup uncertainty stops with `publication_uncertain` and requires owner reconciliation. Do not retry an interrupted refresh blindly. A push briefly precedes its evidence-body edit, so a stale "Tested head" gate failure can appear between those events. If the owner clicks **Update branch**, a fresh independent review is still needed.
 
 ### Auto-merge refused: "Pull request is in clean status"
 **Agent.** GitHub won't queue auto-merge on a pull request that is already ready. Under the merge policy, the agent may merge it directly after re-checking every condition on the exact head. Control-critical pull requests are always merged by the owner.

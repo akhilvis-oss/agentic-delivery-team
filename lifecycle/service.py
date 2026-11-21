@@ -1153,6 +1153,49 @@ def cancel_waiting(cfg, client, claims, issues, failed, skipped):
             cancel_waiting_claim(cfg, client, claim)
 
 
+def refresh_slot(cfg, client, queue, claims, failed, skipped):
+    """Refresh before ordinary delivery can stop a behind auto-merge job."""
+    runner = runner_module()
+    for candidate in jobs(cfg):
+        number = candidate.get("assignment", {}).get("lifecycle", {}).get("issue")
+        issue = queue.rows.get(number)
+        delivery = candidate.get("integration", {})
+        if (candidate.get("delivery_retired") or not issue or number in failed | skipped
+                or not delivery.get("pr") or issue.get("state") != "open"):
+            continue
+        with story_boundary(cfg, client, issue, failed, skipped, claims,
+                            claim=next((c for c in claims if c.get("job") == candidate["id"]), None)):
+            current = core.state(issue)
+            if not (current == "pr-open" and delivery.get("stage") in {"checking", "auto_merge_enabled"}
+                    or current == "needs-owner" and delivery.get("stage") == "owner"
+                    and delivery.get("reason") == "owner_merge_required"):
+                continue
+            if queue.holder({"issue": 0}) != number:
+                continue
+            pr = queue.prs.get(delivery["pr"])
+            refreshes = candidate.get("refreshes", [])
+            interrupted = bool(refreshes and refreshes[-1].get("stage") not in {"done", "failed"})
+            if not pr or pr.get("mergeable_state") != "behind" and not interrupted:
+                continue
+            root = Path(cfg["state_dir"]) / "jobs" / candidate["id"]
+            with runner.lock(root / "runner-state" / "runner.lock") as acquired:
+                if not acquired:
+                    continue
+                config, job = source_work(cfg, candidate["id"])
+                api = runner.integration_api()
+                delivery_client = api.client_for(core, cfg, config)
+                path = root / "runner-state" / "tasks" / (job["id"] + ".json")
+                api.refresh(runner.self_module(), config, path, job, cfg, delivery_client, pr,
+                            lambda: fetch_target(cfg), lifecycle_core=core)
+                if job.get("refreshes") and job["refreshes"][-1].get("stage") == "done":
+                    claim_path = Path(cfg["state_dir"]) / "claims" / (job["id"] + ".json")
+                    if claim_path.exists():
+                        claim = core.read(claim_path)
+                        claim["head"] = job["head_commit"]
+                        core.save(claim_path, claim)
+            break
+
+
 def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
          pending_hook=None, full_list=False):
     validate_local(cfg)
@@ -1323,6 +1366,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
         processed = []
         runner = runner_module()
         queue = StoryQueue(cfg, client, rows, changed, claims_dir)
+        if run_jobs:
+            refresh_slot(cfg, client, queue, claims, failed, skipped)
         ordered = []
         for path in sorted(claims_dir.glob("*.json")):
             claim = core.read(path)
@@ -1386,7 +1431,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                                 and not completed_job.get("delivery_retired") and (completed_job.get("stop_saving")
                                 or completed_job["status"] == "ready_for_integration"
                                 or runner.integration_api().options(completed_config))):
-                            runner.run_once(completed_config, task_id=claim["job"])
+                            runner.run_once({**completed_config, "_slot_prs": queue.prs}, task_id=claim["job"])
                     events = client.events(claim["issue"])
                     canonical, _ = core.canonical_state(cfg, events)
                     if canonical == core.state(issue):
@@ -1413,7 +1458,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
                             if not run_jobs:
                                 continue
-                            runner.run_once(recovery_config, task_id=claim["job"])
+                            runner.run_once({**recovery_config, "_slot_prs": queue.prs}, task_id=claim["job"])
                             previous = runner.read(recovery_path)
                             if previous.get("stop_saving") or previous["status"] == "ready_for_integration":
                                 continue
@@ -1425,7 +1470,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     if run_jobs and previous["status"].startswith("running_"):
                         # run_once only marks an unclean phase interrupted; never
                         # signals a persisted PID or starts a second agent.
-                        runner.run_once(recovery_config)
+                        runner.run_once({**recovery_config, "_slot_prs": queue.prs})
                         claim.update(
                             stage="finished", error="interrupted_requires_reconciliation"
                         )
@@ -1594,7 +1639,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 if run_jobs and claim["stage"] == "enqueued":
                     run_config = runner.load_config(claim["config"])
                     run_config["_service_retry_clock"] = clock
-                    runner.run_once(run_config)
+                    runner.run_once({**run_config, "_slot_prs": queue.prs})
                     job = runner.read(
                         Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
                     )

@@ -1361,6 +1361,41 @@ def verify_required_tests(config, state, path, job):
     return entry
 
 
+def refresh_review(config, job, refresh):
+    """Required tests and reviewer only, in a new per-refresh state namespace."""
+    view = json.loads(json.dumps(job))
+    view["head_commit"] = refresh["head"]
+    view["review_base"] = refresh["target"]
+    view["assignment"]["review_base"] = refresh["target"]
+    view["assignment_sha256"] = digest(view["assignment"])
+    state = private_dir(Path(config["state_dir"]) / "refreshes" / job["id"] / str(refresh["sequence"]))
+    selected = {**config, "state_dir": str(state), "_refresh_context": refresh["sequence"]}
+    path = state / "job.json"
+    save_job(selected, path, view)
+    ensure_reviewable(selected, view)
+    verification = verify_required_tests(selected, state, path, view)
+    if not verification or verification["status"] != "passed":
+        return {"verification": verification or {"status": "blocked"}}
+    session = f"{job['id']}-refresh-{refresh['sequence']}-reviewer"
+    view["review_session"] = session
+    before = verification_snapshot(verification_boundary(selected))
+    try:
+        check_cli(selected)
+        result = execute_phase(selected, state, path, view, "reviewer")
+        validate_result(result, "reviewer")
+        if verification_snapshot(verification_boundary(selected)) != before:
+            raise Blocked("Refresh reviewer changed the reviewed checkout")
+        ensure_reviewable(selected, view)
+    except Exception as exc:
+        if getattr(exc, "integrity_error", False):
+            raise
+        result = {"status": "blocked", "summary": "Fresh independent refresh review could not complete.",
+                  "tests": [], "limitations": [], "findings": []}
+    view.update(review=result, review_session=session)
+    save_job(selected, path, view)
+    return {"verification": verification, "review": result, "session": session, "state_dir": str(state)}
+
+
 def execute(config, state, job_path, job, role):
     phase = config.get("phase_context")
     if phase is not None:
@@ -1377,7 +1412,11 @@ def execute_phase(config, state, job_path, job, role):
                                                   "slot": config["pool_slot"], "head": git(config, "rev-parse", "HEAD")})
         job["cli_version"] = check_cli(config)
     suffix = f"_retry_{job['system_retries']}" if job.get("retry_phase_running") else ""
-    folder = state / "runs" / job["id"] / (f"round_{job['round']}_{role}" + suffix)
+    refresh_number = config.get("_refresh_context")
+    if refresh_number is not None and (type(refresh_number) is not int or refresh_number < 1 or role != "reviewer"):
+        raise Blocked("Refresh execution is reviewer-only")
+    phase_name = (f"refresh_{refresh_number}_{role}" if refresh_number else f"round_{job['round']}_{role}" + suffix)
+    folder = state / "runs" / job["id"] / phase_name
     if folder.exists():
         raise RuntimeError("Phase output exists; never reuse a previous result")
     private_dir(folder)
@@ -1396,7 +1435,9 @@ def execute_phase(config, state, job_path, job, role):
         with prompt_path.open("a") as handle:
             handle.write("\nReport usage_units only when the provider reports usage in the configured owner units; otherwise null. "
                          "Never infer balances or read session files. Set rate_limited only for an explicit quota/rate-limit error.\n")
-    job.update(status="running_" + role, updated_at=now())
+    if not refresh_number:
+        job["status"] = "running_" + role
+    job["updated_at"] = now()
     save_job(config, job_path, job)
     proc = None
     try:
@@ -1537,7 +1578,7 @@ def save_job(config, path, job):
         receipt["readiness_sessions"] = 1
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
     if (config.get("lifecycle_config") and job["assignment"].get("lifecycle")
-            and not job.get("retry_phase_running")
+            and not job.get("retry_phase_running") and not config.get("_refresh_context")
             and (not job.get("stop_saving") or job.get("stop_ready"))):
         try:
             lifecycle_api().sync_job(config["lifecycle_config"], job)

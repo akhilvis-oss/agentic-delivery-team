@@ -852,6 +852,15 @@ def notice_body(cfg, client, entry):
     return stop_notice(record.get("reason"), extra + body)
 
 
+def refresh_review_record(record):
+    """The sole new informational review shape; readers bind its live head."""
+    return (record.get("kind") == "review" and record.get("from") == record.get("to") == "pr-open"
+            and record.get("outcome") == "ready_for_integration"
+            and type(record.get("pr")) is int and record["pr"] > 0
+            and isinstance(record.get("commit"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", record["commit"]) is not None)
+
+
 def records(cfg, comments, expected_issue=None):
     trusted = {
         identity
@@ -937,6 +946,7 @@ def records(cfg, comments, expected_issue=None):
                 and has_role(cfg, actor, "product")
                 and item["from"] == item["to"]
             )
+            special = special or (refresh_review_record(item) and has_role(cfg, actor, "runner"))
             if not special and not permitted(cfg, item["from"], item["to"], actor):
                 continue
             if item["kind"] == "guard" and (
@@ -948,7 +958,13 @@ def records(cfg, comments, expected_issue=None):
             found[item["key"]] = item
         except (KeyError, TypeError, ValueError):
             continue
-    return sorted(found.values(), key=lambda x: (stamp(x["timestamp"]), x["key"]))
+    ordered = sorted(found.values(), key=lambda x: (stamp(x["timestamp"]), x["key"]))
+    dispatched = {}
+    for item in ordered:
+        if item["kind"] == "transition" and item["to"] == "dispatched" and has_role(cfg, item["actor"], "runner"):
+            dispatched[item["issue"]] = item["job"]
+    return [item for item in ordered if not refresh_review_record(item)
+            or dispatched.get(item["issue"]) == item["job"]]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1332,6 +1348,34 @@ def reject_transition(cfg, client, path, entry):
     raise TransitionRejected(message)
 
 
+def valid_refresh_publication(cfg, record, evidence):
+    """Before push, bind an informational record to its owned local merge."""
+    dispatches = [r for r in evidence if r["to"] == "dispatched"
+                  and r["kind"] == "transition" and has_role(cfg, r["actor"], "runner")]
+    if not dispatches or dispatches[-1]["job"] != record["job"]:
+        return False
+    from lifecycle import service
+    try:
+        config, job = service.source_work(cfg, record["job"])
+        refresh = job.get("refreshes", [])[-1]
+        if (job.get("delivery_retired") or refresh.get("pr") != record["pr"]
+                or refresh.get("head") != record["commit"]
+                or refresh.get("stage") != "publishing_review"
+                or refresh.get("pr_head") != job.get("reviewed_head")
+                or refresh.get("verification", {}).get("status") != "passed"
+                or refresh.get("review", {}).get("status") != "ready_for_integration"
+                or any(f["severity"] in {"P0", "P1"} for f in refresh["review"].get("findings", []))
+                or not any(c.get("state") == "committed" and c.get("committed_by") == "runner"
+                           and c.get("commit_sha") == record["commit"] for c in job.get("runner_commits", []))):
+            return False
+        runner = service.runner_module()
+        return (runner.git(config, "rev-parse", "HEAD") == record["commit"]
+                and runner.git(config, "rev-parse", record["commit"] + "^1") == refresh["pr_head"]
+                and runner.git(config, "rev-parse", record["commit"] + "^2") == refresh["target"])
+    except (OSError, KeyError, IndexError):
+        return False
+
+
 def flush(cfg, client):
     bind_state(cfg)
     folder = private(Path(cfg["state_dir"]) / "outbox")
@@ -1475,7 +1519,12 @@ def flush(cfg, client):
                         and record["to"]
                         == canonical_state(cfg, client.events(record["issue"]))[0]
                     )
-                    if not (restoring or attesting or assumption or finishing) and not permitted(
+                    refreshing = refresh_review_record(record)
+                    if refreshing or entry.get("notice_context", {}).get("refresh"):
+                        if (expected_role != "runner" or record["actor"] != cfg["actors"]["runner"]
+                                or not valid_refresh_publication(cfg, record, remote)):
+                            reject_transition(cfg, client, path, entry)
+                    if not (restoring or attesting or assumption or finishing or refreshing) and not permitted(
                         cfg, record["from"], record["to"], record["actor"]
                     ):
                         reject_transition(cfg, client, path, entry)
@@ -2536,6 +2585,37 @@ def followups(cfg, job, client):
                     save(path, record)
                     raise
             save(path, record)
+
+
+def admit_refresh(config_path, job, pr, *, client=None):
+    """Same-job refresh authority; never broadens normal phase admission."""
+    cfg = load_config(config_path)
+    client = client or GitHub(cfg)
+    delivery = job.get("integration", {})
+    binding = job.get("assignment", {}).get("lifecycle", {})
+    if (job.get("delivery_retired") or not binding or binding.get("issue") != job.get("github_number")
+            or delivery.get("pr") != pr.get("number") or pr.get("state") != "open"):
+        return False
+    issue = client.issue(binding["issue"])
+    evidence = records(cfg, client.comments(binding["issue"]), binding["issue"])
+    current = state(issue)
+    canonical, _ = canonical_state(cfg, client.events(binding["issue"]))
+    dispatches = [r for r in evidence if r["kind"] == "transition" and r["to"] == "dispatched"
+                  and has_role(cfg, r["actor"], "runner")]
+    if (not can_start(issue, evidence) or canonical != current
+            or issue.get("body") != job["assignment"]["task_text"]
+            or not dispatches or dispatches[-1]["job"] != job["id"]):
+        return False
+    if current == "pr-open" and delivery.get("stage") in {"checking", "auto_merge_enabled"}:
+        return current
+    stops = [r for r in evidence if r["to"] in {"blocked", "needs-owner", "needs-primary"}
+             and r.get("reason")]
+    if (current == "needs-owner" and stops and stops[-1]["job"] == job["id"]
+            and stops[-1]["reason"] == "owner_merge_required"
+            and stops[-1]["pr"] == pr["number"] and delivery.get("stage") == "owner"
+            and delivery.get("reason") == "owner_merge_required"):
+        return current
+    return False
 
 
 def admit_phase(config_path, job):
