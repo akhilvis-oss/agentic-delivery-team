@@ -175,6 +175,7 @@ def load_config(path, *, local=True):
             "product_token_env",
             "app_auth",
             "upgrade",
+            "system_retry_minutes",
         }
         if not set(cfg) <= local_fields:
             raise ValueError("Public policy fields belong in the policy file")
@@ -187,6 +188,11 @@ def load_config(path, *, local=True):
     if "upgrade" in cfg:
         from lifecycle.upgrade import validate
         validate(cfg["upgrade"])
+    schedule = cfg.get("system_retry_minutes", [5, 20, 60])
+    if (not isinstance(schedule, list) or len(schedule) > 5
+            or any(type(n) is not int or not 1 <= n <= 1440 for n in schedule)):
+        raise ValueError("system_retry_minutes must contain 0 to 5 integers from 1 to 1440")
+    cfg["system_retry_minutes"] = schedule
     roles = cfg.get("actors", {})
     if set(roles) != {"owner", "runner", "product", "workflow"}:
         raise ValueError("Four explicit actor roles required")
@@ -506,6 +512,9 @@ def public_record(
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "agent_sign_in_failed": "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve.",
+    "agent_usage_limit": "The agent reached its usage limit. Owner: re-approve once the limit resets.",
+    "dependency_closed_unmerged": "A dependency could not be used. Owner: reconcile the dependency and re-approve.",
     "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
     "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
@@ -547,6 +556,9 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "agent_sign_in_failed": "Waiting on the system",
+    "agent_usage_limit": "Waiting on the system",
+    "dependency_closed_unmerged": "Needs your decision",
     "unexpected_error": "Needs a fix",
     "readiness_question": "Needs your decision",
     "checks_worktree_changed": "Needs a fix",
@@ -1569,6 +1581,8 @@ def job_records(cfg, job):
         return []
     number, event = binding["issue"], binding["event"]
     status = job["status"]
+    if status == "waiting_system" or job.get("retry_local_end") or job.get("retry_phase_running"):
+        return []
     mapping = {
         "queued": "dispatched",
         "running_worker": "in-progress",

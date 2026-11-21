@@ -217,6 +217,7 @@ def test_real_rs256_signature_uses_only_memory_and_pipes():
 def test_split_policy_rejects_private_fields_and_role_overrides(tmp_path):
     cfg = policy(tmp_path)
     local = {
+        "system_retry_minutes",
         "state_dir",
         "repository_root",
         "worktree_root",

@@ -132,7 +132,7 @@ or unrelated failures also stop with `blocked` and the `blocked_check` category.
 The worker must never install dependencies, substitute configured tools, change
 test configuration to pass, or delete or skip tests. The bound is a prompt rule,
 not a count independently enforced by the runner; the runner's required-test run
-after delivery is unchanged and still decides. No blocked phase is replayed.
+after delivery is unchanged and still decides. No blocked phase is replayed except a system retry, which re-runs a phase that ended with a listed exit code; an interrupted phase is still never replayed.
 Exploratory searches, lookups and listings may fail normally; recover and continue.
 Avoid the unqualified instruction **"stop on any failure"** in task text.
 
@@ -500,3 +500,36 @@ with `delivery_disabled`. Configure delivery and re-approve the story. The servi
 reuses the recorded review and checks only when scope, fetched target and trusted
 gate still match. Otherwise it records the fallback reason and builds and reviews
 the continuation. Existing publication and merge controls remain in force.
+
+
+## System retries
+
+Private runner config accepts `auth_exit_codes` and `quota_exit_codes`, both defaulting
+to `[]`. Each must be a list of integers from 3 through 255, with no value in both
+lists. Codes 1 and 2 remain generic failures. A listed exit publishes
+`agent_sign_in_failed` or `agent_usage_limit`; other non-zero exits remain
+`execution_failed`. The runner never parses or publishes stdout or stderr.
+The completed sign-in probes for the tested CLIs both returned generic code 1,
+and no distinct quota code was documented. Keep their real lists empty. Operators
+may choose a local adapter with a dedicated documented exit code.
+
+Only a durably claimed service job retries, using the private lifecycle
+`system_retry_minutes` schedule. Standalone and pool runs stop immediately.
+Pool slots retain their own quota-code validation and cooldown; runner auth codes
+are not inherited by slots. An agent's own `rate_limited` report remains a pool
+report, rather than an exit-code usage-limit stop.
+
+A retry uses the same job, worktree, round and role, with a fresh output folder.
+It spends neither a correction round nor a continuation. A worker starts with
+whatever the failed attempt left uncommitted in that worktree, including incomplete
+changes; no rollback or clean reconstruction is promised. A reviewer reuses the
+existing exact-head required-test run, without rerunning checks or merging the
+target branch again. Phase admission still runs before every retry. A phase with
+its own result, a commit refusal, or a worker-reported unavailable prerequisite
+does not retry.
+
+Waiting saves a durable `retry` entry before publication and emits no lifecycle
+record or receipt. Restarting preserves a waiting attempt. Starting its phase
+atomically clears the wait and saves a running status; a restart from that point
+stops as `interrupted` and never replays it. At exhaustion the latest code stops at
+`needs-owner`, preserving continuation work through the normal stop path.
