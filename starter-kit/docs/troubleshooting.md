@@ -59,6 +59,7 @@ Each code belongs to exactly one kind.
 | Kind | Stop reason | What happened and what to do |
 | --- | --- | --- |
 | Needs your decision | `owner_question` | The builder's exact question is quoted. Add your answer to the story under **Owner decisions**, then re-approve. |
+| Needs your decision | `readiness_question` | The read-only readiness pass stopped before building. Answer the quoted questions under **Owner decisions**, then re-approve. This stop saves no work and spends no continuation. |
 | Needs your decision | `question_withheld` | A question looked private and was withheld in full. Write "Please ask a public-safe question" under **Owner decisions**, then re-approve. Do not paste private logs into GitHub. |
 | Needs your decision | `scope_change`, `acceptance_criteria_change`, `story_approval` | Product needs an owner decision. Update the story or its decisions, then re-approve. |
 | Needs your decision | `clarification_unverified`, `product_request_unclassified`, `repository_evidence` | Repository evidence did not settle the owner decision. Record the answer under **Owner decisions**, then re-approve. |

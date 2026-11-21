@@ -75,10 +75,37 @@ def test_dropped_finish_recovers_through_guard_event(tmp_path, monkeypatch, acti
     core.save(path, event)
     monkeypatch.setattr(core, "load_config", lambda *a, **kw: cfg)
     monkeypatch.setattr(core, "GitHub", lambda *a: FinishClient(hub, "workflow"))
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
     monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
     assert core.main(["--config", cfg["config_path"], "guard-event", "--event", str(path)]) == 0
     assert len(proofs(cfg, hub)) == 1
     assert hub.issues[1]["state"] == "closed"
+
+
+@pytest.mark.parametrize("action", ["labeled", "edited", "reopened", "labeled-approved"])
+def test_resumed_guard_event_never_appends_unproven_owner_finish(tmp_path, monkeypatch, action):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state="approved")
+    owner_label(hub)
+    event = dict(repository={"full_name": cfg["repository"]}, action=action,
+                 issue=copy.deepcopy(hub.issues[1]), sender={"login": "unrelated"})
+    if action == "labeled-approved":
+        event.update(action="labeled", label={"name": "status:approved"},
+                     sender={"login": cfg["actors"]["owner"]})
+    if action == "edited":
+        event["changes"] = {"body": {"from": "old scope"}}
+    path = tmp_path / "event.json"
+    core.save(path, event)
+    monkeypatch.setattr(core, "load_config", lambda *a, **kw: cfg)
+    monkeypatch.setattr(core, "GitHub", lambda *a: FinishClient(hub, "workflow"))
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    assert core.main(["--config", cfg["config_path"], "guard-event", "--event", str(path)]) == 0
+    assert cfg["uncertain_workflow_resume"] is True
+    assert not proofs(cfg, hub)
+    assert hub.issues[1]["state"] == "open"
+    assert not any(method == "PATCH" and path == "/issues/1" for method, path, _ in hub.calls)
 
 
 @pytest.mark.parametrize("failure", ["before", "after"])

@@ -1,0 +1,576 @@
+"""Readiness uses synthetic agents and APIs; the replay scope is approval-pinned."""
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from lifecycle import core, service
+from test_lifecycle import policy
+from test_lifecycle_continuation import newest_claim, saved_story
+from test_lifecycle_delivery import story, settings
+from test_one_continuation import reapprove
+import test_runner as fixtures
+from test_runner_pool import setup as pool_setup  # noqa: F401
+
+runner = fixtures.runner
+setup = fixtures.setup
+QUESTION = "Should the workflow policy change be delivered by the owner?"
+SCOPE = "3551a80d682fc7e05266293644b42338ab9107238800d50816fc93068ef37bf7"
+
+
+def enable(cfg):
+    for field in ("runner_config", "primary_runner_config"):
+        value = core.read(cfg[field])
+        value["readiness"] = True
+        core.save(cfg[field], value)
+
+
+def readiness_agent(monkeypatch, tool, answer, *, mutate=False):
+    execute = tool.execute
+    calls = []
+
+    def phase(config, state, path, job, role):
+        calls.append(role)
+        if role != "readiness":
+            return execute(config, state, path, job, role)
+        assert job["round"] == 1
+        job["status"] = "running_readiness"
+        tool.save_job(config, path, job)
+        if mutate:
+            Path(config["worktree"], "unexpected.txt").write_text("changed")
+        return answer
+
+    monkeypatch.setattr(tool, "execute", phase)
+    return calls
+
+
+def test_first_approval_replay_stops_before_build_and_quotes_question(tmp_path, monkeypatch):
+    cfg, hub, tool, _, _ = story(tmp_path, monkeypatch)
+    fixture = Path(__file__).parent / "fixtures/issue113-first-approval.md"
+    assert hashlib.sha256(fixture.read_bytes()).hexdigest() == SCOPE
+    hub.issues[1]["body"] = fixture.read_text()
+    reapprove(hub)
+    enable(cfg)
+    calls = readiness_agent(monkeypatch, tool, {"status": "questions", "questions": [QUESTION]})
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    assert calls == ["readiness"]
+    assert job["status"] == "needs_owner" and job["round"] == 1
+    assert job["readiness_sessions"] == 1
+    assert job["assignment"]["task_sha256"] == SCOPE
+    assert not job.get("head_commit") and not job.get("continuation")
+    assert not job.get("runner_commits")
+    record, = [r for r in core.records(cfg, hub.comments_by_issue[1], 1)
+               if r["reason"] == "readiness_question"]
+    assert record["round"] == 1 and record["owner_question"] == QUESTION
+    notice = next(c["body"] for c in hub.comments_by_issue[1] if record["key"] in c["body"])
+    assert "> " + QUESTION in notice
+    assert "Readiness cost: one extra agent session for this approval." in notice
+    assert newest_claim(cfg)["readiness_stopped"]
+
+
+def test_ready_runs_once_before_build_and_preserves_correction_budget(tmp_path, monkeypatch):
+    cfg, hub, tool, _ = saved_story(tmp_path, monkeypatch)
+    enable(cfg)
+
+    def repair(config, state, path, job, role):
+        if role == "reviewer":
+            return fixtures.result("needs_changes", "reviewer")
+        return fixtures.execute_delivery(config, state, path, job, role)
+
+    monkeypatch.setattr(tool, "execute", repair)
+    calls = readiness_agent(monkeypatch, tool, {"status": "ready", "questions": []})
+    reapprove(hub)
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    assert calls == ["readiness", "worker", "reviewer", "worker", "reviewer"]
+    job = next(j for j in service.jobs(cfg) if j["id"] == newest_claim(cfg)["job"])
+    assert job["round"] == 2 and job["status"] == "needs_owner"
+
+
+@pytest.mark.parametrize("answer", [
+    None, {}, {"status": "ready", "questions": [QUESTION]},
+    {"status": "questions", "questions": []},
+    {"status": "questions", "questions": [""]},
+    {"status": "questions", "questions": [1]},
+    {"status": "questions", "questions": "question"},
+    {"status": "blocked", "questions": [QUESTION]},
+    {"status": "ready", "questions": [], "extra": True},
+])
+def test_strict_readiness_schema_rejects_malformed(answer):
+    with pytest.raises(ValueError):
+        runner.validate_result(answer, "readiness")
+
+
+@pytest.mark.parametrize("answer", [{"status": "ready", "questions": []},
+                                    {"status": "questions", "questions": [QUESTION]}])
+def test_readiness_schema_accepts_exact_results(answer):
+    spec = runner.schema("readiness")
+    assert set(spec["properties"]) == {"status", "questions"}
+    assert set(spec["required"]) == {"status", "questions"}
+    assert spec["additionalProperties"] is False
+    runner.validate_result(answer, "readiness")
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_switch_requires_boolean(setup, tmp_path, value):
+    path, config = fixtures.populated_config(setup, tmp_path)
+    config["readiness"] = value
+    runner.save(path, config)
+    with pytest.raises(ValueError, match="readiness"):
+        runner.load_config(path)
+
+
+def test_prompt_and_command_use_read_only_reviewer_without_new_profile_keys(setup):
+    cfg, _, _, job = setup
+    job["round"] = 1
+    job["assignment"]["profile"]["commit_policy"] = {"deny_patterns": ["private-*.txt"]}
+    prompt = runner.prompt_for(cfg, job, "readiness")
+    for phrase in ["AGENTS.md", "documents", "contradict", "read-only reviewer",
+                   "owner-delivered", "Restart: fresh", "Continue from", "2,000",
+                   "private-*.txt", "credential", "slashes"]:
+        assert phrase in prompt
+    for pattern in runner.DEFAULT_COMMIT_POLICY["deny_patterns"]:
+        assert pattern in prompt
+    args = runner.command(cfg, "readiness", "output", "schema", "prompt")
+    assert cfg["reviewer_model"] in args and cfg["worker_model"] not in args
+    assert "read-only" in args
+
+
+@pytest.mark.parametrize("fault", ["mutation", "malformed", "null", "list"])
+def test_bad_session_stops_without_build_or_saved_work(tmp_path, monkeypatch, fault):
+    cfg, hub, tool, _, _ = story(tmp_path, monkeypatch)
+    enable(cfg)
+    answer = {"mutation": {"status": "ready", "questions": []}, "malformed": {},
+              "null": None, "list": []}[fault]
+    calls = readiness_agent(monkeypatch, tool, answer, mutate=fault == "mutation")
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    assert calls == ["readiness"]
+    assert job["status"] == "failed" and job["round"] == 1
+    assert not job.get("head_commit") and not job.get("runner_commits")
+    assert core.job_records(cfg, job)[0]["reason"] == "execution_failed"
+
+
+@pytest.mark.parametrize("question", ["Change runner file?", "credential needed?", "a/b?", "x" * 2001,
+                                    ["First decision?", "Second decision?"],
+                                    ["Which change? " * 100, "Which change? " * 100]],
+                         ids=["safe", "withheld-word", "path", "over-limit", "multiple", "combined-limit"])
+def test_readiness_uses_unchanged_public_question_filter(tmp_path, monkeypatch, question):
+    cfg, hub, tool, _, _ = story(tmp_path, monkeypatch)
+    enable(cfg)
+    questions = question if isinstance(question, list) else [question]
+    supplied = "\n".join(questions)
+    readiness_agent(monkeypatch, tool, {"status": "questions", "questions": questions})
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    record = core.job_records(cfg, job)[0]
+    safe = core.safe_question(cfg, supplied)
+    assert record["reason"] == ("readiness_question" if safe else "question_withheld")
+    assert record.get("owner_question") == (supplied if safe else None)
+    assert "Readiness cost: one extra agent session for this approval." in core.record_body(record)
+
+
+@pytest.mark.parametrize("lost_claim_marker", [False, True])
+def test_stops_do_not_spend_continuations_or_replace_saved_source(tmp_path, monkeypatch, lost_claim_marker):
+    cfg, hub, tool, old = saved_story(tmp_path, monkeypatch)
+    enable(cfg)
+    calls = readiness_agent(monkeypatch, tool, {"status": "questions", "questions": [QUESTION]})
+    for clock in (200, 300, 400):
+        reapprove(hub)
+        service.poll(cfg, hub.client(), clock=lambda: clock)
+        claim = newest_claim(cfg)
+        assert claim.get("error") is None
+        assert claim["continuation_source"] == old["id"]
+        assert claim["continuation_number"] == 1
+        assert claim["readiness_stopped"]
+        if lost_claim_marker:
+            # Crash after the runner saved the stop, before the service saved its claim.
+            claim.pop("readiness_stopped")
+            claim["stage"] = "enqueued"
+            core.save(Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json"), claim)
+    assert calls == ["readiness"] * 3
+
+
+def test_delivery_only_spends_no_readiness_session(tmp_path, monkeypatch):
+    cfg, hub, tool, calls, publications = story(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    before = list(calls)
+    settings(cfg, "runner_config", {"enabled": True, "declared_tier": "standard"})
+    enable(cfg)
+    readiness_calls = readiness_agent(monkeypatch, tool, {"status": "ready", "questions": []})
+    reapprove(hub)
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    assert newest_claim(cfg)["delivery_source"]
+    assert calls == before and readiness_calls == []
+    assert [p[0] for p in publications] == ["push", "pr", "checker"]
+
+
+@pytest.mark.parametrize("switch", [None, False])
+def test_switch_off_preserves_original_phases(setup, monkeypatch, switch):
+    cfg, _, path, _ = setup
+    if switch is not None:
+        cfg["readiness"] = switch
+    calls = []
+
+    def execute(config, state, path, job, role):
+        calls.append(role)
+        return fixtures.execute_delivery(config, state, path, job, role)
+
+    monkeypatch.setattr(runner, "execute", execute)
+    runner.run_once(cfg)
+    assert calls == ["worker", "reviewer"]
+    assert "readiness_sessions" not in runner.read(path)
+
+
+def test_running_readiness_maps_to_in_progress(tmp_path):
+    cfg = policy(tmp_path)
+    job = dict(id="readiness", status="running_readiness", round=1,
+               assignment={"lifecycle": {"issue": 1, "event": 101}})
+    assert core.job_records(cfg, job)[0]["to"] == "in-progress"
+
+
+def test_example_defaults_off():
+    assert json.loads((fixtures.ROOT / "runner/config.example.json").read_text())["readiness"] is False
+
+
+def test_real_fresh_session_writes_strict_result_with_readonly_flags(setup):
+    cfg, state, path, job = setup
+    job["round"] = 1
+    fixtures.use_fake(cfg, state, '''import json, pathlib, sys
+assert 'read-only' in sys.argv
+assert 'fixture-reviewer' in sys.argv
+output = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])
+output.write_text(json.dumps({'status': 'ready', 'questions': []}))
+''')
+    assert runner.execute(cfg, state, path, job, "readiness") == {"status": "ready", "questions": []}
+    folder = state / "runs/task/round_1_readiness"
+    assert (folder / "schema.json").exists()
+    with pytest.raises(RuntimeError, match="never reuse"):
+        runner.execute(cfg, state, path, job, "readiness")
+
+
+def test_automatic_primary_does_not_run_readiness(tmp_path, monkeypatch):
+    cfg, hub, tool, _, _ = story(tmp_path, monkeypatch)
+    execute = tool.execute
+
+    def repair(config, state, path, job, role):
+        if role == "reviewer":
+            job["status"] = "running_reviewer"
+            tool.save_job(config, path, job)
+            return fixtures.result("needs_changes", "reviewer")
+        return execute(config, state, path, job, role)
+
+    monkeypatch.setattr(tool, "execute", repair)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    enable(cfg)
+    calls = readiness_agent(monkeypatch, tool, {"status": "ready", "questions": []})
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    assert newest_claim(cfg)["primary"]
+    assert calls == ["worker", "reviewer"]
+    job = next(j for j in service.jobs(cfg) if j["id"] == newest_claim(cfg)["job"])
+    assert job["round"] == 1 and not job.get("readiness_sessions")
+
+
+def test_ready_initial_approval_proceeds_to_build(tmp_path, monkeypatch):
+    cfg, hub, tool, _, _ = story(tmp_path, monkeypatch)
+    enable(cfg)
+    calls = readiness_agent(monkeypatch, tool, {"status": "ready", "questions": []})
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    assert calls == ["readiness", "worker", "reviewer"]
+    assert job["readiness_sessions"] == 1 and job["head_commit"]
+    assert not job.get("readiness_stopped")
+
+
+@pytest.mark.parametrize("reason", ["pr_open_reapproval", "continuation_limit", "continuation_commit_unrecorded"])
+def test_pre_dispatch_stops_spend_no_readiness_session(tmp_path, monkeypatch, reason):
+    cfg, hub, tool, old = saved_story(tmp_path, monkeypatch)
+    enable(cfg)
+    if reason == "continuation_limit":
+        for n in (1, 2):
+            core.save(Path(cfg["state_dir"]) / "claims" / f"past-{n}.json", dict(
+                job=f"past-{n}", issue=1, event=n, stage="finished",
+                continued_from=old["head_commit"], cleaned=True))
+    elif reason == "continuation_commit_unrecorded":
+        hub.comments_by_issue[1] = [c for c in hub.comments_by_issue[1]
+                                   if '"continuation": true' not in c["body"]]
+    else:
+        old["integration"] = {"pr": 9}
+        core.save(Path(cfg["state_dir"]) / "jobs" / old["id"] / "runner-state/tasks"
+                  / (old["id"] + ".json"), old)
+        request = type(hub.client()).request
+
+        def open_pr(self, method, path, data=None):
+            return {"state": "open"} if path == "/pulls/9" else request(self, method, path, data)
+
+        monkeypatch.setattr(type(hub.client()), "request", open_pr)
+    calls = readiness_agent(monkeypatch, tool, {"status": "ready", "questions": []})
+    reapprove(hub)
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    assert newest_claim(cfg)["error"] == reason
+    assert calls == [] and len(service.jobs(cfg)) == 1
+
+
+def test_pool_phases_spend_no_readiness_session(pool_setup, monkeypatch):  # noqa: F811
+    from runner import pool
+    import test_runner_pool as pool_fixtures
+
+    cfg, path = pool_setup
+    for story_config in cfg["stories"]:
+        config = core.read(story_config["runner_config"])
+        config["readiness"] = True
+        core.save(story_config["runner_config"], config)
+    calls = []
+
+    def execute(config, state, path, job, role):
+        calls.append(role)
+        assert role in {"worker", "reviewer"}
+        return pool_fixtures.delivery(config, state, path, job, role)
+
+    monkeypatch.setattr(pool_fixtures.runner, "execute_phase", execute)
+    engine = pool.Pool(pool.load_config(path))
+    engine.run_once()
+    assert sorted(calls) == ["reviewer", "reviewer", "worker", "worker"]
+    assert all(j["status"] == "ready_for_integration" for j in engine.data["stories"].values())
+
+
+def test_readiness_cost_survives_later_worker_stop(tmp_path):
+    cfg = policy(tmp_path)
+    job = dict(id="cost", status="needs_owner", round=1, readiness_sessions=1,
+               assignment={"lifecycle": {"issue": 1, "event": 101}},
+               worker={"status": "blocked", "summary": "Required check could not run."})
+    body = core.record_body(core.job_records(cfg, job)[0])
+    assert "Readiness cost: one extra agent session for this approval." in body
+
+
+COST_LINE = "Readiness cost: one extra agent session for this approval."
+
+
+def capture_standalone_receipt(setup, monkeypatch, answer, *, switch=True, enabled=True):
+    """Exercise real receipt persistence and rendering, replacing only gh transport."""
+    cfg, state, path, job = setup
+    cfg.update(readiness=switch, github_receipts=dict(enabled=enabled, repository="example/project"))
+    job["github_number"] = 7
+    job["private_detail"] = "PRIVATE-JOB-DETAIL"
+    runner.save_job(cfg, path, job)
+    posts = []
+    run = runner.subprocess.run
+
+    def transport(argv, **kwargs):
+        if argv[0] != "gh":
+            return run(argv, **kwargs)
+        assert argv == ["gh", "api", "--method", "POST",
+                        "repos/example/project/issues/7/comments", "--input", "-"]
+        assert kwargs["check"] and kwargs["timeout"] == 30
+        assert not kwargs.get("shell")
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    def worker_stop(config, state, path, job, role):
+        assert role == "worker"
+        return fixtures.result("blocked")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    monkeypatch.setattr(runner, "execute", worker_stop)
+    calls = readiness_agent(monkeypatch, runner, answer)
+    runner.run_once(cfg)
+    saved = runner.read(path)
+    if enabled:
+        assert saved["receipt_delivery"] == "posted" and len(posts) == 1
+        assert "PRIVATE-JOB-DETAIL" not in posts[0]
+        runner.publish_receipt(cfg, path, saved)
+        assert len(posts) == 1
+    else:
+        assert not posts and "receipt_delivery" not in saved
+    return saved, runner.read(state / "receipts/task.json"), posts, calls
+
+
+@pytest.mark.parametrize("questions", [[QUESTION], ["Which criterion should take precedence?"],
+                                       ["First decision?", "Second decision?"],
+                                       ["Ask @example-reviewer?"]],
+                         ids=["owner-delivery", "criterion", "multiple", "inert-mention"])
+def test_standalone_publication_quotes_safe_readiness_questions(setup, monkeypatch, questions):
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": questions})
+    assert calls == ["readiness"]
+    assert job["status"] == "needs_owner" and job["round"] == 1
+    assert not job.get("runner_commits") and not job.get("head_commit")
+    assert receipt["blocked_reason"]["reason_code"] == "readiness_question"
+    for question in questions:
+        assert "> " + core.inert_mentions(question) in posts[0]
+    assert "@example-reviewer" not in posts[0]
+
+
+@pytest.mark.parametrize("answer", [{"status": "questions", "questions": [QUESTION]},
+                                    {"status": "ready", "questions": []}, {}],
+                         ids=["questions", "later-worker-stop", "malformed"])
+def test_standalone_publication_states_readiness_cost(setup, monkeypatch, answer):
+    job, _, posts, _ = capture_standalone_receipt(setup, monkeypatch, answer)
+    assert job["readiness_sessions"] == 1
+    assert posts[0].splitlines().count(COST_LINE) == 1
+
+
+@pytest.mark.parametrize("questions", [
+    ["credential needed?"], ["a/b?"], ["x" * 2001],
+    ["Which change? " * 100, "Which change? " * 100],
+    ["Safe decision?", "secret needed?"], ["provider response: private output"],
+], ids=["sensitive-word", "path", "over-limit", "combined-limit", "mixed", "log"])
+def test_standalone_publication_withholds_unsafe_readiness_questions(setup, monkeypatch, questions):
+    assert not core.safe_question({"identity_roles": {}}, "\n".join(questions))
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": questions})
+    assert calls == ["readiness"] and job["readiness"]["questions"] == questions
+    public = json.dumps(runner.public_receipt(receipt)) + posts[0]
+    assert all(question not in public for question in questions)
+    assert "readiness_question" not in receipt
+    assert "readiness" not in runner.public_receipt(receipt)
+
+
+@pytest.mark.parametrize("switch", [None, False])
+def test_standalone_readiness_off_preserves_exact_receipt(setup, monkeypatch, switch):
+    job, receipt, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": [QUESTION]}, switch=switch)
+    assert calls == ["worker"] and "readiness_sessions" not in job
+    public = runner.public_receipt(receipt)
+    assert set(public) == {"status", "base_commit", "head_commit", "summary", "timestamp", "blocked_reason"}
+    reason = public["blocked_reason"]
+    original = (f"Task receipt: {public['status']}\nCommits: {public['base_commit']}.."
+                f"{public['head_commit']}\nSummary: {public['summary']}\nRun: {public['timestamp']}"
+                f"\nBlocked: {reason['reason_code']}: {reason['reason']}")
+    assert posts == [core.stop_notice(reason["reason_code"], original)]
+    assert COST_LINE not in posts[0] and QUESTION not in posts[0]
+
+
+def test_standalone_receipts_disabled_adds_no_notice(setup, monkeypatch):
+    _, _, posts, calls = capture_standalone_receipt(
+        setup, monkeypatch, {"status": "questions", "questions": [QUESTION]}, enabled=False)
+    assert posts == [] and calls == ["readiness"]
+
+
+@pytest.mark.parametrize("question,visible", [
+    ("May fixture-owner choose the expected behavior?", False),
+    ("Which criterion should take precedence?", True),
+], ids=["configured-actor", "safe-question"])
+def test_combined_receipts_obey_configured_question_policy(setup, tmp_path, monkeypatch,
+                                                          question, visible):
+    config_path, cfg = fixtures.populated_config(setup, tmp_path)
+    lifecycle_cfg = policy(tmp_path)
+    lifecycle_cfg["identity_roles"].pop(lifecycle_cfg["actors"]["owner"])
+    lifecycle_cfg["actors"]["owner"] = "fixture-owner"
+    lifecycle_cfg["identity_roles"]["fixture-owner"] = ["owner", "product"]
+    core.save(lifecycle_cfg["config_path"], lifecycle_cfg)
+    cfg.update(lifecycle_config=lifecycle_cfg["config_path"], readiness=True,
+               github_receipts=dict(enabled=True, repository="example/project"))
+    runner.save(config_path, cfg)
+    cfg = runner.load_config(config_path)
+    trusted = core.load_config(cfg["lifecycle_config"])
+    assert core.safe_question(trusted, question) is visible
+    _, state, path, job = setup
+    job.update(status="needs_owner", round=1, github_number=7, readiness_stopped=True,
+               readiness_sessions=1, readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    job["assignment"]["lifecycle"] = {"issue": 7, "event": 101}
+    records, posts = [], []
+
+    def sync(config_path, saved):
+        records.extend(core.job_records(core.load_config(config_path), saved))
+
+    def transport(argv, **kwargs):
+        assert argv == ["gh", "api", "--method", "POST",
+                        "repos/example/project/issues/7/comments", "--input", "-"]
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.lifecycle_api(), "sync_job", sync)
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    runner.save_job(cfg, path, job)
+    runner.publish_receipt(cfg, path, job)
+    assert job["receipt_delivery"] == "posted" and len(posts) == 1
+    assert (question in posts[0]) is visible
+    receipt = runner.read(state / "receipts/task.json")
+    assert (question in json.dumps(receipt)) is visible
+    assert "identity_roles" not in json.dumps(receipt)
+    assert posts[0].splitlines().count(COST_LINE) == 1
+    assert runner.read(path)["readiness"]["questions"] == [question]
+    assert all(r["reason"] == ("readiness_question" if visible else "question_withheld")
+               for r in records)
+    assert records and all(r["round"] == 1 for r in records)
+
+
+@pytest.mark.parametrize("context", ["configured", "missing", "unreadable", "invalid", "standalone"])
+@pytest.mark.parametrize("question", ["May owner-fixture choose the expected behavior?",
+                                     "Which criterion should take precedence?"])
+def test_each_receipt_boundary_requires_trusted_policy(setup, tmp_path, monkeypatch,
+                                                     context, question):
+    cfg, state, path, job = setup
+    lifecycle_cfg = policy(tmp_path)
+    cfg["lifecycle_config"] = lifecycle_cfg["config_path"]
+    job.update(status="needs_owner", round=1, readiness_stopped=True, readiness_sessions=1,
+               readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    if context == "standalone":
+        cfg.pop("lifecycle_config")
+    elif context == "unreadable":
+        Path(cfg["lifecycle_config"]).unlink()
+    elif context == "invalid":
+        core.save(cfg["lifecycle_config"], {"identity_roles": {}})
+    visible = (context == "standalone" or
+               context in {"configured", "missing"} and core.safe_question(lifecycle_cfg, question))
+    # Persisting a local job still works when its configured policy is unavailable.
+    runner.save_job(cfg, path, job)
+    receipt = runner.read(state / "receipts/task.json")
+    assert (question in json.dumps(receipt)) is visible
+    assert runner.read(path)["readiness"]["questions"] == [question]
+
+    # Re-inject raw agent text so neither downstream boundary can rely on a
+    # previous filter, a serialized approval marker, or a stale receipt.
+    receipt["readiness_question"] = question
+    receipt["identity_roles"] = {}
+    boundary_config = None if context == "missing" else cfg
+    expected = visible and context != "missing"
+    public = (runner.public_receipt(receipt) if boundary_config is None
+              else runner.public_receipt(receipt, boundary_config))
+    assert (question in json.dumps(public)) is expected
+    assert "identity_roles" not in public
+    posts = []
+
+    def transport(argv, **kwargs):
+        assert argv[0] == "gh"
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    client = runner.GitHubClient() if boundary_config is None else runner.GitHubClient(boundary_config)
+    client.post("example/project", 7, receipt)
+    assert len(posts) == 1 and (question in posts[0]) is expected
+    assert posts[0].splitlines().count(COST_LINE) == 1
+
+
+def test_receipt_boundaries_recheck_policy_after_persistence(setup, tmp_path, monkeypatch):
+    cfg, state, path, job = setup
+    lifecycle_cfg = policy(tmp_path)
+    cfg["lifecycle_config"] = lifecycle_cfg["config_path"]
+    question = "May fixture-owner choose the expected behavior?"
+    job.update(status="needs_owner", readiness_stopped=True,
+               readiness={"status": "questions", "questions": [question]},
+               blocked_reason=runner.block_reason("readiness_question"))
+    runner.save_job(cfg, path, job)
+    receipt = runner.read(state / "receipts/task.json")
+    assert receipt["readiness_question"] == question
+    client = runner.GitHubClient(cfg)
+    lifecycle_cfg["identity_roles"]["fixture-owner"] = ["product"]
+    core.save(cfg["lifecycle_config"], lifecycle_cfg)
+    assert not core.safe_question(core.load_config(cfg["lifecycle_config"]), question)
+    assert "readiness_question" not in runner.public_receipt(receipt, cfg)
+    posts = []
+
+    def transport(argv, **kwargs):
+        assert argv[0] == "gh"
+        posts.append(json.loads(kwargs["input"])["body"])
+        return fixtures.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", transport)
+    client.post("example/project", 7, receipt)
+    assert len(posts) == 1 and question not in posts[0]
