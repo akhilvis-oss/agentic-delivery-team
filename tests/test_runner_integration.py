@@ -86,8 +86,11 @@ def test_delivery_app_permissions_survive_real_refresh(app_transport, mode):
     assert json.loads(refreshed.calls[2].data)["permissions"] == permissions
     assert cfg == original
     normal = prepare({"issues": "write"})
-    core.GitHub(cfg)
-    assert json.loads(normal.calls[2].data)["permissions"] == {"issues": "write"}
+    normal_client = core.GitHub(cfg)
+    if mode == "enabled":
+        assert json.loads(normal.calls[2].data)["permissions"] == {"issues": "write"}
+    else:
+        assert not normal.calls and normal_client.token == client.token
 
 
 @pytest.mark.parametrize("mutation", [*DELIVERY_PERMISSIONS, "metadata", "extra"])

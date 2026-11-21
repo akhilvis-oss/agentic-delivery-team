@@ -16,8 +16,7 @@ def run(cfg, issue):
         if not acquired:
             raise core.Unavailable("Identity check already running")
         for role in ("product", "runner"):
-            token, _ = app_tokens.mint(cfg, role, comments_only=True)
-            client = core.GitHub(cfg, role, token=token)
+            client = core.app_client(cfg, role, comments_only=True)
             client.ensure_actor()
             target = client.issue(issue)
             if "pull_request" in target or target["state"] != "open":

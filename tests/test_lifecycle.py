@@ -49,6 +49,10 @@ def policy(tmp_path):
     return cfg
 
 
+class Crash(BaseException):
+    """Simulated process loss bypasses story error isolation."""
+
+
 class Hub:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -966,10 +970,10 @@ def test_claim_recovers_after_comment_and_after_enqueue_without_duplicate_job(
     def crash(*args, **kwargs):
         path = original(*args, **kwargs)
         calls.append(path)
-        raise RuntimeError("crash after durable enqueue")
+        raise Crash("crash after durable enqueue")
 
     monkeypatch.setattr(runner, "enqueue", crash)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Crash):
         service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 100)
     monkeypatch.setattr(runner, "enqueue", original)
     service.poll(cfg, h.client(), run_jobs=False, clock=lambda: 200)
