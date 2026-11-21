@@ -496,10 +496,12 @@ running-state lifecycle record is published for a retry.
 
 Before considering any new claim, the service cancels waiting jobs whose admission
 changed. A changed story body ends with the held code and normal saved-work stop.
-A close, newer owner approval, or label outside running states ends locally without
-a stop record or saved continuation head. Normal closed-story cleanup still runs.
-A later claim can use older verified saved work, or starts fresh; the cancelled
-attempt's unpublished work is deliberately excluded. Withdrawal is separate.
+A close, newer owner approval, or other label outside running states ends locally
+without a stop record or saved continuation head. An owner's `status:draft`
+withdrawal instead saves eligible waiting work and publishes `owner_withdrew`
+with continuation, as below. Normal closed-story cleanup still runs. A later
+claim can use older verified saved work, or starts fresh; a locally cancelled
+attempt's unpublished work is deliberately excluded.
 
 ## Approved-story queue
 
@@ -540,7 +542,7 @@ upgrade. Configurable parallel lanes and PR refresh are separate work.
 
 The configured owner withdraws an active story by adding `status:draft`. Only the owner's newest authenticated status label event counts; comment text and Product identities cannot authorize withdrawal. Adding `status:approved` while draft remains is re-approval. Merged and accepted stories cannot be withdrawn.
 
-The guard leaves only draft without a restoration notice. Claimed or queued work is ended; a running agent stops at its next build, check, review or delivery boundary. `CANCEL` remains the only immediate stop. Withdrawal wins over any concurrent phase, service or delivery stop. Progress records stay local, and the work holder posts one `owner_withdrew` notice without a separate delivery reason or transition-rejection comment. Without a claim or running job, nothing is posted.
+After an accepted owner withdrawal, canonical state ignores later runner status advancement until the owner's next permitted status action. Workflow actions remain effective, including the PR-close transition to `needs-owner` described below. The guard leaves only draft without a restoration notice. Claimed or queued work is ended; a running agent stops at its next build, check, review or delivery boundary. `CANCEL` remains the only immediate stop. Withdrawal wins over any concurrent phase, service or delivery stop. Progress records stay local, and the work holder posts one `owner_withdrew` notice without a separate delivery reason or transition-rejection comment. Without a claim or running job, nothing is posted.
 
 Eligible work is saved through the existing runner policy and continues through the normal verified continuation path after re-approval. Failed jobs, missing saved heads and failed saves carry no continuation: their notice asks the owner to re-approve to start again. No assignment or save authorization changes. Events are fetched for withdrawal only for draft issues with claims.
 

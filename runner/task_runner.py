@@ -1662,6 +1662,7 @@ def check_dispatch_head(config, expected):
 def withdrawal_stop(config, path, job, client=None):
     """Preserve work through the existing save policy; withdraw delivery once."""
     integration_api().disable_withdrawn_merge(self_module(), config, path, job, client)
+    job.pop("retry", None)
     if job["status"] != "failed":
         job["status"] = "needs_owner"
     job.update(owner_withdrew=True, updated_at=now(),

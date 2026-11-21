@@ -443,3 +443,238 @@ def test_withdrawn_local_receipt_retains_its_fixed_reason(tmp_path, monkeypatch)
     config, _ = service.source_work(cfg, job['id'])
     receipt = core.read(Path(config['state_dir']) / 'receipts' / (job['id'] + '.json'))
     assert receipt['blocked_reason']['reason_code'] == 'owner_withdrew'
+
+
+@pytest.mark.parametrize('phase', ['worker', 'reviewer'])
+@pytest.mark.parametrize('timing', ['before_scan', 'after_scan', 'later_issue', 'later_events'])
+@pytest.mark.parametrize('code', ['agent_sign_in_failed', 'agent_usage_limit'])
+def test_waiting_retry_withdrawal_saves_once_and_reapproves_latest_head(
+        tmp_path, monkeypatch, phase, timing, code):
+    from test_system_retry import retry_story
+    cfg, hub, runner, attempts = retry_story(tmp_path, monkeypatch, role=phase,
+                                            partial=phase == 'worker')
+    execute = runner.execute
+
+    def listed_exit(*args, **kwargs):
+        try:
+            return execute(*args, **kwargs)
+        except runner.AgentExit:
+            raise runner.AgentExit(code, retryable=True) from None
+
+    monkeypatch.setattr(runner, 'execute', listed_exit)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    job, = service.jobs(cfg)
+    assert job['status'] == 'waiting_system' and job['retry']['code'] == code
+    claim = newest_claim(cfg)
+    original_scan = service.cancel_waiting
+    client = hub.client()
+    issue = client.issue
+    events = client.events
+    state = {'armed': False, 'changed': False, 'reads': 0}
+
+    def withdraw():
+        if not state['changed']:
+            state['changed'] = True
+            hub.event(1, 'draft')
+
+    def scan(*args, **kwargs):
+        result = original_scan(*args, **kwargs)
+        state['armed'] = True
+        if timing == 'after_scan':
+            withdraw()
+        return result
+
+    def fresh(number):
+        if state['armed'] and number == 1:
+            state['reads'] += 1
+            if timing == 'later_issue' and state['reads'] == 2:
+                withdraw()
+        return issue(number)
+
+    def fresh_events(number):
+        if state['armed'] and number == 1 and timing == 'later_events':
+            withdraw()
+        return events(number)
+
+    monkeypatch.setattr(service, 'cancel_waiting', scan)
+    monkeypatch.setattr(client, 'issue', fresh)
+    monkeypatch.setattr(client, 'events', fresh_events)
+    if timing == 'before_scan':
+        withdraw()
+    before = list(attempts)
+    checks = job.get('verification_runs', [])
+    service.poll(cfg, client, clock=lambda: 200)
+    ended = next(j for j in service.jobs(cfg) if j['id'] == job['id'])
+    final = core.read(Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json'))
+    assert state['changed'] and final['stage'] == 'finished' and not final.get('error')
+    assert ended['status'] == 'needs_owner' and not ended.get('retry')
+    assert ended['owner_withdrew'] and ended['continuation'] and ended['head_commit']
+    record, = stops(cfg, hub)
+    assert record['commit'] == ended['head_commit'] and record['continuation']
+    assert record['from'] == record['to'] == 'draft'
+    assert core.state(hub.issues[1]) == 'draft' and attempts == before
+    assert ended.get('verification_runs', []) == checks
+    assert not any(r.get('reason') in {'agent_sign_in_failed', 'agent_usage_limit'}
+                   for r in core.records(cfg, hub.comments_by_issue[1], 1))
+    queue = service.StoryQueue(cfg, client, hub.issues, set(), Path(cfg['state_dir']) / 'claims')
+    assert queue.holder({'issue': 2}) is None
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 300)
+    assert len(stops(cfg, hub)) == 1 and attempts == before
+    hub.event(1, 'approved')
+    hub.approve()
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 400)
+    assert newest_claim(cfg)['continued_from'] == ended['head_commit']
+
+
+@pytest.mark.parametrize('tamper', ['assignment', 'config', 'claim'])
+def test_waiting_withdrawal_retains_source_and_claim_integrity(tmp_path, monkeypatch, tamper):
+    from test_system_retry import retry_story
+    cfg, hub, runner, attempts = retry_story(tmp_path, monkeypatch, partial=True)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    claim = newest_claim(cfg)
+    path = Path(cfg['state_dir']) / 'jobs' / claim['job'] / 'runner-state' / 'tasks' / (claim['job'] + '.json')
+    if tamper == 'assignment':
+        job = core.read(path)
+        job['assignment']['task_sha256'] = 'f' * 64
+        core.save(path, job)
+    elif tamper == 'config':
+        config = core.read(claim['config'])
+        config['branch'] = 'unbound-feature'
+        core.save(claim['config'], config)
+    else:
+        claim['worktree'] = str(tmp_path / 'unbound-worktree')
+        core.save(Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json'), claim)
+    hub.event(1, 'draft')
+    before = path.read_bytes()
+    with pytest.raises((core.IntegrityError, runner.IntegrityError)):
+        service.poll(cfg, hub.client(), clock=lambda: 200)
+    assert path.read_bytes() == before and not stops(cfg, hub)
+
+
+@pytest.mark.parametrize('order', ['non_owner', 'reapproved', 'later_runner'])
+def test_waiting_withdrawal_uses_newest_owner_event_only(tmp_path, monkeypatch, order):
+    from test_system_retry import retry_story
+    cfg, hub, runner, attempts = retry_story(tmp_path, monkeypatch, partial=True)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    old, = service.jobs(cfg)
+    if order == 'non_owner':
+        hub.event(1, 'draft', 'product')
+    else:
+        hub.event(1, 'draft')
+        if order == 'reapproved':
+            hub.event(1, 'approved')
+            hub.approve()
+            hub.issues[1]['labels'].append({'name': 'status:draft'})
+        else:
+            hub.event(1, 'blocked', 'runner')
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    before = list(attempts)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 150, full_list=True)
+    ended = next(j for j in service.jobs(cfg) if j['id'] == old['id'])
+    if order == 'later_runner':
+        record, = stops(cfg, hub)
+        assert ended['owner_withdrew'] and ended['continuation'] and not ended.get('retry')
+        assert record['continuation'] and record['commit'] == ended['head_commit']
+        assert core.state(hub.issues[1]) == 'draft'
+    else:
+        assert not stops(cfg, hub) and not ended.get('owner_withdrew')
+        if order == 'non_owner':
+            assert ended['status'] == 'waiting_system' and ended['retry']
+        else:
+            assert ended['retry_local_end'] and not ended.get('continuation')
+    assert attempts == before
+
+
+def test_waiting_withdrawal_reapproval_prefers_new_saved_work_to_older_stop(tmp_path, monkeypatch):
+    from test_one_continuation import reapprove
+    cfg, hub, runner, older = saved_story(tmp_path, monkeypatch)
+    cfg['system_retry_minutes'] = [1]
+    core.save(cfg['config_path'], cfg)
+    reapprove(hub)
+
+    def fail(config, state, path, job, role):
+        job['status'] = 'running_worker'
+        runner.save_job(config, path, job)
+        Path(config['worktree'], 'withdrawn-wait.txt').write_text('new saved work\n')
+        raise runner.AgentExit('agent_sign_in_failed', retryable=True)
+
+    monkeypatch.setattr(runner, 'execute', fail)
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    waiting = next(j for j in service.jobs(cfg) if j['status'] == 'waiting_system')
+    hub.event(1, 'draft')
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 300)
+    saved = next(j for j in service.jobs(cfg) if j['id'] == waiting['id'])
+    assert saved['owner_withdrew'] and saved['continuation'] and not saved.get('retry')
+    assert saved['head_commit'] != older['head_commit']
+    reapprove(hub)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 400)
+    claim = newest_claim(cfg)
+    assert claim['continuation_source'] == waiting['id']
+    assert claim['continued_from'] == saved['head_commit']
+
+
+
+def test_owner_withdrawal_wins_admitted_stop_write_guard_race(tmp_path, monkeypatch):
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim = newest_claim(cfg)
+    record = core.public_record(cfg, 1, claim['job'], 0, 'blocked',
+                                event=claim['event'], reason='execution_failed')
+    entry = core.queue(cfg, record)
+    client = hub.client()
+    replace = client.set_state
+    injected = []
+
+    def race(number, target):
+        if target == 'blocked' and not injected:
+            injected.append(hub.event(number, 'draft'))
+        return replace(number, target)
+
+    monkeypatch.setattr(client, 'set_state', race)
+    core.flush(cfg, client)
+    assert injected and core.read(entry)['status'] == 'synced'
+    remote = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert any(r['key'] == record['key'] and r['reason'] == 'execution_failed' for r in remote)
+    # This used the admitted runner write and a valid producer record, rather
+    # than directly inventing its blocked label event or bypassing the outbox.
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert core.state(hub.issues[1]) == 'draft'
+
+
+
+def test_workflow_pr_close_after_withdrawal_still_needs_owner(tmp_path):
+    from copy import deepcopy
+    from test_lifecycle import pr_fixture
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    pr = pr_fixture(cfg, hub)
+    hub.event(1, 'pr-open', 'workflow')
+    draft = hub.event(1, 'draft')
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('draft', draft)
+    pr.update(state='closed', merged=False)
+    core.pr_event(cfg, hub.client('workflow'), {'action': 'closed', 'pull_request': deepcopy(pr)})
+    records = core.records(cfg, hub.comments_by_issue[1], 1)
+    record, = [r for r in records if r['reason'] == 'pr_closed_unmerged']
+    assert record['actor'] == cfg['actors']['workflow'] and record['to'] == 'needs-owner'
+    assert core.state(hub.issues[1]) == 'needs-owner'
+    assert core.canonical_state(cfg, hub.events_by_issue[1])[0] == 'needs-owner'
+    # The permitted workflow move does not clear the owner's runner-only hold.
+    hub.event(1, 'blocked', 'runner')
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert core.state(hub.issues[1]) == 'needs-owner'
+
+
+def test_owner_reapproval_clears_runner_only_withdrawal_hold(tmp_path):
+    cfg = policy(tmp_path)
+    hub = Hub(cfg)
+    hub.issue(state='in-progress')
+    draft = hub.event(1, 'draft')
+    hub.event(1, 'blocked', 'runner')
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('draft', draft)
+    approval = hub.event(1, 'approved')
+    hub.approve()
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('approved', approval)
+    core.guard_issue(cfg, hub.client('workflow'), 1)
+    assert core.state(hub.issues[1]) == 'approved'
+    dispatched = hub.event(1, 'dispatched', 'runner')
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('dispatched', dispatched)

@@ -1841,17 +1841,23 @@ def canonical_state(cfg, events):
     """Only authenticated label-event actors can advance the canonical state."""
     current = "draft"
     latest = None
+    withdrawn = False
     for event in sorted(events, key=lambda e: int(e["id"])):
         if event.get("event") != "labeled":
             continue
         name = event.get("label", {}).get("name", "")
         if not name.startswith("status:"):
             continue
+        actor = event.get("actor", {}).get("login")
+        # An admitted runner write may finish after an owner withdrawal.
+        # Workflow PR-close transitions remain effective until re-approval.
+        if withdrawn and actor == cfg["actors"]["runner"]:
+            continue
         target = name[7:]
-        if target in STATES and permitted(
-            cfg, current, target, event.get("actor", {}).get("login")
-        ):
+        if target in STATES and permitted(cfg, current, target, actor):
             current, latest = target, event
+            if actor == cfg["actors"]["owner"]:
+                withdrawn = target == "draft"
     return current, latest
 
 

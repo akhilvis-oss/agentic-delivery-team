@@ -251,6 +251,8 @@ def withdraw_claim(cfg, client, path, claim, issue):
         # A live phase stops at its next runner check. Never signal an agent.
         if job["status"].startswith("running_"):
             return True
+        if job["status"] == "waiting_system" and not runner.service_claim_owns(cfg, config, job):
+            raise core.IntegrityError("Waiting claim/job binding changed")
         runner.withdrawal_stop(config, job_path, job)
         claim["head"] = job.get("head_commit")
     else:
@@ -1139,11 +1141,20 @@ def cancel_waiting_claim(cfg, client, claim, *, fresh=None, history=None):
     if job["status"] != "waiting_system":
         return False
     fresh = client.issue(claim["issue"]) if fresh is None else fresh
+    claim_path = Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json")
+    # Owner withdrawal preserves this wait's work; other AC-7 cancellations
+    # keep the retry story's save-or-discard rules.
+    if withdraw_claim(cfg, client, claim_path, claim, fresh):
+        return True
     history = (core.records(cfg, client.comments(claim["issue"]), claim["issue"])
                if history is None else history)
     dispatches = [r for r in history if r["to"] == "dispatched"]
     events = client.events(claim["issue"])
     _, latest = core.canonical_state(cfg, events)
+    draft = core.owner_draft_event(cfg, events)
+    if (draft and int(draft["id"]) > claim["event"]
+            and withdraw_claim(cfg, client, claim_path, claim, client.issue(claim["issue"]))):
+        return True
     running = {"dispatched", "in-progress", "committed", "in-review", "changes-requested"}
     owner_action = (core.state(fresh) not in running
                     or latest is not None and int(latest["id"]) > claim["event"]
