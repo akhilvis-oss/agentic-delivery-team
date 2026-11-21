@@ -69,6 +69,9 @@ def status_write_violations(source, filename):
             if method is None or "{value}" in method or path is None or not path.startswith("/"):
                 violations.append((node.lineno, "unreadable method or path"))
                 return
+            if "{value}" in path.split("/")[1]:
+                violations.append((node.lineno, "unreadable URL resource"))
+                return
             if (path.startswith("/issues/") and "{value}" in path.split("/", 3)[-1]
                     and not re.match(r"/issues/(?:[0-9]+|\{value\})/(?:labels|comments|assignees)(?:/|$)", path)
                     and not re.fullmatch(r"/issues/\{value\}", path)
@@ -82,7 +85,8 @@ def status_write_violations(source, filename):
             writes = method in {"PUT", "POST", "DELETE"} and labels_route
             if method in {"POST", "PATCH"} and issue_route:
                 # Unknown bodies can hide a labels key, including dict expansion.
-                writes = keys is None or None in keys or "labels" in keys
+                writes = (keys is None or any(key is None or "{value}" in key for key in keys)
+                          or "labels" in keys)
             if not writes:
                 return
             if filename == "lifecycle/core.py" and owner in {"set_status", "remove_status"}:
@@ -126,6 +130,11 @@ def test_only_named_status_writers_in_lifecycle_and_runner():
     'client.request(f"{method}", "/issues/1/labels", data)',
     'client.request("PO" + suffix, "/issues/1/labels", data)',
     'client.request("POST", path, data)',
+    'client.request("POST", f"/{resource}/{number}/labels", {"labels": ["status:blocked"]})',
+    'client.request("POST", f"/issues{suffix}", {"labels": ["status:blocked"]})',
+    'client.request("POST", "/" + resource + "/1/labels", {"labels": ["status:blocked"]})',
+    'client.request("PATCH", "/issues/1", {f"{key}": ["status:blocked"]})',
+    'client.request("PATCH", "/issues/1", {"lab" + suffix: ["status:blocked"]})',
     'client.request(path=path, method="DELETE")',
     'client.request("POST", f"{path}", data)',
     'client.request("POST", f"/issues/{number}/{endpoint}", data)',
