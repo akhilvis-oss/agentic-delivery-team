@@ -46,6 +46,12 @@ class Blocked(ValueError):
     """A prerequisite or safety failure requiring operator attention."""
 
 
+class IntegrityError(Blocked):
+    """Durable assignment binding mismatch, including across fresh imports."""
+
+    integrity_error = True
+
+
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
@@ -1601,7 +1607,7 @@ def verify_assignment(config, job):
             or not assignment["after_task"] and job["base_commit"] != assignment["base_commit"]
             or assignment["kind"] == "review" and job["head_commit"] != assignment["head_commit"]
             or job.get("review_base") != assignment.get("review_base")):
-        raise Blocked("Immutable assignment binding changed")
+        raise IntegrityError("Immutable assignment binding changed")
     return assignment
 
 

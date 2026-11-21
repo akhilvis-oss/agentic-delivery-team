@@ -13,6 +13,7 @@ import re
 import ssl
 import subprocess
 import time
+import threading
 import urllib.error
 import urllib.request
 
@@ -271,3 +272,66 @@ def mint(cfg, role, *, comments_only=False, integration_enabled=False,
         return token, expiry
     except (KeyError, TypeError, ValueError, AttributeError):
         raise AuthenticationError("Malformed App authentication response") from None
+
+
+# Only the canonical module owns process memory, including when callers load a
+# fresh copy of a runner or this file. Never serialize these values.
+_cache = {}
+_cache_lock = threading.RLock()
+
+
+def permissions(role, *, comments_only=False, integration_enabled=False,
+                fetch_enabled=False, status_only=False):
+    return ({"statuses": "write"} if status_only else
+            {"issues": "write"} if comments_only else
+            dict(INTEGRATION_PERMISSIONS) if integration_enabled else
+            {"issues": "write", "contents": "read"} if fetch_enabled else
+            dict(PERMISSIONS[role]))
+
+
+def get(cfg, role, **options):
+    """Reuse a verified token until five minutes before expiry, under one lock."""
+    from lifecycle import app_tokens
+    if app_tokens.get is not get:
+        return app_tokens.get(cfg, role, **options)
+    settings = cfg["app_auth"][role]
+    validate(settings, role)
+    for name in ("comments_only", "integration_enabled", "fetch_enabled", "status_only"):
+        if type(options.get(name, False)) is not bool:
+            raise AuthenticationError("Invalid authentication opt-in")
+    if role != "runner" and any(options.get(n) for n in
+                                ("integration_enabled", "fetch_enabled", "status_only")):
+        raise AuthenticationError("Invalid authentication opt-in")
+    if options.get("status_only") and any(options.get(n) for n in
+                                         ("comments_only", "integration_enabled", "fetch_enabled")):
+        raise AuthenticationError("Invalid status authentication opt-in")
+    scope = permissions(role, **{k: options[k] for k in
+                        ("comments_only", "integration_enabled", "fetch_enabled", "status_only")
+                        if k in options})
+    identity = (cfg["repository"], settings["app_id"], role,
+                cfg["actors"][role], tuple(sorted(scope.items())))
+    with _cache_lock:
+        at = options.get("at")
+        at = time.time() if at is None else at
+        value = _cache.get(identity)
+        if value is None or at >= value[1] - 300:
+            value = mint(cfg, role, **options)
+            _cache[identity] = value
+        return value
+
+
+def invalidate(token):
+    """Drop only the rejected credential; don't evict a newer concurrent mint."""
+    from lifecycle import app_tokens
+    if app_tokens.invalidate is not invalidate:
+        return app_tokens.invalidate(token)
+    with _cache_lock:
+        for identity, value in list(_cache.items()):
+            if value[0] == token:
+                del _cache[identity]
+
+
+def clear_cache():
+    from lifecycle import app_tokens
+    with app_tokens._cache_lock:
+        app_tokens._cache.clear()

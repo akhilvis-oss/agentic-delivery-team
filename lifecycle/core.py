@@ -7,7 +7,6 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,6 +23,7 @@ import urllib.request
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
+    from lifecycle import app_tokens
     from lifecycle import private_content as check
 except (ImportError, OSError, SyntaxError):
     raise SystemExit(
@@ -52,6 +52,16 @@ STATES = {
 SHA = re.compile(r"[0-9a-f]{40}")
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?")
+
+
+class IntegrityError(ValueError):
+    """Durable local bindings changed; never isolate as a story bug."""
+
+    integrity_error = True
+
+
+class StatusLabelError(ValueError):
+    """An issue has no unambiguous known lifecycle state."""
 
 
 class Unavailable(RuntimeError):
@@ -300,7 +310,7 @@ def state(issue):
     names = [x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])]
     statuses = [x[7:] for x in names if x.startswith("status:")]
     if len(statuses) != 1 or statuses[0] not in STATES:
-        raise ValueError("Issue needs exactly one known status label")
+        raise StatusLabelError("Issue needs exactly one known status label")
     return statuses[0]
 
 
@@ -344,6 +354,8 @@ def public_record(
     stop_save_failed=False,
     conflict_files=None,
     stop_details=None,
+    exception_class=None,
+    function=None,
 ):
     if (
         type(issue) is not int
@@ -477,11 +489,24 @@ def public_record(
             raise ValueError("Stop details require a stopped task")
         record["stop_details"] = public_stop_details(cfg, stop_details)
         record["key"] = key([record["key"], record["stop_details"]])
+    if exception_class is not None or function is not None:
+        if (reason != "unexpected_error"
+                or exception_class is not None and (not isinstance(exception_class, str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", exception_class))
+                or function is not None and (not isinstance(function, str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function))):
+            raise ValueError("Invalid unexpected error metadata")
+        if exception_class is not None:
+            record["exception_class"] = exception_class
+        if function is not None:
+            record["function"] = function
+        record["key"] = key([record["key"], exception_class, function])
     return record
 
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
     "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
@@ -522,6 +547,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "unexpected_error": "Needs a fix",
     "readiness_question": "Needs your decision",
     "checks_worktree_changed": "Needs a fix",
     "owner_question": "Needs your decision",
@@ -727,6 +753,10 @@ def record_body(record):
     explanation = ""
     if record["to"] in {"blocked", "needs-owner", "needs-primary"}:
         explanation = STOP_REASONS.get(record.get("reason"), STOP_REASONS["execution_failed"]) + "\n"
+        if record.get("reason") == "unexpected_error" and record.get("function"):
+            explanation = ("An unexpected error stopped this story only, in "
+                           + record["function"]
+                           + ". Owner: ask the operator to investigate, then re-approve.\n")
         if record.get("owner_question"):
             explanation += "\nBuilder question (verbatim):\n" + "\n".join(
                 "> " + line for line in record["owner_question"].split("\n")
@@ -860,6 +890,8 @@ def records(cfg, comments, expected_issue=None):
                 stop_save_failed=item.get("stop_save_failed", False),
                 conflict_files=item.get("conflict_files"),
                 stop_details=item.get("stop_details"),
+                exception_class=item.get("exception_class"),
+                function=item.get("function"),
             )
             if (
                 set(item) != set(expected) | {"from", "actor"}
@@ -970,6 +1002,7 @@ class GitHub:
             raise Unavailable("Invalid integration authentication opt-in")
         self.cfg, self.role = cfg, role
         self.integration_enabled = integration_enabled
+        self.token_options = {"integration_enabled": integration_enabled}
         self.use_app_auth = token is None and role in cfg.get("app_auth", {})
         self.token_expiry = None
         self.token = (
@@ -993,31 +1026,27 @@ class GitHub:
     def refresh_app_token(self):
         # Also works when core.py is executed in isolated mode by the guard or
         # imported by the standalone runner; no path from config is executable.
-        spec = importlib.util.spec_from_file_location(
-            "_agentic_app_tokens", Path(__file__).with_name("app_tokens.py")
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         try:
-            self.token, self.token_expiry = module.mint(
-                self.cfg, self.role, integration_enabled=self.integration_enabled
+            self.token, self.token_expiry = app_tokens.get(
+                self.cfg, self.role, **self.token_options
             )
-        except module.AuthenticationError as error:
+        except app_tokens.AuthenticationError as error:
             raise Unavailable(str(error)) from None
         self.identity_verified = False
 
+    def invalidate_app_token(self):
+        app_tokens.invalidate(self.token)
+        if self.use_app_auth:
+            self.token_expiry = 0
+        self.identity_verified = False
     def smoke_statuses(self, head):
         # Ordinary job-sync clients and delivery clients share the existing
         # isolated status-only scope; issue/delivery tokens do not gain it.
-        spec = importlib.util.spec_from_file_location(
-            "_smoke_notice_tokens", Path(__file__).with_name("app_tokens.py"))
-        tokens = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tokens)
-        token, _ = tokens.mint(self.cfg, "runner", status_only=True)
-        return GitHub(self.cfg, token=token).pages(f"/commits/{head}/statuses")
+        return app_client(self.cfg, status_only=True).pages(
+            f"/commits/{head}/statuses")
 
     def ensure_actor(self):
-        if self.token_expiry is not None and time.time() >= self.token_expiry - 60:
+        if self.token_expiry is not None and time.time() >= self.token_expiry - 300:
             self.refresh_app_token()
         if self.identity_verified:
             return
@@ -1034,6 +1063,10 @@ class GitHub:
         try:
             with self.opener.open(req, timeout=30) as response:
                 actor = json.loads(response.read())["data"]["viewer"]["login"]
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
+            raise Unavailable("Cannot verify automation identity; no write made") from None
         except (OSError, ValueError, KeyError, TypeError):
             raise Unavailable(
                 "Cannot verify automation identity; no write made"
@@ -1083,6 +1116,8 @@ class GitHub:
             with self.opener.open(req, timeout=30) as response:
                 value = json.loads(response.read())
         except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self.invalidate_app_token()
             if method != "GET" and exc.code >= 500:
                 raise Uncertain("GitHub write outcome unknown") from None
             raise Unavailable("GitHub request rejected") from None
@@ -1168,6 +1203,15 @@ def remove_status(client, number, name):
     return client.request("DELETE", f"/issues/{number}/labels/{label}")
 
 
+def app_client(cfg, role="runner", **token_options):
+    token, expiry = app_tokens.get(cfg, role, **token_options)
+    client = GitHub(cfg, role, token=token)
+    client.use_app_auth = True
+    client.token_options = token_options
+    client.token_expiry = expiry
+    return client
+
+
 def state_identity(cfg):
     return {
         "repository": cfg["repository"],
@@ -1180,7 +1224,7 @@ def validate_state(cfg):
     """Check an existing ownership binding without initializing or modifying state."""
     path = Path(cfg["state_dir"]) / "identity.json"
     if path.exists() and read(path) != state_identity(cfg):
-        raise ValueError(
+        raise IntegrityError(
             "Private state belongs to another repository or actor configuration"
         )
 
@@ -1191,7 +1235,7 @@ def bind_state(cfg):
     path = root / "identity.json"
     create(path, identity)
     if read(path) != identity:
-        raise ValueError(
+        raise IntegrityError(
             "Private state belongs to another repository or actor configuration"
         )
 
@@ -1199,7 +1243,7 @@ def bind_state(cfg):
 def queue(cfg, record, *, role="runner", public_body=None, notice_context=None):
     bind_state(cfg)
     if record["repository"] != cfg["repository"]:
-        raise ValueError("Wrong outbox repository")
+        raise IntegrityError("Wrong outbox repository")
     folder = private(Path(cfg["state_dir"]) / "outbox")
     path = folder / (record["key"] + ".json")
     entry = dict(record=record, role=role, status="pending", comment_attempted=False)
@@ -1322,7 +1366,7 @@ def flush(cfg, client):
                 save(path, entry)
                 continue
             if record["repository"] != cfg["repository"]:
-                raise ValueError("Wrong outbox repository")
+                raise IntegrityError("Wrong outbox repository")
             rejecting = (entry["status"] == "conflict"
                          and entry.get("error") == "transition_not_allowed")
             try:
@@ -2516,13 +2560,13 @@ def admit_phase(config_path, job):
                 "changes-requested",
             } | ({"pr-open"} if published else set()))
         ):
-            raise ValueError("Admission changed; owner reconciliation required")
+            raise IntegrityError("Admission changed; owner reconciliation required")
         evidence = records(cfg, client.comments(binding["issue"]), binding["issue"])
         if not can_start(issue, evidence):
-            raise ValueError("Admission changed; owner reconciliation required")
+            raise IntegrityError("Admission changed; owner reconciliation required")
         dispatches = [r for r in evidence if r["to"] == "dispatched"]
         if not dispatches or dispatches[-1]["job"] != job["id"]:
-            raise ValueError("Dispatch ownership changed")
+            raise IntegrityError("Dispatch ownership changed")
         return True
     except Unavailable:
         return False

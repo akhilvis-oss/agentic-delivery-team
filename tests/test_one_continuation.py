@@ -292,9 +292,22 @@ def test_newest_saved_integrity_failure_never_starts_fresh(tmp_path, monkeypatch
                                     if '"continuation": true' not in c["body"]]
     core.save(path, old)
     reapprove(hub)
-    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
-    claim = newest_claim(cfg)
-    assert claim["error"] == "continuation_commit_unrecorded"
+    if corruption == "assignment":
+        attempted = []
+        original = service.continuation
+
+        def capture_attempt(config, client, claim, claims_dir, **options):
+            attempted.append(claim)
+            return original(config, client, claim, claims_dir, **options)
+
+        monkeypatch.setattr(service, "continuation", capture_attempt)
+        with pytest.raises(runner.IntegrityError):
+            service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+        claim, = attempted
+    else:
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+        claim = newest_claim(cfg)
+        assert claim["error"] == "continuation_commit_unrecorded"
     assert not Path(claim["worktree"]).exists()
 
 
