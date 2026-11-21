@@ -18,7 +18,7 @@ DECISION = {
     "story_approval", "clarification_unverified", "product_request_unclassified",
     "repository_evidence", "approved_scope_changed", "pr_closed_unmerged",
     "owner_requested_stop", "continuation_limit", "pr_open_reapproval",
-    "readiness_question",
+    "readiness_question", "dependency_closed_unmerged",
 }
 MERGE = {"owner_merge_required"}
 FIX = {
@@ -48,7 +48,7 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert set(EXPECTED) == set(core.STOP_REASONS)
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
-        "Needs your decision": 14, "Needs your merge": 1,
+        "Needs your decision": 15, "Needs your merge": 1,
         "Waiting on the system": 5, "Needs a fix": 82,
     }
 

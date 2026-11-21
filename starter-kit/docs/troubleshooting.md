@@ -64,6 +64,7 @@ Each code belongs to exactly one kind.
 | Needs your decision | `scope_change`, `acceptance_criteria_change`, `story_approval` | Product needs an owner decision. Update the story or its decisions, then re-approve. |
 | Needs your decision | `clarification_unverified`, `product_request_unclassified`, `repository_evidence` | Repository evidence did not settle the owner decision. Record the answer under **Owner decisions**, then re-approve. |
 | Needs your decision | `approved_scope_changed` | The issue changed after approval. Review the revised story, then re-approve. |
+| Needs your decision | `dependency_closed_unmerged` | A dependency closed without merging, or its reference is invalid. Reconcile the named dependency or repair the Dependencies line, then re-approve. |
 | Needs your decision | `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
 | Needs your decision | `owner_requested_stop` | A permitted actor stopped the task. Record any decision under **Owner decisions**, resolve the stop and re-approve. |
 | Needs your decision | `continuation_limit` | The story reached its two-continuation limit. Restart fresh or split the story, then re-approve. |

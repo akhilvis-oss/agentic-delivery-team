@@ -178,8 +178,9 @@ def local_jobs(cfg):
 def collect(cfg, client, since, at):
     policy = cfg["lifecycle"]
     sections = [[] for _ in SECTION_NAMES]
-    from lifecycle.service import heartbeat
+    from lifecycle.service import heartbeat, queue_waiting, queue_wait_text
 
+    waiting_stories = queue_waiting(policy)
     last_poll = heartbeat(policy)
     message = (
         "Service last polled: never" if last_poll is None else
@@ -255,7 +256,9 @@ def collect(cfg, client, since, at):
             and core.stamp(issue["closed_at"]) > since
         ):
             sections[3].append(linked(f"Task #{number}: closed", url))
-        if issue["state"] == "open":
+        if issue["state"] == "open" and number in waiting_stories:
+            sections[4].append(linked(queue_wait_text(number, waiting_stories[number]), url))
+        elif issue["state"] == "open":
             changed = core.stamp(label_event["created_at"]) if label_event else None
             if changed is None:
                 sections[4].append(

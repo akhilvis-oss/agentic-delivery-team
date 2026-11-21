@@ -506,6 +506,7 @@ def public_record(
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "dependency_closed_unmerged": "A dependency could not be used. Owner: reconcile the dependency and re-approve.",
     "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
     "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
@@ -547,6 +548,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "dependency_closed_unmerged": "Needs your decision",
     "unexpected_error": "Needs a fix",
     "readiness_question": "Needs your decision",
     "checks_worktree_changed": "Needs a fix",

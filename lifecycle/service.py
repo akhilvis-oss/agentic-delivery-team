@@ -708,7 +708,8 @@ def poll_body(cfg, at, notices):
             + " seconds, plus time spent building or reviewing. If this time stops "
             "updating, ask the operator to restore the service; re-approving alone "
             "will not restart it.\n"
-            + "".join(line + "\n" for line in notices + owner_finish_notices(cfg))
+            + "".join(line + "\n" for line in notices + owner_finish_notices(cfg)
+                      + [queue_wait_text(n, wait) for n, wait in sorted(queue_waiting(cfg).items())])
             + (cfg["_upgrade_notice"] + "\n" if cfg.get("_upgrade_notice") else "")
             + "<!-- agentic-last-poll-v1 -->")
 
@@ -757,6 +758,232 @@ def error_origin(exc):
     return function
 
 
+def dependency_numbers(task):
+    """Only the first Depends-on line of the named section is authoritative."""
+    active = None
+    for line in task.splitlines():
+        heading = re.fullmatch(r"(#{1,6})\s+(.+?)\s*", line)
+        if heading:
+            level, title = len(heading[1]), heading[2]
+            if active is not None and level <= active:
+                return ()
+            if active is None and level in {2, 3} and title == "Dependencies":
+                active = level
+            continue
+        if active is not None and line.startswith("Depends on"):
+            value = line[len("Depends on"):].split(".", 1)[0].strip()
+            if value == "nothing":
+                return ()
+            if not re.fullmatch(r"#[1-9]\d*(?:(?:, | and |, and )#[1-9]\d*)*", value):
+                raise ValueError("Dependency text is not an issue list")
+            return tuple(dict.fromkeys(int(n) for n in re.findall(r"#([1-9]\d*)", value)))
+    return ()
+
+
+def queue_waiting(cfg):
+    """Status/digest reads existing queue state without creating any files."""
+    core.validate_state(cfg)
+    latest = {}
+    for path in (Path(cfg["state_dir"]) / "claims").glob("*.json"):
+        claim = core.read(path)
+        number = claim.get("issue")
+        if type(number) is not int or number <= 0:
+            continue
+        if number not in latest or claim.get("event", 0) > latest[number].get("event", 0):
+            latest[number] = claim
+    return {n: c["waiting"] for n, c in latest.items()
+            if c.get("stage") == "claimed" and isinstance(c.get("waiting"), dict)
+            and len(c["waiting"]) == 1
+            and next(iter(c["waiting"])) in {"dependency", "story"}
+            and type(next(iter(c["waiting"].values()))) is int
+            and next(iter(c["waiting"].values())) > 0}
+
+
+def queue_wait_text(number, waiting):
+    target = next(iter(waiting.values()))
+    return (f"#{number}: waiting for #{target}" if "dependency" in waiting
+            else f"#{number}: waiting for the story in progress, #{target}")
+
+
+class StoryQueue:
+    """One poll's admission facts; unchanged dependencies never need fresh reads."""
+
+    def __init__(self, cfg, client, rows, changed, claims_dir):
+        self.cfg, self.client, self.rows = cfg, client, rows
+        self.changed, self.claims_dir = changed, claims_dir
+        self.path = Path(cfg["state_dir"]) / "queue-facts.json"
+        self.facts = core.read(self.path) if self.path.exists() else {}
+        self.prs = {}
+        cfg["_queue_prs"] = self.prs  # The authoritative slot read is reusable by refresh.
+
+    def fact(self, number, field):
+        issue = self.rows[number]
+        generation = ([issue.get("state"), issue.get("closed_at")] if field == "close_events" else
+                      [issue.get("updated_at"), issue.get("state"), issue.get("state_reason"),
+                       issue.get("closed_at"), issue.get("labels"),
+                       core.hashlib.sha256((issue.get("body") or "").encode()).hexdigest()])
+        saved = self.facts.setdefault(str(number), {})
+        entry = saved.get(field)
+        if not entry or entry["generation"] != generation:
+            value = (self.client.events(number) if field in {"events", "close_events"} else
+                     core.records(self.cfg, self.client.comments(number), number))
+            entry = {"generation": generation, "value": value}
+            saved[field] = entry
+            core.save(self.path, self.facts)
+        return entry["value"]
+
+    def priority(self, claim):
+        issue = self.rows[claim["issue"]]
+        if not any(label.get("name") == "priority:high" for label in issue.get("labels", [])):
+            return False
+        events = [e for e in self.fact(claim["issue"], "events")
+                  if e.get("event") in {"labeled", "unlabeled"}
+                  and e.get("label", {}).get("name") == "priority:high"]
+        event = max(events, key=lambda e: e.get("id", 0), default={})
+        actor = event.get("actor", {}).get("login")
+        return (event.get("event") == "labeled"
+                and (actor == self.cfg["actors"]["owner"] or core.has_role(self.cfg, actor, "product")))
+
+    def order(self, path):
+        claim = core.read(path)
+        if claim["stage"] != "claimed":
+            return (0, False, 0, claim["issue"], claim.get("event", 0))
+        approval = claim["event"]
+        if claim.get("primary"):
+            previous = [core.read(p) for p in self.claims_dir.glob("*.json")]
+            approval = max((c["event"] for c in previous
+                            if c["issue"] == claim["issue"] and not c.get("primary")), default=approval)
+        return (1, not self.priority(claim) if claim["issue"] in self.rows else True,
+                approval, claim["issue"], claim["event"])
+
+    def references(self, claim):
+        """Validate the dependency graph using already-listed issues, never PR reads."""
+        root = claim["issue"]
+        refs = dependency_numbers(claim["task"])
+        seen = set()
+
+        def visit(number, trail):
+            if number == root:
+                return f"#{number}: this story" if not trail else f"#{number}: a cycle"
+            issue = self.rows.get(number)
+            if issue is None or core.is_report(self.cfg, issue):
+                return f"#{number}: an unknown issue"
+            if "pull_request" in issue:
+                return f"#{number}: a pull request"
+            if number in trail:
+                return f"#{number}: a cycle"
+            if number in seen:
+                return None
+            seen.add(number)
+            for dependency in dependency_numbers(issue.get("body") or ""):
+                problem = visit(dependency, trail | {number})
+                if problem:
+                    return problem
+            return None
+
+        for number in refs:
+            problem = visit(number, set())
+            if problem:
+                return refs, problem
+        return refs, None
+
+    def merged(self, number):
+        issue = self.rows[number]
+        if any(label.get("name") in {"status:merged", "status:accepted"}
+               for label in issue.get("labels", [])):
+            return True
+        history = self.fact(number, "records")
+        if any(r["to"] == "merged" for r in history) or (history and history[-1]["to"] == "accepted"):
+            return True
+        if issue.get("state") != "closed":
+            return False
+        closes = [e for e in self.fact(number, "close_events") if e.get("event") == "closed"]
+        last = max(closes, key=lambda e: e.get("id", 0), default={})
+        return (last.get("actor", {}).get("login") == self.cfg["actors"]["owner"]
+                and last.get("state_reason") in {None, "completed"}
+                and issue.get("state_reason") == "completed")
+
+    def holder(self, claim):
+        local = jobs(self.cfg)
+        by_job = {job["id"]: job for job in local}
+        candidates = set()
+
+        def holding(job):
+            number = job.get("integration", {}).get("pr")
+            if type(number) is int and number > 0:
+                listed = self.rows.get(number)
+                owner = job.get("assignment", {}).get("lifecycle", {}).get("issue", job.get("github_number"))
+                # PRs are included in the all-issues listing. Fall back to the
+                # owning story generation when an older cache has no PR row.
+                pr_listed = listed is not None and "pull_request" in listed
+                signal = listed if pr_listed else self.rows.get(owner, {})
+                generation = [pr_listed, signal.get("updated_at"), signal.get("state"),
+                              signal.get("closed_at"), signal.get("labels")]
+                released = self.facts.setdefault("released_slots", {})
+                if number not in self.prs:
+                    if released.get(str(number)) == generation:
+                        return False
+                    self.prs[number] = self.client.request("GET", f"/pulls/{number}")
+                pr = self.prs[number]
+                if pr.get("state") not in {"open", "closed"}:
+                    raise core.Unavailable("Slot pull request state unavailable")
+                if pr["state"] == "closed":
+                    if released.get(str(number)) != generation:
+                        released[str(number)] = generation
+                        core.save(self.path, self.facts)
+                    return False
+                if str(number) in released:
+                    released.pop(str(number))
+                    core.save(self.path, self.facts)
+                return True
+            stopped = job["status"] in {"blocked", "needs_owner", "failed", "cancelled", "interrupted"}
+            retry = isinstance(job.get("retry"), dict) and "not_before" in job["retry"]
+            return not stopped or retry
+
+        for previous in (core.read(p) for p in self.claims_dir.glob("*.json")):
+            n = previous["issue"]
+            if n == claim["issue"] or self.rows.get(n, {}).get("state") == "closed":
+                continue
+            if (previous["stage"] in {"dispatched", "enqueued"}
+                    and (previous["job"] not in by_job or holding(by_job[previous["job"]]))):
+                candidates.add(n)
+        for job in local:
+            n = job.get("github_number", job.get("assignment", {}).get("lifecycle", {}).get("issue"))
+            if (type(n) is int and n != claim["issue"]
+                    and self.rows.get(n, {}).get("state") != "closed" and holding(job)):
+                candidates.add(n)
+        return min(candidates, default=None)
+
+    def decide(self, claim):
+        try:
+            refs, problem = self.references(claim)
+        except ValueError:
+            refs, problem = (), "text that isn't a list of #N"
+        if problem:
+            return None, ("This story's Dependencies line has a reference that can't be used ("
+                          + problem + "). Owner: fix the line, then re-approve.")
+        for number in refs:
+            if self.merged(number):
+                continue
+            if self.rows[number].get("state") == "closed":
+                return None, (f"This story depends on #{number}, which closed without merging. "
+                    f"Owner: if #{number} was finished by hand, add `status:merged` to it (#184); "
+                    "otherwise remove the dependency or change the story. Then re-approve.")
+            return {"dependency": number}, None
+        holder = self.holder(claim)
+        return ({"story": holder} if holder is not None else None), None
+
+    def stop(self, path, claim, body):
+        record = core.public_record(self.cfg, claim["issue"], claim["job"], 0, "needs-owner",
+                                    event=claim["event"], reason="dependency_closed_unmerged")
+        record.update({"from": core.state(self.rows[claim["issue"]]),
+                       "actor": self.cfg["actors"]["runner"]})
+        core.queue(self.cfg, record, public_body=body + "\n" + core.record_body(record))
+        flush_outbox(self.cfg, self.client)
+        claim.update(stage="finished")
+        claim.pop("waiting", None)
+        claim.pop("error", None)
+        core.save(path, claim)
 
 def local_errors(cfg):
     return sorted((Path(cfg["state_dir"]) / "story-errors").glob("*.json"))
@@ -1003,7 +1230,16 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 core.create(path, claim)
         processed = []
         runner = runner_module()
+        queue = StoryQueue(cfg, client, rows, changed, claims_dir)
+        ordered = []
         for path in sorted(claims_dir.glob("*.json")):
+            claim = core.read(path)
+            issue = by_number.get(claim["issue"])
+            if not issue or claim["issue"] in failed | skipped:
+                continue
+            with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim):
+                ordered.append((queue.order(path), path))
+        for _, path in sorted(ordered):
             claim = core.read(path)
             if claim["stage"] == "finished" and claim.get("cleaned"):
                 continue
@@ -1016,6 +1252,16 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
                                 observed=observed):
                 core.state(issue)
+                if claim["stage"] == "claimed" and core.can_start(issue):
+                    waiting, problem = queue.decide(claim)
+                    if problem:
+                        queue.stop(path, claim, problem)
+                        continue
+                    if waiting:
+                        claim["waiting"] = waiting
+                        core.save(path, claim)
+                        continue
+                    claim.pop("waiting", None)
                 # The current all-issues listing already proves closed/final stories
                 # cannot execute. Keep fresh evidence checks for claims that can.
                 finished = not core.can_start(issue)
@@ -1026,6 +1272,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     finished = not core.can_start(issue, evidence)
                 if finished:
                     claim["stage"] = "finished"
+                    claim.pop("waiting", None)
                     completed_path = (root / "jobs" / claim["job"] / "runner-state"
                                       / "tasks" / (claim["job"] + ".json"))
                     if completed_path.exists():
@@ -1332,6 +1579,7 @@ def status(cfg, *, clock=time.time):
         if c["stage"] != "finished"
     ]
     lines.extend(active or ["  none"])
+    lines.extend("  " + queue_wait_text(n, wait) for n, wait in queue_waiting(cfg).items())
     lines.append("Jobs:")
 
     def issue_number(job):
