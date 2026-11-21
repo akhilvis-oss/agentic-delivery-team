@@ -750,3 +750,88 @@ def test_queue_terminal_error_claim_does_not_retain_unowned_wait(tmp_path, monke
     assert later.holder(next_claim) == expected
     assert sum(call[:2] == ('GET', '/pulls/77') for call in hub.calls) == (2 if pr_state == 'open' else reads)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('window,change', [
+    (window, change) for window in ['after_scan', 'later_issue']
+    for change in ['body', 'label', 'approval', 'closed', 'dispatch']
+] + [('later_history', 'dispatch')])
+@pytest.mark.parametrize('phase', ['worker', 'reviewer'])
+def test_late_wait_admission_change_finishes_without_suspending(
+        tmp_path, monkeypatch, window, change, phase):
+    cfg, hub, tool, attempts = retry_story(tmp_path, monkeypatch, role=phase,
+                                          partial=phase == 'worker')
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    old, = service.jobs(cfg)
+    claim = newest_claim(cfg)
+    original_scan = service.cancel_waiting
+    client = hub.client()
+    original_issue = client.issue
+    original_comments = client.comments
+    gate = {'armed': False, 'changed': False, 'reads': 0, 'histories': 0}
+
+    def mutate():
+        if gate['changed']:
+            return
+        gate['changed'] = True
+        if change == 'body':
+            hub.issues[1]['body'] += '\nLate approved-text change'
+        elif change == 'label':
+            hub.event(1, 'needs-owner', 'owner')
+        elif change == 'approval':
+            reapprove(hub)
+        elif change == 'closed':
+            hub.issues[1]['state'] = 'closed'
+        else:
+            record = core.public_record(cfg, 1, 'new-dispatch', 0, 'dispatched',
+                                        event=claim['event'])
+            record.update({'from': 'approved', 'actor': cfg['actors']['runner']})
+            hub.comments_by_issue[1].append({'user': {'login': cfg['actors']['runner']},
+                                           'body': core.record_body(record)})
+
+    def scan(*args, **kwargs):
+        result = original_scan(*args, **kwargs)
+        gate['armed'] = True
+        if window == 'after_scan':
+            mutate()
+        return result
+
+    def issue(number):
+        if gate['armed'] and number == 1:
+            gate['reads'] += 1
+            if window == 'later_issue' and gate['reads'] == 2:
+                mutate()
+        return original_issue(number)
+
+    def comments(number):
+        if gate['armed'] and number == 1:
+            gate['histories'] += 1
+            if window == 'later_history' and gate['histories'] == 2:
+                mutate()
+        return original_comments(number)
+
+    monkeypatch.setattr(service, 'cancel_waiting', scan)
+    monkeypatch.setattr(client, 'issue', issue)
+    monkeypatch.setattr(client, 'comments', comments)
+    before = list(attempts)
+    service.poll(cfg, client, clock=lambda: 200)
+    assert gate['changed']
+    stopped = next(j for j in service.jobs(cfg) if j['id'] == old['id'])
+    final = core.read(Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json'))
+    assert final['stage'] == 'finished' and not final.get('error')
+    assert stopped['status'] == 'needs_owner' and not stopped.get('retry')
+    assert attempts == before
+    records = core.records(cfg, hub.comments_by_issue[1], 1)
+    held = [r for r in records if r['job'] == old['id'] and r['reason'] == 'agent_sign_in_failed']
+    if change == 'body':
+        assert stopped['continuation'] and stopped['head_commit']
+        assert len(held) == 1
+    else:
+        assert not stopped.get('continuation') and not stopped.get('head_commit')
+        assert held == []
+    queue = service.StoryQueue(cfg, client, hub.issues, set(), Path(cfg['state_dir']) / 'claims')
+    assert queue.holder({'issue': 2}) is None
+    service.poll(cfg, client, run_jobs=False, clock=lambda: 300)
+    after = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert len([r for r in after if r['job'] == old['id'] and r['reason'] == 'agent_sign_in_failed']) == len(held)
+    assert attempts == before

@@ -1089,10 +1089,60 @@ def waiting_lines(cfg):
     return sorted(lines)
 
 
+def cancel_waiting_claim(cfg, client, claim, *, fresh=None, history=None):
+    """Apply AC-7 to changes observed by the scan or later admission reads."""
+    if claim["stage"] != "enqueued" or not claim.get("config"):
+        return False
+    tool = runner_module()
+    path = (Path(cfg["state_dir"]) / "jobs" / claim["job"] / "runner-state"
+            / "tasks" / (claim["job"] + ".json"))
+    if not path.exists():
+        return False
+    job = core.read(path)
+    if job["status"] != "waiting_system":
+        return False
+    fresh = client.issue(claim["issue"]) if fresh is None else fresh
+    history = (core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+               if history is None else history)
+    dispatches = [r for r in history if r["to"] == "dispatched"]
+    events = client.events(claim["issue"])
+    _, latest = core.canonical_state(cfg, events)
+    running = {"dispatched", "in-progress", "committed", "in-review", "changes-requested"}
+    owner_action = (core.state(fresh) not in running
+                    or latest is not None and int(latest["id"]) > claim["event"]
+                    and latest.get("actor", {}).get("login") == cfg["actors"]["owner"])
+    local = (fresh["state"] != "open" or owner_action or not core.can_start(fresh, history)
+             or not dispatches or dispatches[-1]["job"] != claim["job"])
+    changed = (fresh.get("body") or "") != claim["task"]
+    if not local and not changed:
+        return False
+    retry = job.pop("retry")
+    job.update(status="needs_owner", blocked_reason=tool.block_reason(retry["code"]),
+               updated_at=tool.now())
+    if local:
+        # Deliberately discard this attempt's unpublished continuation.
+        job["retry_local_end"] = True
+        for field in ("head_commit", "continuation", "stop_saving", "stop_ready"):
+            job.pop(field, None)
+        core.save(path, job)
+    else:
+        config = tool.load_config(claim["config"])
+        tool.verify_assignment(config, job)
+        if not tool.service_claim_owns(cfg, config, job):
+            raise core.IntegrityError("Waiting claim/job binding changed")
+        expected = job.get("system_retry_context", {}).get("stop_expected")
+        if expected is not None:
+            tool.save_at_stop(config, path, job, job.get("head_commit") or expected)
+        tool.save_job(config, path, job)
+        tool.publish_receipt(config, path, job)
+    claim.update(stage="finished", head=job.get("head_commit"))
+    claim.pop("error", None)
+    core.save(Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json"), claim)
+    return True
+
+
 def cancel_waiting(cfg, client, claims, issues, failed, skipped):
     """Retire waiting attempts before continuation can inspect a new claim."""
-    running = {"dispatched", "in-progress", "committed", "in-review", "changes-requested"}
-    tool = runner_module()
     for claim in claims:
         if claim["stage"] != "enqueued" or not claim.get("config"):
             continue
@@ -1100,48 +1150,7 @@ def cancel_waiting(cfg, client, claims, issues, failed, skipped):
         if issue is None or claim["issue"] in failed | skipped:
             continue
         with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim):
-            path = (Path(cfg["state_dir"]) / "jobs" / claim["job"] / "runner-state"
-                    / "tasks" / (claim["job"] + ".json"))
-            if not path.exists():
-                continue
-            job = core.read(path)
-            if job["status"] != "waiting_system":
-                continue
-            fresh = client.issue(claim["issue"])
-            history = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
-            dispatches = [r for r in history if r["to"] == "dispatched"]
-            events = client.events(claim["issue"])
-            _, latest = core.canonical_state(cfg, events)
-            owner_action = (core.state(fresh) not in running
-                            or latest is not None and int(latest["id"]) > claim["event"]
-                            and latest.get("actor", {}).get("login") == cfg["actors"]["owner"])
-            local = (fresh["state"] != "open" or owner_action or not core.can_start(fresh, history)
-                     or not dispatches or dispatches[-1]["job"] != claim["job"])
-            changed = (fresh.get("body") or "") != claim["task"]
-            if not local and not changed:
-                continue
-            retry = job.pop("retry")
-            job.update(status="needs_owner", blocked_reason=tool.block_reason(retry["code"]),
-                       updated_at=tool.now())
-            if local:
-                # Deliberately discard this attempt's unpublished continuation.
-                job["retry_local_end"] = True
-                for field in ("head_commit", "continuation", "stop_saving", "stop_ready"):
-                    job.pop(field, None)
-                core.save(path, job)
-            else:
-                config = tool.load_config(claim["config"])
-                tool.verify_assignment(config, job)
-                if not tool.service_claim_owns(cfg, config, job):
-                    raise core.IntegrityError("Waiting claim/job binding changed")
-                expected = job.get("system_retry_context", {}).get("stop_expected")
-                if expected is not None:
-                    tool.save_at_stop(config, path, job, job.get("head_commit") or expected)
-                tool.save_job(config, path, job)
-                tool.publish_receipt(config, path, job)
-            claim.update(stage="finished", head=job.get("head_commit"))
-            claim.pop("error", None)
-            core.save(Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json"), claim)
+            cancel_waiting_claim(cfg, client, claim)
 
 
 def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
@@ -1353,6 +1362,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     observed["issue"] = issue
                     evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
                     finished = not core.can_start(issue, evidence)
+                if cancel_waiting_claim(cfg, client, claim, fresh=issue,
+                                        history=evidence if not finished else None):
+                    finished = not core.can_start(issue)
                 if finished:
                     claim["stage"] = "finished"
                     claim.pop("waiting", None)
@@ -1423,6 +1435,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     continue
                 fresh = client.issue(claim["issue"])
                 observed["issue"] = fresh
+                if cancel_waiting_claim(cfg, client, claim, fresh=fresh):
+                    continue
                 if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
                     claim.update(
                         stage="suspended", error="admission_changed_requires_reconciliation"
@@ -1493,6 +1507,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         cfg, client.comments(claim["issue"]), claim["issue"]
                     )
                     dispatches = [r for r in remote_records if r["to"] == "dispatched"]
+                    if cancel_waiting_claim(cfg, client, claim, fresh=fresh, history=remote_records):
+                        continue
                     if (
                         core.state(fresh)
                         not in (
