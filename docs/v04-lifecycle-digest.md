@@ -459,3 +459,38 @@ another notice; the PR and auto-merge setting stay as they are. A merge may firs
 produce a public "blocked → merged was rejected" comment and one failing lifecycle
 check; adding `status:merged` finishes the story. Auto-merge may still merge it
 by itself.
+
+## Approved-story queue
+
+Only one new story per repository runs at a time. Approved `priority:high` stories
+go first, then current owner approval order; a re-approval takes a new position.
+Priority is trusted only when its latest add/remove event came from the owner or
+Product, and never bypasses approval, dependencies or the occupied slot.
+
+Write dependencies in `## Dependencies` or `### Dependencies`, on the first
+`Depends on` line. Before its first full stop, use only positive `#N` references
+separated by `, `, ` and ` or `, and `. For example:
+
+```markdown
+## Dependencies
+Depends on #12 and #15. Additional explanation goes here.
+```
+
+`Depends on nothing.` or no such line means no dependencies. The approved claim
+freezes this text. Merged/accepted status, a verified merge record, or a completed
+close by the owner releases a dependency. A non-owner or not-planned close does
+not. Bad references (including pull requests, unknown issues, self-references and
+cycles) and closed-unmerged dependencies stop with `dependency_closed_unmerged`,
+without an upgrade-blocking claim error. Reconcile the named dependency or fix
+the line and re-approve. The service does not retry these decisions.
+
+A story keeps the slot through its open PR, including a retired delivery waiting
+for owner merge. Closing/merging that PR, closing the issue, or stopping without
+an open PR frees it. An explicitly scheduled automatic retry retains the slot;
+same-story re-approvals and continuations do not wait for themselves. Already
+dispatched stories continue normally.
+
+Status and stand-up show what each waiting story depends on, rather than calling
+it stale. Status may lag one poll. Unchanged waiting adds no dependency requests;
+an occupied slot's PR is read once per poll. Waiting does not block a service
+upgrade. Configurable parallel lanes and PR refresh are separate work.
