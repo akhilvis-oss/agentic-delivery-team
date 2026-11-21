@@ -158,15 +158,18 @@ def test_recorded_one_click_approval_ignores_workflow_draft_removal(cfg):
     })
     events = client.events(122)
     state, approval = core.canonical_state(cfg, events)
-    assert state == "approved"
+    assert state == "draft"
     assert approval["actor"]["login"] == owner
+    assert approval["created_at"] == "2026-11-13T17:51:27Z"
     removal = next(e for e in events if e["event"] == "unlabeled"
                    and e.get("label", {}).get("name") == "status:draft")
     before = [e for e in events if e["id"] < removal["id"]]
     after = [e for e in events if e["id"] <= removal["id"]]
     assert removal["actor"]["login"] == cfg["actors"]["workflow"]
     assert core.canonical_state(cfg, before) == core.canonical_state(cfg, after)
-    assert core.canonical_state(cfg, after) == ("approved", approval)
+    prefix_approval = next(e for e in before if e["id"] == 36052099664)
+    assert prefix_approval["created_at"] == "2026-11-13T16:49:00Z"
+    assert core.canonical_state(cfg, after) == ("approved", prefix_approval)
 
 
 @pytest.mark.parametrize("path", ["/", "/pulls/3?extra=1"])

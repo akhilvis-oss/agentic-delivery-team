@@ -187,6 +187,9 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
         if (record["job"] != source["id"] or record["commit"] != head
                 or not core.has_role(cfg, record["actor"], "runner")):
             return False
+        if (record.get("from") == record["to"] == "draft"
+                and record.get("reason") == "owner_withdrew" and record.get("continuation")):
+            return True
         if source["status"] == "ready_for_integration":
             return record["kind"] == "review" and record["outcome"] == "ready_for_integration"
         return (record["to"] == targets.get(source["status"])
@@ -233,7 +236,61 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
         claim["continuation_number"] = count + 1
 
 
+def withdraw_claim(cfg, client, path, claim, issue):
+    labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+    if (claim["stage"] == "finished" or "status:draft" not in labels
+            or not core.can_start(issue)):
+        return False
+    if not core.withdrawal(cfg, client, issue, claim["event"]):
+        return False
+    runner = runner_module()
+    job_path = (Path(cfg["state_dir"]) / "jobs" / claim["job"] / "runner-state"
+                / "tasks" / (claim["job"] + ".json"))
+    if job_path.exists():
+        config, job = source_work(cfg, claim["job"])
+        # Only a held runner lock proves that a phase is still live. Never
+        # signal a persisted PID or replay an abandoned phase.
+        if job["status"].startswith("running_"):
+            with contextlib.ExitStack() as held:
+                try:
+                    acquired = held.enter_context(runner.lock(Path(config["state_dir"]) / "runner.lock"))
+                except OSError as exc:
+                    raise core.Unavailable("Runner liveness lock unavailable") from exc
+                if not acquired:
+                    return True
+                current = core.read(path)
+                fields = ("job", "issue", "event", "primary", "worktree", "config", "task", "stage")
+                if any(current.get(field) != claim.get(field) for field in fields):
+                    return True
+                claim.clear()
+                claim.update(current)
+                config, job = source_work(cfg, claim["job"])
+                if not runner.service_claim_owns(cfg, config, job):
+                    raise core.IntegrityError("Running claim/job binding changed")
+                fresh = client.issue(claim["issue"])
+                if not core.withdrawal(cfg, client, fresh, claim["event"]):
+                    return False
+                if job["status"].startswith("running_"):
+                    job["interrupted_phase"] = job["status"]
+                runner.withdrawal_stop(config, job_path, job)
+        else:
+            if job["status"] == "waiting_system" and not runner.service_claim_owns(cfg, config, job):
+                raise core.IntegrityError("Waiting claim/job binding changed")
+            runner.withdrawal_stop(config, job_path, job)
+        claim["head"] = job.get("head_commit")
+    else:
+        core.queue(cfg, core.withdrawal_record(cfg, claim["issue"], claim["job"], claim["event"]))
+        flush_outbox(cfg, client)
+    claim.update(stage="finished")
+    claim.pop("error", None)
+    claim.pop("waiting", None)
+    core.save(path, claim)
+    return True
+
+
 def stop_continuation(cfg, client, path, claim, reason, files=None):
+    if withdraw_claim(cfg, client, path, claim, client.issue(claim["issue"])):
+        return
     record = core.public_record(
         cfg, claim["issue"], claim["job"], 0, "blocked",
         event=claim["event"], reason=reason, conflict_files=files,
@@ -984,6 +1041,8 @@ class StoryQueue:
         return ({"story": holder} if holder is not None else None), None
 
     def stop(self, path, claim, body):
+        if withdraw_claim(self.cfg, self.client, path, claim, self.client.issue(claim["issue"])):
+            return
         record = core.public_record(self.cfg, claim["issue"], claim["job"], 0, "needs-owner",
                                     event=claim["event"], reason="dependency_closed_unmerged")
         record.update({"from": core.state(self.rows[claim["issue"]]),
@@ -1053,6 +1112,9 @@ def story_boundary(cfg, client, issue, failed, skipped, claims, *, claim=None,
             event = int(approval["event"]["id"])
             candidate = dict(issue=number, event=event,
                              job=f"issue-{number}-event-{event}", stage="claimed")
+        if withdraw_claim(cfg, client, Path(cfg["state_dir"]) / "claims" / (candidate["job"] + ".json"),
+                          candidate, client.issue(number)):
+            return
         record = core.public_record(
             cfg, number, candidate["job"], 0, "blocked", event=candidate["event"],
             reason="unexpected_error", exception_class=exception_name(exc),
@@ -1102,11 +1164,20 @@ def cancel_waiting_claim(cfg, client, claim, *, fresh=None, history=None):
     if job["status"] != "waiting_system":
         return False
     fresh = client.issue(claim["issue"]) if fresh is None else fresh
+    claim_path = Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json")
+    # Owner withdrawal preserves this wait's work; other AC-7 cancellations
+    # keep the retry story's save-or-discard rules.
+    if withdraw_claim(cfg, client, claim_path, claim, fresh):
+        return True
     history = (core.records(cfg, client.comments(claim["issue"]), claim["issue"])
                if history is None else history)
     dispatches = [r for r in history if r["to"] == "dispatched"]
     events = client.events(claim["issue"])
     _, latest = core.canonical_state(cfg, events)
+    draft = core.owner_draft_event(cfg, events)
+    if (draft and int(draft["id"]) > claim["event"]
+            and withdraw_claim(cfg, client, claim_path, claim, client.issue(claim["issue"]))):
+        return True
     running = {"dispatched", "in-progress", "committed", "in-review", "changes-requested"}
     owner_action = (core.state(fresh) not in running
                     or latest is not None and int(latest["id"]) > claim["event"]
@@ -1343,6 +1414,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             observed = {"issue": issue}
             with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
                                 observed=observed):
+                if withdraw_claim(cfg, client, path, claim, issue):
+                    continue
                 core.state(issue)
                 if claim["stage"] == "claimed" and core.can_start(issue):
                     waiting, problem = queue.decide(claim)
@@ -1435,6 +1508,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     continue
                 fresh = client.issue(claim["issue"])
                 observed["issue"] = fresh
+                if withdraw_claim(cfg, client, path, claim, fresh):
+                    continue
                 if cancel_waiting_claim(cfg, client, claim, fresh=fresh):
                     continue
                 if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
@@ -1502,6 +1577,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     core.save(path, claim)
                     fresh = client.issue(claim["issue"])
                     observed["issue"] = fresh
+                    if withdraw_claim(cfg, client, path, claim, fresh):
+                        continue
                 if claim["stage"] in {"dispatched", "enqueued"}:
                     remote_records = core.records(
                         cfg, client.comments(claim["issue"]), claim["issue"]

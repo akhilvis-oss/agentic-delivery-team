@@ -60,6 +60,7 @@ Each code belongs to exactly one kind.
 
 | Kind | Stop reason | What happened and what to do |
 | --- | --- | --- |
+| Needs your decision | `owner_withdrew` | The owner added `status:draft`. The story stays draft and eligible work is saved. Re-approve to continue saved work; if the notice says “start it again”, re-approve to restart. If auto-merge cancellation is unconfirmed, check the PR. |
 | Needs your decision | `owner_question` | The builder's exact question is quoted. Add your answer to the story under **Owner decisions**, then re-approve. |
 | Needs your decision | `readiness_question` | The read-only readiness pass stopped before building. Answer the quoted questions under **Owner decisions**, then re-approve. This stop saves no work and spends no continuation. |
 | Needs your decision | `question_withheld` | A question looked private and was withheld in full. Write "Please ask a public-safe question" under **Owner decisions**, then re-approve. Do not paste private logs into GitHub. |
@@ -344,3 +345,9 @@ Examples of the public details and next actions:
 **Owner.** Use `Refs #N` in a hand-built PR, merge it, and close any open runner PR before finishing. Add `status:merged` as the configured owner; leave the previous status selected. The guard removes that label and verifies your label event, publishes a workflow-authored `finish` record (`finished_by_owner`, with the event ID), then closes the issue after confirming the record. A later issue event recovers a dropped run, even a body edit while both labels remain. Read the Actions run if the record is missing. A closed issue without a merged record or label can also be finished. Owner-account comments never substitute for attestation.
 
 A finish is final; a mistaken finish needs a new story. Closing an open runner PR afterwards fails its lifecycle check once and changes nothing; the check itself is unchanged. `accepted` remains available. Cleanup removes a clean managed worktree, and removes its branch and saved-work reference only if merged into the target. Otherwise it keeps both and reports `Issue #N: owner finish kept unmerged work` until you remove the branch. An owner close before finishing already removes the saved-work reference. Dirty or changed worktrees still require reconciliation.
+
+### Withdrawing a story
+
+The configured owner can add `status:draft` from an active status. The guard removes the old status label without a restoration notice. A running agent stops at its next phase or delivery check; the local `CANCEL` file remains the only immediate stop. Progress stays local after withdrawal, and the holder of a claim or running job posts one `owner_withdrew` notice. With no claim or running job, the owner label event is the record.
+
+An open PR stays open and auto-merge is turned off. Re-approving while it is open gives `pr_open_reapproval`. Close the PR to move the story to `needs-owner` with `pr_closed_unmerged`, then re-approve to rebuild from saved work. If you merge it first, a draft → merged rejection comment and one failing lifecycle check remain until you add `status:merged` to attest the finish.

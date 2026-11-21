@@ -398,6 +398,30 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     return "pass"
 
 
+def disable_withdrawn_merge(runner, config, path, job, client=None):
+    delivery = job.get("integration", {})
+    if not delivery.get("pr") or job.get("withdrawal_merge_checked"):
+        return
+    # Save an attempt before a mutation: recovery never blindly repeats it.
+    if job.get("withdrawal_merge_attempted"):
+        job["withdrawal_auto_merge_uncertain"] = True
+        return
+    job["withdrawal_merge_attempted"] = True
+    runner.save(path, job)
+    try:
+        core = runner.lifecycle_api()
+        cfg = core.load_config(config["lifecycle_config"])
+        client = client or client_for(core, cfg, config)
+        pr = client.request("GET", f"/pulls/{delivery['pr']}")
+        if pr.get("auto_merge") or delivery.get("stage") == "auto_merge_enabled" or delivery.get("intent") == "auto_merge":
+            if client.disable_auto_merge(pr) is not True:
+                raise core.Uncertain("Auto-merge cancellation unconfirmed")
+        job["withdrawal_merge_checked"] = True
+    except Exception:
+        job["withdrawal_auto_merge_uncertain"] = True
+    runner.save(path, job)
+
+
 def advance(runner, config, path, job, client=None):
     if job.get("delivery_retired"):
         return
@@ -433,7 +457,28 @@ def advance(runner, config, path, job, client=None):
         job["updated_at"] = runner.now()
         runner.save_job(config, path, job)
 
+    def is_withdrawn():
+        binding = job["assignment"].get("lifecycle")
+        if not binding:
+            return False
+        try:
+            issue = client.issue(binding["issue"])
+            # Legacy/custom delivery transports may delegate event reads to
+            # the lifecycle reader. Both paths use authenticated API actors.
+            labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+            if "status:draft" not in labels:
+                return False
+            reader = client if hasattr(client, "events") else core.GitHub(cfg)
+            return core.withdrawal(cfg, reader, issue, binding["event"])
+        except Exception:
+            # Missing withdrawal evidence grants no new permission. The normal
+            # delivery authorization below still fails closed on unavailable reads.
+            return False
+
     def stop(reason, owner=False):
+        if is_withdrawn():
+            runner.withdrawal_stop(config, path, job, client)
+            return
         if (delivery.get("stage") == "auto_merge_enabled" or delivery.get("intent") == "auto_merge"):
             if delivery.get("disable_attempted"):
                 reason, owner = "auto_merge_disable_uncertain", True
@@ -487,6 +532,9 @@ def advance(runner, config, path, job, client=None):
         return value
 
     try:
+        if is_withdrawn():
+            runner.withdrawal_stop(config, path, job, client)
+            return
         reviewed(runner, config, job)
         if delivery.get("disable_attempted"):
             stop("auto_merge_disable_uncertain", True)
