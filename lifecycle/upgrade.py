@@ -20,6 +20,7 @@ SWITCH = object()
 DEFER = []
 MISMATCH = "Upgrades are off: versions_dir does not match the launcher's folder."
 UNREADABLE = "Upgrades are off: the switch record is unreadable."
+RULES_REFUSAL = 'status-rules-refusal.json'
 _pending_timer = None
 
 
@@ -140,6 +141,26 @@ def write(folder, record):
         Path(name).unlink(missing_ok=True)
 
 
+def rules_refusal(folder):
+    """An unreadable advisory file must never disable upgrades."""
+    try:
+        item = core.read(Path(folder) / RULES_REFUSAL)
+        if (not isinstance(item, dict) or set(item) != {'commit', 'running', 'required'}
+                or not isinstance(item['commit'], str) or not core.SHA.fullmatch(item['commit'])
+                or not isinstance(item['running'], str) or not core.SHA.fullmatch(item['running'])
+                or type(item['required']) is not int or item['required'] < 1):
+            return None
+        return item
+    except (OSError, ValueError):
+        return None
+
+
+def rules_notice(item):
+    return (f"Framework commit {item['commit'][:7]} needs the seven-status rules and guard. "
+            f"This service stays on {item['running'][:7]}. Owner: follow 'Moving to seven statuses' "
+            "in `docs/v04-lifecycle-digest.md`.")
+
+
 def context(cfg):
     """Resolve only local state. Called inside the poll lock."""
     cfg.pop('_upgrade_notice', None)
@@ -157,7 +178,8 @@ def context(cfg):
     except (OSError, ValueError, UnicodeError):
         cfg['_upgrade_notice'] = UNREADABLE
         return None
-    cfg['_upgrade_notice'] = record['notice']
+    refusal = rules_refusal(folder)
+    cfg['_upgrade_notice'] = rules_notice(refusal) if refusal else record['notice']
     return folder, record
 
 
@@ -214,6 +236,13 @@ def attempt(cfg, ctx, on_read=None):
         commit = product.request('GET', '/commits/main')['sha']
         if not isinstance(commit, str) or not core.SHA.fullmatch(commit):
             return False
+        refusal = rules_refusal(folder)
+        if refusal and refusal['commit'] != commit:
+            (folder / RULES_REFUSAL).unlink(missing_ok=True)
+            cfg['_upgrade_notice'] = record['notice']
+            refusal = None
+        if refusal:
+            return False
         running = record['current'] or cfg['upgrade']['initial_commit']
         if commit in {running, record['previous']} or commit in record['refused'].split():
             return False
@@ -243,6 +272,16 @@ def attempt(cfg, ctx, on_read=None):
         if exported != commit:
             return False
         shutil.rmtree(root / 'download')
+        try:
+            required = core.read_statuses_version(install / 'lifecycle/statuses-version', missing=True)
+        except (OSError, ValueError):
+            refuse(folder, record, commit)
+            return False
+        if required > cfg.get('statuses_version', 1):
+            refusal = dict(commit=commit, running=running, required=required)
+            core.save(folder / RULES_REFUSAL, refusal)
+            cfg['_upgrade_notice'] = rules_notice(refusal)
+            return False
         try:
             code = start_check(install, cfg)
         except subprocess.TimeoutExpired:
