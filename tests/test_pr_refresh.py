@@ -1,6 +1,7 @@
 """Same-job PR refresh: offline Git repositories and synthetic GitHub only."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -617,9 +618,10 @@ def test_delivery_client_exact_body_patch_capability_and_issue_refusal():
             return method == "PATCH" and path == "/issues/1"
 
         def request(self, *args):
-            if not self.write_allowed(args[0], args[1]):
+            prepared = self.consume_write_payload(*args)
+            if prepared is None and not self.write_allowed(args[0], args[1]):
                 raise ValueError("Transport refuses unscoped writes")
-            sent.append(args)
+            sent.append((*args[:2], json.loads(prepared)) if prepared is not None else args)
 
     client = api.client_for(SimpleNamespace(GitHub=Base), {})
     assert client.write_allowed("POST", "/pulls")

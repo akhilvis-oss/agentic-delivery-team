@@ -1156,14 +1156,21 @@ class GitHub:
             r"/(?:labels|issues(?:/[1-9]\d*(?:/(?:comments|assignees|labels))?)?)", path
         ))
 
+    def consume_write_payload(self, method, path, data):
+        """Optional one-request capability; ordinary roles retain their policy."""
+        return None
+
     def request(self, method, path, data=None):
         comparison = method == "GET" and re.fullmatch(r"/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
         if (not path.startswith("/") or (".." in path and not comparison)
                 or "#" in path or "\\" in path):
             raise ValueError("Invalid repository API path")
+        prepared = self.consume_write_payload(method, path, data) if method != "GET" else None
+        if prepared is not None and type(prepared) is not bytes:
+            raise ValueError("Write capability must supply immutable bytes")
         self.ensure_actor()
         if method != "GET":
-            if not self.write_allowed(method, path):
+            if prepared is None and not self.write_allowed(method, path):
                 raise ValueError("Only repository issue/label writes are permitted")
             self.ensure_actor()
         suffix = "" if method == "GET" and path == "/" else path
@@ -1171,7 +1178,7 @@ class GitHub:
         req = urllib.request.Request(
             url,
             method=method,
-            data=None if data is None else json.dumps(data).encode(),
+            data=prepared if prepared is not None else (None if data is None else json.dumps(data).encode()),
             headers={
                 "Authorization": "Bearer " + self.token,
                 "Accept": "application/vnd.github+json",

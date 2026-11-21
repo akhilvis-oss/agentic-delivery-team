@@ -115,11 +115,23 @@ def client_for(core, cfg, config=None):
             return core.app_client(cfg, status_only=True).pages(
                 f"/commits/{head}/statuses")
 
+        def consume_write_payload(self, method, path, data):
+            if method == "PATCH" and re.fullmatch(r"/(?:pulls|issues)/[1-9]\d*", path):
+                capability = self.__dict__.pop("_pr_body_write", None)
+                if (capability is None or capability[0] != path
+                        or type(data) is not dict or set(data) != {"body"}
+                        or type(data["body"]) is not str or data["body"] != capability[1]):
+                    raise ValueError("PR body edit capability missing or mismatched")
+                # Consume before identity/transport callbacks, and transmit these
+                # bytes even if a callback mutates the original input mapping.
+                return json.dumps({"body": capability[1]}).encode()
+            return None
+
         def write_allowed(self, method, path):
             if method == "PATCH" and re.fullmatch(r"/issues/[1-9]\d*", path):
                 return False
             if method == "PATCH" and re.fullmatch(r"/pulls/[1-9]\d*", path):
-                return getattr(self, "_pr_body_write", (None,))[0] == path
+                return False
             return super().write_allowed(method, path) or (
                 method == "POST" and bool(re.fullmatch(r"/pulls(?:/[1-9]\d*/reviews)?", path))) or (
                 method == "PUT" and bool(re.fullmatch(r"/pulls/[1-9]\d*/merge", path)))
@@ -441,14 +453,16 @@ def edit_pr_body(client, job, number, payload, tier):
             or any(new[t] != old[t] for t in titles if t not in allowed)):
         raise ValueError("Only approved evidence sections may change")
     path = f"/pulls/{number}"
-    if hasattr(client, "_pr_body_write"):
+    if getattr(client, "_pr_body_edit_active", False) or hasattr(client, "_pr_body_write"):
         raise ValueError("Nested PR edit refused")
     data = {"body": new_body}
-    client._pr_body_write = (path, data)
+    client._pr_body_edit_active = True
+    client._pr_body_write = (path, new_body)
     try:
         return client.request("PATCH", f"/pulls/{number}", data)
     finally:
-        del client._pr_body_write
+        client.__dict__.pop("_pr_body_write", None)
+        client.__dict__.pop("_pr_body_edit_active", None)
 
 
 def refreshed_body(old, rendered, tier):
