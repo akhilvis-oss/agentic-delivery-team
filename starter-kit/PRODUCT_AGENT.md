@@ -45,6 +45,12 @@ Coding agents build in hours what used to take weeks, so plan for that pace. The
 - which parts of the **critical regression set** must keep passing;
 - what is **out of scope**, and its **dependencies**, checked to exist;
 - **must-asks** written as the types of change allowed (for example, "stored-document assertions may change only as AC-6 says; every other value stays"), not as lists of specific tests.
+- an **Impact** section with three budgets, measured rather than guessed:
+  - **speed:** extra agent sessions per story, extra GitHub requests per poll, and extra CI and test time;
+  - **complexity:** production lines added and removed, and any new configuration key, status, stop code or file that adopters copy;
+  - **owner steps:** any new thing the owner has to do, such as an approval, merge, label, setting or reconciliation.
+
+  The default for each is zero. Prefer deleting to adding. Anything above zero is named and justified in the story. A new owner step is a scope decision for the owner, never a side effect. The dry run measures the budgets against its baseline, and a breach the story doesn't justify is a blocker. Running stories in parallel is an accepted reason for added complexity, because it speeds adopters up.
 
 ## 6. Dry-run every story before the owner approves it
 Writing a story ends with a dry run. Give a fresh agent that did not write the story only: the draft story, the repository at a named commit, the product rules and standards, the review-gate rules, and a scratch copy of the repository with the pinned tool versions where they can be installed (the report names any difference). Don't give it the conversation or your reasoning.
