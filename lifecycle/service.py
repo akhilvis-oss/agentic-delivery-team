@@ -911,12 +911,31 @@ class StoryQueue:
         def holding(job):
             number = job.get("integration", {}).get("pr")
             if type(number) is int and number > 0:
+                listed = self.rows.get(number)
+                owner = job.get("assignment", {}).get("lifecycle", {}).get("issue", job.get("github_number"))
+                # PRs are included in the all-issues listing. Fall back to the
+                # owning story generation when an older cache has no PR row.
+                pr_listed = listed is not None and "pull_request" in listed
+                signal = listed if pr_listed else self.rows.get(owner, {})
+                generation = [pr_listed, signal.get("updated_at"), signal.get("state"),
+                              signal.get("closed_at"), signal.get("labels")]
+                released = self.facts.setdefault("released_slots", {})
                 if number not in self.prs:
+                    if released.get(str(number)) == generation:
+                        return False
                     self.prs[number] = self.client.request("GET", f"/pulls/{number}")
                 pr = self.prs[number]
                 if pr.get("state") not in {"open", "closed"}:
                     raise core.Unavailable("Slot pull request state unavailable")
-                return pr["state"] == "open"
+                if pr["state"] == "closed":
+                    if released.get(str(number)) != generation:
+                        released[str(number)] = generation
+                        core.save(self.path, self.facts)
+                    return False
+                if str(number) in released:
+                    released.pop(str(number))
+                    core.save(self.path, self.facts)
+                return True
             stopped = job["status"] in {"blocked", "needs_owner", "failed", "cancelled", "interrupted"}
             retry = isinstance(job.get("retry"), dict) and "not_before" in job["retry"]
             return not stopped or retry
@@ -1233,7 +1252,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
                                 observed=observed):
                 core.state(issue)
-                if claim["stage"] == "claimed":
+                if claim["stage"] == "claimed" and core.can_start(issue):
                     waiting, problem = queue.decide(claim)
                     if problem:
                         queue.stop(path, claim, problem)
@@ -1253,6 +1272,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     finished = not core.can_start(issue, evidence)
                 if finished:
                     claim["stage"] = "finished"
+                    claim.pop("waiting", None)
                     completed_path = (root / "jobs" / claim["job"] / "runner-state"
                                       / "tasks" / (claim["job"] + ".json"))
                     if completed_path.exists():

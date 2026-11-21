@@ -429,3 +429,79 @@ def test_queue_transport_and_integrity_errors_still_escape(tmp_path, monkeypatch
     assert started(cfg) == []
     assert not any(r.get('reason') == 'unexpected_error'
                    for r in core.records(cfg, hub.comments_by_issue[1], 1))
+
+
+@pytest.mark.parametrize('listing_present', [True, False])
+def test_released_pr_adds_no_reads_and_reopen_generation_is_revalidated(tmp_path, monkeypatch, listing_present):
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    def bind(number, pr_number, state):
+        path = next(p for p in (Path(cfg['state_dir']) / 'jobs').glob('*/runner-state/tasks/*.json')
+                    if runner.read(p)['assignment']['lifecycle']['issue'] == number)
+        job = runner.read(path)
+        job.update(status='needs_owner', integration={'pr': pr_number})
+        runner.save(path, job)
+        hub.event(number, 'needs-owner', 'runner')
+        hub.prs[pr_number] = {'number': pr_number, 'state': state, 'merged': False}
+        if listing_present:
+            row = hub.issue(pr_number, 'draft')
+            row.update(pull_request={}, state=state, closed_at=WHEN if state == 'closed' else None)
+    bind(1, 77, 'closed')
+    add(hub, 2)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    bind(2, 88, 'open')
+    add(hub, 3)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 300)
+    for at in [400, 500]:
+        hub.calls.clear()
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: at)
+        assert [c[1] for c in hub.calls if c[0] == 'GET' and c[1].startswith('/pulls/')] == ['/pulls/88']
+        assert next(c for c in claims(cfg) if c['issue'] == 3)['waiting'] == {'story': 2}
+    hub.prs[77]['state'] = 'open'
+    if listing_present:
+        hub.issues[77].update(state='open', closed_at=None, updated_at='2026-01-02T10:00:00Z')
+    else:
+        hub.issues[1]['updated_at'] = '2026-01-02T10:00:00Z'
+    hub.calls.clear()
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 600)
+    assert sum(c[:2] == ('GET', '/pulls/77') for c in hub.calls) == 1
+    assert next(c for c in claims(cfg) if c['issue'] == 3)['waiting'] == {'story': 1}
+    assert 3 not in started(cfg)
+
+
+@pytest.mark.parametrize('waiting_kind', ['dependency', 'story'])
+@pytest.mark.parametrize('final', ['closed', 'merged', 'accepted'])
+def test_terminal_waiting_story_retires_without_dispatch_or_stale_visibility(tmp_path, monkeypatch, waiting_kind, final):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    if waiting_kind == 'dependency':
+        target = 1
+        hub.issues[1]['body'] += '\n## Dependencies\nDepends on #2.'
+        hub.event(1, 'approved')
+        hub.approve(1)
+        hub.issue(2, 'draft')
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    else:
+        target = 2
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+        add(hub, 2)
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    assert target in service.queue_waiting(cfg)
+    before = started(cfg)
+    if final == 'closed':
+        close(hub, target)
+    else:
+        hub.issue(target, final)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 300)
+    claim = next(c for c in claims(cfg) if c['issue'] == target)
+    assert claim['stage'] == 'finished' and 'waiting' not in claim
+    assert started(cfg) == before and target not in service.queue_waiting(cfg)
+    assert f'#{target}: waiting' not in service.status(cfg, clock=lambda: 300)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 400)
+    assert f'#{target}: waiting' not in service.poll_body(cfg, 400, [])
+    from digest import standup
+    from test_digest import AT, configuration
+    digest = configuration(tmp_path / 'digest-fixture')
+    digest['lifecycle'] = cfg
+    digest['runner_state_dirs'] = [cfg['state_dir']]
+    text = '\n'.join(x for section in standup.collect(digest, hub.client(), AT, AT) for x in section)
+    assert f'#{target}: waiting' not in text
