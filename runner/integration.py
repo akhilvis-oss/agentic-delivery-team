@@ -37,6 +37,10 @@ class EvidenceMissing(ValueError):
     pass
 
 
+class RefreshAdmissionChanged(ValueError):
+    """A newer owner decision takes precedence over the private refresh."""
+
+
 class OwnerMergeRequired(RuntimeError):
     """GitHub definitively refused repository auto-merge; no write occurred."""
 
@@ -111,7 +115,23 @@ def client_for(core, cfg, config=None):
             return core.app_client(cfg, status_only=True).pages(
                 f"/commits/{head}/statuses")
 
+        def consume_write_payload(self, method, path, data):
+            if method == "PATCH" and re.fullmatch(r"/(?:pulls|issues)/[1-9]\d*", path):
+                capability = self.__dict__.pop("_pr_body_write", None)
+                if (capability is None or capability[0] != path
+                        or type(data) is not dict or set(data) != {"body"}
+                        or type(data["body"]) is not str or data["body"] != capability[1]):
+                    raise ValueError("PR body edit capability missing or mismatched")
+                # Consume before identity/transport callbacks, and transmit these
+                # bytes even if a callback mutates the original input mapping.
+                return json.dumps({"body": capability[1]}).encode()
+            return None
+
         def write_allowed(self, method, path):
+            if method == "PATCH" and re.fullmatch(r"/issues/[1-9]\d*", path):
+                return False
+            if method == "PATCH" and re.fullmatch(r"/pulls/[1-9]\d*", path):
+                return False
             return super().write_allowed(method, path) or (
                 method == "POST" and bool(re.fullmatch(r"/pulls(?:/[1-9]\d*/reviews)?", path))) or (
                 method == "PUT" and bool(re.fullmatch(r"/pulls/[1-9]\d*/merge", path)))
@@ -293,14 +313,21 @@ def snapshot(pr):
 
 
 def release_work(runner, config, job, opts):
-    paths = runner.git(config, "diff", "--name-only", "-z", job["base_commit"], job["head_commit"]).split("\0")
+    base = job.get("integration", {}).get("refresh_base", job["base_commit"])
+    paths = runner.git(config, "diff", "--name-only", "-z", base, job["head_commit"]).split("\0")
     return opts.get("release", False) or any(
         fnmatch.fnmatchcase(path.lower(), pattern.lower())
         for path in paths if path for pattern in RELEASE_PATHS + opts.get("release_paths", []))
 
 
 def bound_pr(client, cfg, config, job, delivery):
-    pr = client.request("GET", f"/pulls/{delivery['pr']}")
+    cached = config.get("_slot_prs", {}).get(delivery["pr"])
+    if (cached is not None and all(k in cached for k in ("head", "base", "body"))
+            and config.get("_slot_pr_used") != delivery["pr"]):
+        pr = cached
+        config["_slot_pr_used"] = delivery["pr"]
+    else:
+        pr = client.request("GET", f"/pulls/{delivery['pr']}")
     if (pr["head"]["sha"] != job["reviewed_head"]
             or pr["head"]["ref"] != config["branch"]
             or pr["head"]["repo"]["full_name"] != cfg["repository"]
@@ -396,6 +423,356 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     if pr.get("draft") or pr.get("mergeable") is not True or pr.get("mergeable_state") not in {"clean", "unstable"}:
         return "pending"
     return "pass"
+
+
+
+def evidence_sections(body):
+    """Split only unambiguous Markdown; unknown block contexts fail closed."""
+    if (not isinstance(body, str)
+            or any(ord(c) < 32 and c not in "\t\r\n" or c in "\x7f\x85\u2028\u2029" for c in body)):
+        raise ValueError("PR body must be unambiguous Markdown text")
+    lines = body.splitlines(keepends=True)
+    starts, offset = [], 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    boundaries, blocks, fence = [], set(), None
+    for i, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", line):
+                fence = None
+                blocks.add(i)
+            continue
+        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if opening:
+            if opening[1][0] == "`" and "`" in opening[2]:
+                raise ValueError("Ambiguous fenced-code info string")
+            fence = (opening[1][0], len(opening[1]))
+            blocks.add(i)
+            continue
+        stripped = line.lstrip(" \t")
+        nested = stripped
+        container = re.match(r"(?:[-+*]|[0-9]+[.)])[ \t]+(.*)", nested)
+        while container:
+            nested = container[1].lstrip(" \t")
+            container = re.match(r"(?:[-+*]|[0-9]+[.)])[ \t]+(.*)", nested)
+        # These contexts can hide or nest headings; this editor deliberately
+        # does not claim to implement a complete Markdown/HTML block parser.
+        if (re.search(r"<!--|-->|<\s*/?\s*h[1-6](?:\s|>)|<(?:script|style|pre|textarea)\b",
+                      line, re.I)
+                or re.match(r"(?:`{3,}|~{3,}|>)", stripped)
+                or re.match(r" {0,3}<(?:/?[A-Za-z]|!|\?)", line)
+                or nested != stripped and re.match(
+                    r"(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|>|<)", nested)
+                or len(line.expandtabs(4)) - len(stripped) >= 4
+                and re.match(r"(?:#{1,6}(?:[ \t]|$)|[=-]+[ \t]*$)", stripped)):
+            raise ValueError("Ambiguous Markdown section context")
+        heading = re.fullmatch(r" {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)", line)
+        if heading:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2] or "").strip(" \t")
+            boundaries.append((starts[i], (len(heading[1]), title)))
+            blocks.add(i)
+            continue
+        underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        if not underline:
+            continue
+        previous = lines[i - 1].rstrip("\r\n") if i else ""
+        if not previous.strip(" \t") or i - 1 in blocks:
+            blocks.add(i)
+            continue
+        if (re.match(r"[ \t]*(?:>|[-+*][ \t]|[0-9]+[.)][ \t])", previous)
+                or previous.startswith(("    ", "\t")) or previous.endswith("\\")
+                or i > 1 and lines[i - 2].rstrip("\r\n").strip(" \t") and i - 2 not in blocks):
+            raise ValueError("Ambiguous Setext paragraph boundary")
+        boundaries.append((starts[i - 1], (1 if underline[1][0] == "=" else 2,
+                                          previous.strip(" \t"))))
+        blocks.update({i - 1, i})
+    if fence is not None:
+        raise ValueError("Unclosed fenced-code section context")
+    titles = [key for _, key in boundaries]
+    if len(titles) != len(set(titles)):
+        raise ValueError("Duplicate PR sections")
+    pieces = {key: body[start:boundaries[i + 1][0] if i + 1 < len(boundaries) else len(body)]
+              for i, (start, key) in enumerate(boundaries)}
+    return body[:boundaries[0][0]] if boundaries else body, titles, pieces
+
+
+def edit_pr_body(client, job, number, payload, tier):
+    """The only delivery PATCH capability, scoped to bound evidence sections."""
+    if (number != job["integration"].get("pr") or not isinstance(payload, dict)
+            or set(payload) != {"body"} or not isinstance(payload["body"], str)):
+        raise ValueError("Only the bound PR body may be edited")
+    allowed = {(2, "Test evidence"), (2, "Acceptance evidence")}
+    if tier == "control-critical":
+        allowed.add((2, "Acceptance and evidence matrix"))
+    new_body = payload["body"]
+    old_prefix, old_titles, old = evidence_sections(job["integration"]["body"])
+    prefix, titles, new = evidence_sections(new_body)
+    if (prefix != old_prefix or titles != old_titles
+            or any(new[t] != old[t] for t in titles if t not in allowed)):
+        raise ValueError("Only approved evidence sections may change")
+    path = f"/pulls/{number}"
+    if getattr(client, "_pr_body_edit_active", False) or hasattr(client, "_pr_body_write"):
+        raise ValueError("Nested PR edit refused")
+    data = {"body": new_body}
+    client._pr_body_edit_active = True
+    client._pr_body_write = (path, new_body)
+    try:
+        return client.request("PATCH", f"/pulls/{number}", data)
+    finally:
+        client.__dict__.pop("_pr_body_write", None)
+        client.__dict__.pop("_pr_body_edit_active", None)
+
+
+def refreshed_body(old, rendered, tier):
+    prefix, titles, saved = evidence_sections(old)
+    _, _, fresh = evidence_sections(rendered)
+    allowed = {(2, "Test evidence"), (2, "Acceptance evidence")}
+    if tier == "control-critical":
+        allowed.add((2, "Acceptance and evidence matrix"))
+    if any(t not in fresh for t in titles if t in allowed):
+        raise ValueError("Refreshed evidence section missing")
+    return prefix + "".join(fresh[t] if t in allowed else saved[t] for t in titles)
+
+
+def restore_refresh(runner, config, refresh, *, conflict=False):
+    """Refresh-only rollback; normal continuation's handling stays unchanged."""
+    old = refresh["pr_head"]
+    if runner.git(config, "branch", "--show-current") != config["branch"]:
+        raise RuntimeError("Refresh branch changed")
+    if conflict:
+        runner.trusted_git(config, "merge", "--abort")
+    else:
+        current = runner.git(config, "rev-parse", "HEAD")
+        if current not in {old, refresh.get("head")} or runner.dirty_paths(config):
+            raise RuntimeError("Refresh rollback no longer owns a clean HEAD")
+        runner.trusted_git(config, "reset", "--hard", old)
+    if (runner.git(config, "rev-parse", "HEAD") != old
+            or runner.dirty_paths(config)
+            or runner.trusted_git(config, "diff", "--cached", "--name-only")):
+        raise RuntimeError("Refresh rollback did not restore a clean PR head")
+
+
+def refresh(runner, config, path, job, cfg, client, pr, fetch_target, *, lifecycle_core=None):
+    """Refresh one slot-holder's PR in its original job, never dispatch work."""
+    if job.get("delivery_retired"):
+        return False
+    delivery = job.get("integration", {})
+    previous = job.get("refreshes", [])
+    active = previous[-1] if previous and previous[-1].get("stage") not in {"done", "failed"} else None
+    core = lifecycle_core or runner.lifecycle_api()
+    current = None
+    attempt = active
+
+    def persist():
+        job["updated_at"] = runner.now()
+        runner.save(path, job)  # No phase/status record while the refresh runs.
+
+    def preserve_newer_admission():
+        # Private cleanup must never supersede a newer owner's public decision.
+        reason = "owner_requested_stop"
+        if attempt is not None:
+            if "push" in attempt.get("completed_writes", []):
+                reason = "publication_uncertain"
+            elif attempt.get("head"):
+                try:
+                    restore_refresh(runner, config, attempt)
+                except Exception:
+                    reason = "publication_uncertain"
+            attempt.update(stage="failed", reason=reason)
+        delivery.update(stage="owner", reason=reason)
+        job.update(status="needs_owner", blocked_reason={"reason_code": reason,
+                   "reason": REASONS.get(reason, core.STOP_REASONS[reason])})
+        persist()
+        runner.save_job({**config, "_refresh_context": True}, path, job)
+
+    def stop(reason, *, files=(), findings=()):
+        # Failure notices are writes too: a phase may have failed after the
+        # owner stopped/replaced this refresh's authorization.
+        if core.admit_refresh(config["lifecycle_config"], job, pr, client=client) != current:
+            preserve_newer_admission()
+            return
+        if attempt is not None:
+            attempt.update(stage="failed", reason=reason)
+        delivery.update(stage="owner", reason=reason)
+        job.update(status="needs_owner", blocked_reason={"reason_code": reason,
+                   "reason": REASONS.get(reason, core.STOP_REASONS[reason])})
+        persist()
+        runner.save_job({**config, "_refresh_context": True}, path, job)
+        record = core.public_record(cfg, job["github_number"], job["id"], job["round"],
+                                    "needs-owner", commit=job["head_commit"],
+                                    event=job["assignment"]["lifecycle"]["event"], reason=reason,
+                                    conflict_files=list(files) or None,
+                                    kind="review" if reason == "reviewer_reported_blocked" else "transition",
+                                    outcome="blocked" if reason == "reviewer_reported_blocked" else None,
+                                    severities={p: sum(f["severity"] == p for f in findings)
+                                                for p in ("P0", "P1", "P2")} if findings else {})
+        notice = None
+        if reason == "continuation_conflict":
+            notice = ("The target branch now conflicts with this story's pull request in these files. "
+                      "Owner: close the pull request and re-approve with `Restart: fresh`, or resolve "
+                      "the conflict and merge it yourself, then add `status:merged` (#184).\n"
+                      + core.record_body(record))
+        core.queue(cfg, record, public_body=notice, notice_context={"findings": list(findings)})
+        core.flush(cfg, client)
+
+    def write(label, operation):
+        if attempt.get("intent"):
+            raise core.Uncertain("Unreconciled refresh intent")
+        if core.admit_refresh(config["lifecycle_config"], job, pr, client=client) != current:
+            raise RefreshAdmissionChanged("Refresh authorization changed")
+        attempt["intent"] = label
+        persist()
+        value = operation()
+        attempt.pop("intent")
+        attempt.setdefault("completed_writes", []).append(label)
+        persist()
+        return value
+
+    if active is not None:
+        current = core.admit_refresh(config["lifecycle_config"], job, pr, client=client)
+        if not current:
+            return False
+        stop("publication_uncertain")
+        return True
+    if pr.get("mergeable_state") != "behind":
+        return False
+    current = core.admit_refresh(config["lifecycle_config"], job, pr, client=client)
+    if not current:
+        return False
+    old = job.get("reviewed_head")
+    if pr.get("head", {}).get("sha") != old:
+        if current == "pr-open":
+            stop("stale_head")
+        return False
+    if (pr["head"].get("ref") != config["branch"]
+            or pr["head"].get("repo", {}).get("full_name") != cfg["repository"]
+            or pr.get("base", {}).get("ref") != cfg.get("base_branch", "main")
+            or pr["base"].get("repo", {}).get("full_name") != cfg["repository"]
+            or pr.get("body") != delivery.get("body")):
+        if current == "pr-open":
+            stop("stale_head")
+        return False
+    try:
+        opts = options(config)
+        if not opts or delivery.get("options_sha256") != runner.digest(opts):
+            return False
+        reviewed(runner, config, job)
+        target = fetch_target()
+        if not runner.SHA.fullmatch(target):
+            raise ValueError("Invalid target")
+        if runner.trusted_git(config, "merge-base", target, old).decode().strip() == target:
+            return False
+        attempt = {"sequence": len(previous) + 1, "stage": "starting", "pr": pr["number"],
+                   "pr_head": old, "target": target, "started_at": runner.now()}
+        job.setdefault("refreshes", []).append(attempt)
+        persist()
+        if pr.get("auto_merge") or delivery.get("stage") == "auto_merge_enabled":
+            if write("disable_auto_merge", lambda: client.disable_auto_merge(pr)) is not True:
+                raise core.Uncertain("Auto-merge cancellation unconfirmed")
+            pr["auto_merge"] = None
+        attempt["stage"] = "merging"
+        persist()
+        from lifecycle import service
+        merge_claim = {"job": job["id"], "worktree": config["worktree"], "branch": config["branch"],
+                       "start_commit": old, "review_base": target}
+        merge_cfg = {**cfg, "runner_config": str(Path(cfg["state_dir"]) / "jobs" / job["id"] / "config.json")}
+        files = write("merge", lambda: service.prepare_continuation(merge_cfg, merge_claim))
+        if files:
+            try:
+                restore_refresh(runner, config, attempt, conflict=True)
+            except Exception:
+                stop("publication_uncertain")
+                return True
+            stop("continuation_conflict", files=files)
+            return True
+        head = runner.git(config, "rev-parse", "HEAD")
+        if (runner.git(config, "rev-parse", head + "^1") != old
+                or runner.git(config, "rev-parse", head + "^2") != target):
+            raise core.Uncertain("Refresh merge ownership changed")
+        attempt.update(head=head, stage="testing")
+        job.setdefault("runner_commits", []).append({"commit_sha": head, "job_id": job["id"],
+            "job_kind": job["assignment"]["kind"], "round": job["round"], "committed_by": "runner",
+            "state": "committed", "timestamp": runner.now(), "file_count": len(list(filter(None,
+                runner.git(config, "diff", "--name-only", "-z", old, head).split("\0"))))})
+        persist()
+        try:
+            result = runner.refresh_review(config, job, attempt)
+        except Exception as exc:
+            if getattr(exc, "integrity_error", False) or isinstance(exc, core.Unavailable):
+                raise
+            result = {"verification": {"status": "blocked"}}
+        attempt.update(result)
+        if result.get("verification", {}).get("status") != "passed":
+            try:
+                restore_refresh(runner, config, attempt)
+            except Exception:
+                stop("publication_uncertain")
+                return True
+            stop("required_check_failed")
+            return True
+        review = result.get("review", {})
+        findings = review.get("findings", [])
+        if review.get("status") not in {"ready_for_integration", "needs_changes"} or any(
+                f["severity"] in {"P0", "P1"} for f in findings):
+            try:
+                restore_refresh(runner, config, attempt)
+            except Exception:
+                stop("publication_uncertain")
+                return True
+            stop("reviewer_reported_blocked", findings=findings)
+            return True
+        effective = {**review, "status": "ready_for_integration"}
+        attempt.update(review=effective, stage="publishing_review")
+        persist()
+        record = core.public_record(cfg, job["github_number"], job["id"], job["round"], current,
+            event=job["assignment"]["lifecycle"]["event"], commit=head, kind="review",
+            outcome="ready_for_integration", severities={p: sum(f["severity"] == p for f in findings)
+                for p in ("P0", "P1", "P2")}, pr=pr["number"],
+            reason="owner_merge_required" if current == "needs-owner" else None)
+        record.update({"from": current, "actor": cfg["actors"]["runner"]})
+        notice = ("Refreshed and re-reviewed at " + head + ".\n" + core.PREFIX
+                  + json.dumps(record, sort_keys=True) + core.SUFFIX) if current == "needs-owner" else None
+        def publish_review():
+            outbox = core.queue(cfg, record, public_body=notice,
+                                notice_context={"refresh": attempt["sequence"], "findings": findings})
+            core.flush(cfg, client)
+            if core.read(outbox)["status"] != "synced":
+                raise core.Uncertain("Refreshed review was not synced")
+        write("review_record", publish_review)
+        updated = json.loads(json.dumps(job))
+        updated.update(head_commit=head, reviewed_head=head, review=effective, review_session=result["session"])
+        updated.setdefault("review_history", []).append({"round": job["round"], "head": head,
+            "session": result["session"], "result": review})
+        updated.setdefault("verification_runs", []).append(result["verification"])
+        rendered = body_for(runner, {**config, "state_dir": result["state_dir"]}, updated, cfg, opts,
+                            delivery["receipt_url"])
+        body = refreshed_body(delivery["body"], rendered, opts["declared_tier"])
+        write("push", lambda: client.push(runner, config, head))
+        edited = write("edit_pr_body", lambda: edit_pr_body(client, job, pr["number"], {"body": body},
+                                                           opts["declared_tier"]))
+        if (not isinstance(edited, dict) or edited.get("body") != body
+                or edited.get("head", {}).get("sha") != head):
+            raise core.Uncertain("Refreshed PR edit not confirmed")
+        job.update(head_commit=head, reviewed_head=head, review=effective, review_session=result["session"],
+                   review_history=updated["review_history"], verification_runs=updated["verification_runs"])
+        delivery.update(body=body, refresh_base=target, stage="owner" if current == "needs-owner" else "created")
+        attempt.update(stage="done", finished_at=runner.now())
+        persist()
+        runner.save_job({**config, "_refresh_context": attempt["sequence"]}, path, job)
+        pr.clear()
+        pr.update(edited)
+        return True
+    except RefreshAdmissionChanged:
+        preserve_newer_admission()
+        return True
+    except Exception as exc:
+        if (getattr(exc, "integrity_error", False)
+                or isinstance(exc, core.Unavailable) and not isinstance(exc, core.Uncertain)):
+            raise
+        stop("publication_uncertain")
+        return True
 
 
 def advance(runner, config, path, job, client=None):
