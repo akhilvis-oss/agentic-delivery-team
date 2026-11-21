@@ -386,3 +386,46 @@ def test_queue_sort_keeps_legacy_finished_claims_without_events(tmp_path, monkey
     core.save(path, {'issue': 1, 'stage': 'finished'})
     queue = service.StoryQueue(cfg, hub.client(), hub.issues, set(), folder)
     assert queue.order(path)[0] == 0
+
+
+@pytest.mark.parametrize('phase', ['order', 'decide'])
+def test_queue_unexpected_error_stops_one_story_and_dispatches_next(tmp_path, monkeypatch, phase):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    add(hub, 2)
+    original = getattr(service.StoryQueue, phase)
+    def fail_one(queue, item):
+        claim = core.read(item) if phase == 'order' else item
+        if claim['issue'] == 1:
+            raise RuntimeError('synthetic queue failure')
+        return original(queue, item)
+    monkeypatch.setattr(service.StoryQueue, phase, fail_one)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    assert started(cfg) == [2]
+    stopped = next(c for c in claims(cfg) if c['issue'] == 1)
+    assert stopped['stage'] == 'finished' and stopped['error'] == 'unexpected_error'
+    records = core.records(cfg, hub.comments_by_issue[1], 1)
+    assert sum(r.get('reason') == 'unexpected_error' for r in records) == 1
+    assert service.heartbeat(cfg) == 100
+
+
+@pytest.mark.parametrize('phase', ['order', 'decide'])
+@pytest.mark.parametrize('kind', ['unavailable', 'integrity'])
+def test_queue_transport_and_integrity_errors_still_escape(tmp_path, monkeypatch, phase, kind):
+    cfg, hub, _ = configured_service(tmp_path, monkeypatch)
+    add(hub, 2)
+    error = core.Unavailable('synthetic transport') if kind == 'unavailable' else RuntimeError('synthetic integrity')
+    if kind == 'integrity':
+        error.integrity_error = True
+    original = getattr(service.StoryQueue, phase)
+    def fail_one(queue, item):
+        claim = core.read(item) if phase == 'order' else item
+        if claim['issue'] == 1:
+            raise error
+        return original(queue, item)
+    monkeypatch.setattr(service.StoryQueue, phase, fail_one)
+    with pytest.raises(type(error)) as caught:
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    assert caught.value is error
+    assert started(cfg) == []
+    assert not any(r.get('reason') == 'unexpected_error'
+                   for r in core.records(cfg, hub.comments_by_issue[1], 1))

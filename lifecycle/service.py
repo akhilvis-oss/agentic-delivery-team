@@ -1212,20 +1212,18 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
         processed = []
         runner = runner_module()
         queue = StoryQueue(cfg, client, rows, changed, claims_dir)
-        for path in sorted(claims_dir.glob("*.json"), key=queue.order):
+        ordered = []
+        for path in sorted(claims_dir.glob("*.json")):
+            claim = core.read(path)
+            issue = by_number.get(claim["issue"])
+            if not issue or claim["issue"] in failed | skipped:
+                continue
+            with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim):
+                ordered.append((queue.order(path), path))
+        for _, path in sorted(ordered):
             claim = core.read(path)
             if claim["stage"] == "finished" and claim.get("cleaned"):
                 continue
-            if claim["stage"] == "claimed":
-                waiting, problem = queue.decide(claim)
-                if problem:
-                    queue.stop(path, claim, problem)
-                    continue
-                if waiting:
-                    claim["waiting"] = waiting
-                    core.save(path, claim)
-                    continue
-                claim.pop("waiting", None)
             issue = by_number.get(claim["issue"])
             if not issue:
                 continue
@@ -1235,6 +1233,16 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
                                 observed=observed):
                 core.state(issue)
+                if claim["stage"] == "claimed":
+                    waiting, problem = queue.decide(claim)
+                    if problem:
+                        queue.stop(path, claim, problem)
+                        continue
+                    if waiting:
+                        claim["waiting"] = waiting
+                        core.save(path, claim)
+                        continue
+                    claim.pop("waiting", None)
                 # The current all-issues listing already proves closed/final stories
                 # cannot execute. Keep fresh evidence checks for claims that can.
                 finished = not core.can_start(issue)
