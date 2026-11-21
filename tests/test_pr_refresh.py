@@ -798,3 +798,55 @@ def test_refresh_rollback_preserves_unexpected_tracked_work(refresh_story, monke
     assert c.job["blocked_reason"]["reason_code"] == "publication_uncertain"
     assert file.read_text() == "Unexpected work to reconcile.\n"
     assert not any(e[0] == "push" for e in c.events)
+
+
+@pytest.mark.parametrize("owner", [False, True])
+@pytest.mark.parametrize("failure", ["tests", "review_findings", "review_blocked", "review_error",
+                                    "uncertain", "cleanup_failed"])
+def test_newer_owner_stop_during_failed_phase_remains_authoritative(
+    refresh_story, monkeypatch, owner, failure
+):
+    c = refresh_story(owner)
+    old, body = c.job["head_commit"], c.pr["body"]
+    inserted = []
+    def fail_after_stop(config, job, attempt):
+        record = core.public_record(
+            c.cfg, 1, job["id"], job["round"], "needs-owner",
+            commit=old, event=102, reason="owner_question")
+        record.update({"from": core.state(c.api.issue(1)), "actor": c.cfg["actors"]["runner"]})
+        core.queue(c.cfg, record)
+        core.flush(c.cfg, c.api)
+        inserted.extend(deepcopy(c.hub.comments_by_issue[1]))
+        if failure == "review_error":
+            raise RuntimeError("Synthetic review transport failure")
+        if failure == "uncertain":
+            raise c.runner.lifecycle_api().Uncertain("Synthetic uncertain transport failure")
+        result = {"verification": {"status": "failed" if failure in {"tests", "cleanup_failed"} else "passed"}}
+        if failure not in {"tests", "cleanup_failed"}:
+            result["review"] = fixtures.result(
+                "blocked" if failure == "review_blocked" else "needs_changes", "reviewer")
+        return result
+    monkeypatch.setattr(c.runner, "refresh_review", fail_after_stop)
+    if failure == "cleanup_failed":
+        def cannot_restore(*args, **kwargs):
+            raise RuntimeError("Synthetic rollback failure")
+        monkeypatch.setattr(c.runner.integration_api(), "restore_refresh", cannot_restore)
+    assert refresh(c)
+    assert c.hub.comments_by_issue[1] == inserted
+    stops = [r for r in core.records(c.cfg, c.hub.comments_by_issue[1], 1) if r.get("reason")]
+    assert stops[-1]["reason"] == "owner_question"
+    if failure == "cleanup_failed":
+        assert c.job["blocked_reason"]["reason_code"] == "publication_uncertain"
+        assert command(c.config["worktree"], "rev-parse", "HEAD") == c.job["refreshes"][-1]["head"]
+    else:
+        assert command(c.config["worktree"], "rev-parse", "HEAD") == old
+    assert command(c.config["worktree"], "status", "--porcelain") == ""
+    assert not any(e[0] in {"push", "PATCH", "enable"} for e in c.events)
+    assert c.pr["body"] == body and not c.pr.get("auto_merge")
+    # A restart/next poll must not turn our private failed attempt into a new
+    # public publication_uncertain stop over the owner's newer question.
+    c.job = c.runner.read(c.path)
+    before = deepcopy(c.hub.comments_by_issue[1])
+    c.events.clear()
+    assert not refresh(c, lambda: pytest.fail("newer owner stop forbids recovery replay"))
+    assert c.hub.comments_by_issue[1] == before and not c.events

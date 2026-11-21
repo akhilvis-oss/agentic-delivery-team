@@ -509,7 +509,30 @@ def refresh(runner, config, path, job, cfg, client, pr, fetch_target, *, lifecyc
         job["updated_at"] = runner.now()
         runner.save(path, job)  # No phase/status record while the refresh runs.
 
+    def preserve_newer_admission():
+        # Private cleanup must never supersede a newer owner's public decision.
+        reason = "owner_requested_stop"
+        if attempt is not None:
+            if "push" in attempt.get("completed_writes", []):
+                reason = "publication_uncertain"
+            elif attempt.get("head"):
+                try:
+                    restore_refresh(runner, config, attempt)
+                except Exception:
+                    reason = "publication_uncertain"
+            attempt.update(stage="failed", reason=reason)
+        delivery.update(stage="owner", reason=reason)
+        job.update(status="needs_owner", blocked_reason={"reason_code": reason,
+                   "reason": REASONS.get(reason, core.STOP_REASONS[reason])})
+        persist()
+        runner.save_job({**config, "_refresh_context": True}, path, job)
+
     def stop(reason, *, files=(), findings=()):
+        # Failure notices are writes too: a phase may have failed after the
+        # owner stopped/replaced this refresh's authorization.
+        if core.admit_refresh(config["lifecycle_config"], job, pr, client=client) != current:
+            preserve_newer_admission()
+            return
         if attempt is not None:
             attempt.update(stage="failed", reason=reason)
         delivery.update(stage="owner", reason=reason)
@@ -548,7 +571,8 @@ def refresh(runner, config, path, job, cfg, client, pr, fetch_target, *, lifecyc
         return value
 
     if active is not None:
-        if not core.admit_refresh(config["lifecycle_config"], job, pr, client=client):
+        current = core.admit_refresh(config["lifecycle_config"], job, pr, client=client)
+        if not current:
             return False
         stop("publication_uncertain")
         return True
@@ -681,22 +705,7 @@ def refresh(runner, config, path, job, cfg, client, pr, fetch_target, *, lifecyc
         pr.update(edited)
         return True
     except RefreshAdmissionChanged:
-        # Do not overwrite a newer owner stop/approval with our own stop record.
-        reason = "owner_requested_stop"
-        if attempt is not None:
-            if "push" in attempt.get("completed_writes", []):
-                reason = "publication_uncertain"
-            elif attempt.get("head"):
-                try:
-                    restore_refresh(runner, config, attempt)
-                except Exception:
-                    reason = "publication_uncertain"
-            attempt.update(stage="failed", reason=reason)
-        delivery.update(stage="owner", reason=reason)
-        job.update(status="needs_owner", blocked_reason={"reason_code": reason,
-                   "reason": REASONS.get(reason, core.STOP_REASONS[reason])})
-        persist()
-        runner.save_job({**config, "_refresh_context": True}, path, job)
+        preserve_newer_admission()
         return True
     except Exception as exc:
         if (getattr(exc, "integrity_error", False)
