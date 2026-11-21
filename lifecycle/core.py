@@ -49,6 +49,7 @@ STATES = {
     "accepted",
     "merged",
 }
+STATUS_NAMES = {name: name for name in STATES}
 SHA = re.compile(r"[0-9a-f]{40}")
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?")
@@ -74,6 +75,28 @@ class TransitionRejected(ValueError):
 
 class Uncertain(Unavailable):
     """A write may have reached GitHub; never blindly repeat it."""
+
+
+def read_statuses_version(path, *, missing=False):
+    """Read data only; candidates predating this file require version one."""
+    try:
+        value = Path(path).read_bytes()
+    except FileNotFoundError:
+        if missing and not Path(path).is_symlink():
+            return 1
+        raise
+    if not re.fullmatch(rb"[1-9][0-9]*\n?", value):
+        raise ValueError("Malformed statuses version")
+    return int(value)
+
+
+try:
+    REQUIRED_STATUSES_VERSION = read_statuses_version(Path(__file__).with_name("statuses-version"))
+except (OSError, ValueError):
+    raise SystemExit(
+        "Lifecycle guard unavailable: cannot load lifecycle/statuses-version; "
+        "restore the lifecycle package from the same kit release."
+    ) from None
 
 
 def now():
@@ -183,6 +206,10 @@ def load_config(path, *, local=True):
         if set(policy) & local_fields:
             raise ValueError("Private settings must not appear in public policy")
         cfg = {**policy, **cfg}
+    version = cfg.get("statuses_version", 1)
+    if type(version) is not int or version != REQUIRED_STATUSES_VERSION:
+        raise ValueError(f"statuses_version must be integer {REQUIRED_STATUSES_VERSION}")
+    cfg["statuses_version"] = version
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", cfg.get("repository", "")):
         raise ValueError("Explicit repository required")
     if "upgrade" in cfg:
@@ -315,9 +342,9 @@ def is_report(cfg, issue):
 def state(issue):
     names = [x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])]
     statuses = [x[7:] for x in names if x.startswith("status:")]
-    if len(statuses) != 1 or statuses[0] not in STATES:
+    if len(statuses) != 1 or statuses[0] not in STATUS_NAMES:
         raise StatusLabelError("Issue needs exactly one known status label")
-    return statuses[0]
+    return STATUS_NAMES[statuses[0]]
 
 
 def has_role(cfg, identity, role):
@@ -325,6 +352,7 @@ def has_role(cfg, identity, role):
 
 
 def permitted(cfg, source, target, actor):
+    source, target = STATUS_NAMES.get(source), STATUS_NAMES.get(target)
     allowed = cfg["transitions"].get(source, {}).get(target, [])
     if target == "approved" and actor != cfg["actors"]["owner"]:
         return False
@@ -337,7 +365,13 @@ def permitted(cfg, source, target, actor):
     return any(has_role(cfg, actor, role) for role in allowed)
 
 
-def public_record(
+def public_record(cfg, *args, **kwargs):
+    """New records use only the current STATES names."""
+    return _record(STATES, cfg, *args, **kwargs)
+
+
+def _record(
+    accepted_names,
     cfg,
     issue,
     job,
@@ -363,13 +397,14 @@ def public_record(
     exception_class=None,
     function=None,
 ):
+    mapped_target = STATUS_NAMES.get(target)
     if (
         type(issue) is not int
         or issue < 1
         or not ID.fullmatch(job)
         or type(round_number) is not int
         or not 0 <= round_number <= 3
-        or target not in STATES
+        or target not in accepted_names
         or commit is not None
         and not SHA.fullmatch(commit)
         or event is not None
@@ -394,7 +429,7 @@ def public_record(
         raise ValueError("Invalid gate result")
     if kind == "approval":
         if (
-            target != "approved"
+            mapped_target != "approved"
             or approved_by != cfg["actors"]["owner"]
             or event is None
             or not isinstance(scope_sha256, str)
@@ -404,7 +439,7 @@ def public_record(
     elif scope_sha256 is not None or approved_by is not None:
         raise ValueError("Approval metadata only belongs to approval records")
     if kind == "finish" and (
-        target != "merged" or event is None or reason != "finished_by_owner"
+        mapped_target != "merged" or event is None or reason != "finished_by_owner"
         or job != "owner-finish" or round_number != 0 or commit is not None
         or pr is not None or gate is not None or outcome is not None
         or severities not in (None, {}) or owner_question is not None
@@ -417,7 +452,7 @@ def public_record(
         type(n) is not int or n < 0 for n in counts.values()
     ):
         raise ValueError("Invalid severity counts")
-    if target in {"blocked", "needs-owner", "needs-primary"}:
+    if mapped_target in {"blocked", "needs-owner", "needs-primary"}:
         reason = reason or "execution_failed"
         if reason not in STOP_REASONS:
             raise ValueError("Unknown stop reason")
@@ -459,7 +494,7 @@ def public_record(
         ]
     )
     if owner_question is not None or failed_tests is not None:
-        if target not in {"blocked", "needs-owner", "needs-primary"}:
+        if mapped_target not in {"blocked", "needs-owner", "needs-primary"}:
             raise ValueError("Stop details require a stopped task")
         if owner_question is not None:
             if isinstance(owner_question, str):
@@ -473,7 +508,7 @@ def public_record(
             record["failed_tests"] = failed_tests
         record["key"] = key([record["key"], owner_question, failed_tests])
     if continuation or stop_save_failed:
-        if (target not in {"blocked", "needs-owner"}
+        if (mapped_target not in {"blocked", "needs-owner"}
                 or type(continuation) is not bool or type(stop_save_failed) is not bool
                 or continuation and commit is None):
             raise ValueError("Invalid stop preservation details")
@@ -491,7 +526,7 @@ def public_record(
         record["conflict_files"] = conflict_files
         record["key"] = key([record["key"], conflict_files])
     if stop_details is not None:
-        if target not in {"blocked", "needs-owner", "needs-primary"}:
+        if mapped_target not in {"blocked", "needs-owner", "needs-primary"}:
             raise ValueError("Stop details require a stopped task")
         record["stop_details"] = public_stop_details(cfg, stop_details)
         record["key"] = key([record["key"], record["stop_details"]])
@@ -882,14 +917,17 @@ def records(cfg, comments, expected_issue=None):
                 continue
             if type(item["version"]) is not int or item["version"] not in SUPPORTED_RECORD_VERSIONS:
                 continue
+            if item["to"] not in STATUS_NAMES or item["from"] not in STATUS_NAMES:
+                continue
             created = comment.get("created_at")
             updated = comment.get("updated_at")
             # Retain finality even if a finished record was edited later.
-            if (item["to"] not in {"merged", "accepted"}
+            if (STATUS_NAMES[item["to"]] not in {"merged", "accepted"}
                     and created is not None and updated is not None
                     and stamp(updated) > stamp(created)):
                 continue
-            expected = public_record(
+            expected = _record(
+                STATUS_NAMES,
                 cfg,
                 item["issue"],
                 item["job"],
@@ -919,9 +957,10 @@ def records(cfg, comments, expected_issue=None):
                 or item["key"] != expected["key"]
                 or item["repository"] != cfg["repository"]
                 or item["actor"] != actor
-                or item["from"] not in STATES
+                or item["from"] not in STATUS_NAMES
             ):
                 continue
+            item = dict(item, to=STATUS_NAMES[item["to"]], **{"from": STATUS_NAMES[item["from"]]})
             if item["to"] == "merged" and actor == cfg["actors"]["owner"]:
                 continue
             if item["kind"] == "finish" and item["from"] == "merged":
@@ -1605,25 +1644,6 @@ def flush(cfg, client):
             raise TransitionRejected("; ".join(rejections))
 
 
-def latest_event(cfg, events, target, role):
-    status_events = [
-        e
-        for e in events
-        if e.get("event") in {"labeled", "unlabeled"}
-        and e.get("label", {}).get("name", "").startswith("status:")
-    ]
-    labeled = [e for e in status_events if e["event"] == "labeled"]
-    if not labeled:
-        return None
-    newest = max(labeled, key=lambda e: int(e["id"]))
-    if (
-        newest["label"]["name"] == "status:" + target
-        and newest.get("actor", {}).get("login") == cfg["actors"][role]
-    ):
-        return newest
-    return None
-
-
 def job_records(cfg, job):
     binding = job["assignment"].get("lifecycle")
     if not binding:
@@ -1836,8 +1856,8 @@ def canonical_state(cfg, events):
         name = event.get("label", {}).get("name", "")
         if not name.startswith("status:"):
             continue
-        target = name[7:]
-        if target in STATES and permitted(
+        target = STATUS_NAMES.get(name[7:])
+        if target is not None and permitted(
             cfg, current, target, event.get("actor", {}).get("login")
         ):
             current, latest = target, event
@@ -2001,8 +2021,9 @@ def _attest_approval(cfg, client, event):
     boundary = 0
     current = "draft"
     for item in sorted(events, key=lambda e: int(e["id"])):
-        target = item.get("label", {}).get("name", "")[7:]
-        if item.get("event") == "labeled" and target in STATES and permitted(
+        name = item.get("label", {}).get("name", "")
+        target = STATUS_NAMES.get(name[7:]) if name.startswith("status:") else None
+        if item.get("event") == "labeled" and target is not None and permitted(
                 cfg, current, target, item.get("actor", {}).get("login")):
             current = target
             if target != "approved":
@@ -2081,9 +2102,9 @@ def owner_finish_event(cfg, events):
         if event.get("event") != "labeled":
             continue
         name = event.get("label", {}).get("name", "")
-        target = name[7:] if name.startswith("status:") else None
+        target = STATUS_NAMES.get(name[7:]) if name.startswith("status:") else None
         actor = event.get("actor", {}).get("login")
-        if target in STATES and permitted(cfg, current, target, actor):
+        if target is not None and permitted(cfg, current, target, actor):
             if target == "merged":
                 return (current, event) if actor == cfg["actors"]["owner"] else None
             current = target

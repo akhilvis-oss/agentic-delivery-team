@@ -331,6 +331,8 @@ def evidence(policy, client, number):
     terminal = stop is not None
     labels = {label["name"] if isinstance(label, dict) else label
               for label in client.issue(number).get("labels", [])}
+    labels = {"status:" + core.STATUS_NAMES.get(label[7:], label[7:])
+              if label.startswith("status:") else label for label in labels}
     stop_labels = labels & {"status:blocked", "status:needs-owner"}
     if any(not any(r["to"] == label.removeprefix("status:") for r in history)
            for label in stop_labels):

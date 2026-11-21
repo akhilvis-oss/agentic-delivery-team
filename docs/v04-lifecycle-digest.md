@@ -44,6 +44,13 @@ Sources: [GitHub JWT claims and RS256](https://docs.github.com/en/apps/creating-
 
 ## Policy, labels and guard setup
 
+The optional public-policy `statuses_version` field is an integer, never a boolean;
+omitting it means version 1. It is refused in private configuration. It must match
+the positive integer in `lifecycle/statuses-version`, which travels with `core.py`.
+Missing or malformed runtime version data stops the guard with a plain message.
+`STATUS_NAMES` reads all 13 current names as themselves; it does not rewrite stored
+records or label history, and newly written records use only current names.
+
 `transitions` is the complete, version-controlled allowed state/actor graph. `approved` is owner-only; `accepted` is owner-only unless acceptance is explicitly delegated to the Product actor. Configuration cannot grant approval to an automated actor. Each issue has exactly one current `status:*` label:
 
 `draft → approved → dispatched → in-progress → committed → in-review`, then correction, primary/owner escalation, PR, acceptance and merge states as allowed by the graph. A passing review stays `in-review` with a distinct result record until its PR opens. Owner approvals later in the lifecycle are new events, not retries of an old approval.
@@ -325,6 +332,16 @@ An adopting project uses the same launcher with paired `framework_repository`
 and `framework_runner` settings for public framework reads and exports; see
 [Upgrading](quickstart.md#upgrading) for its framework `smoke_agent`, first-install
 `initial_commit` and the owner-maintained workflow, guard, gate and rules copies.
+
+After export and before running any candidate code, upgrades read the candidate's
+`lifecycle/statuses-version` as bytes. A missing file means version 1; malformed
+data refuses that commit. A candidate requiring a higher rules version stays
+uninstalled while normal polling continues. Its commit, running commit and required
+version are saved separately in the private `status-rules-refusal.json` file in the
+versions folder. Every status comment shows the owner instructions in this file,
+including after restart, until an upgrade check reads another main commit. An
+unreadable advisory file is ignored and does not disable upgrades. The switch
+record and installed rules and guard remain unchanged by this version refusal.
 
 The private `<versions folder>/switch` has line-based keys `current`, `previous`,
 `pending`, `pending_since`, `pending_starts`, `refused` and `notice`. Both writers
