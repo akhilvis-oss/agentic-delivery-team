@@ -69,6 +69,7 @@ Each code belongs to exactly one kind.
 | Needs your decision | `pr_open_reapproval` | Close the open PR and re-approve to rebuild, or merge it and add `status:merged` to finish. |
 | Needs your merge | `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
 | Waiting on the system | `worker_*_unavailable` | A required tool, dependency or environment was unavailable. Restore the prerequisite if needed, then re-approve to retry. |
+| Needs a fix | `checks_worktree_changed` | The worktree changed while the required checks ran. Owner: re-approve to build the story again. Saved work from this integrity failure cannot be continued. |
 | Needs a fix | `prerequisite_failed`, `assignment_preflight` | Setup or a required safety check could not run or failed. Ask the operator to fix setup, then re-approve. |
 | Needs a fix | `worker_*_unrelated_failure` | A check failed outside the builder's changes. Arrange a fix for that failure, then re-approve. |
 | Needs a fix | `worker_*_attempts_exhausted_N` | The builder used its correction attempts. Arrange further correction, then re-approve. |
