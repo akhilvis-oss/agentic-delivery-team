@@ -154,6 +154,9 @@ def test_next_story_fetches_after_previous_story_merge(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "run_once", execute)
     service.poll(cfg, hub.client(), clock=lambda: 100)
+    assert starts == [initial]
+    hub.issues[1].update(state="closed", closed_at="2026-01-01T10:00:00Z")
+    service.poll(cfg, hub.client(), clock=lambda: 200)
     assert starts == [initial, command(remote, "rev-parse", "target")]
     assert [c["start_commit"] for c in claims(cfg)] == starts
 

@@ -137,12 +137,13 @@ Approving again continues from the saved work.
 
 ### 10. A queue with dependencies
 
-- **Order:** approved stories dispatch in approval order.
-- **Reordering:** adding the `queue:next` label moves a story to the front. The system removes the label once it's used.
+- **Order:** approved `priority:high` stories first, then current owner approval order; re-approval takes a new position.
+- **Priority:** only the latest owner or Product label event counts. Priority never bypasses approval, dependencies or the active story. The service does not remove the label.
 - **Dependencies:**
-  - `Depends on #N` in the story makes it wait until #N is merged.
+  - The first `Depends on` line in a level-two or level-three Dependencies section, frozen at approval, lists `#N` items separated by commas or `and`. `Depends on nothing.` is empty. Other text before the first full stop is invalid.
+  - Dependencies wait until merged/accepted, a verified finish, or an owner-completed close. Invalid references and closed-unmerged dependencies stop for an owner decision.
   - If #N closes without merging, the story stops as "needs your decision".
-- **One story at a time per repository** by default. The next story waits until the previous PR is merged or closed.
+- **One story at a time per repository**, fixed in M1. The slot also frees on issue closure or a stop without an open PR; an automatically scheduled retry keeps it. A same-story continuation never waits for itself. Waiting is visible in status and stand-up, adds no dependency requests on unchanged polls, and does not block upgrades.
 - **A PR that falls behind its target branch** is refreshed automatically:
   - the runner merges the target into the branch (GitHub's "Update branch" does the same, and no force-push is needed);
   - it runs the tests and a fresh review;

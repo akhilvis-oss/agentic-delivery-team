@@ -514,6 +514,7 @@ def public_record(
 STOP_REASONS = {
     "agent_sign_in_failed": "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve.",
     "agent_usage_limit": "The agent reached its usage limit. Owner: re-approve once the limit resets.",
+    "dependency_closed_unmerged": "A dependency could not be used. Owner: reconcile the dependency and re-approve.",
     "unexpected_error": "An unexpected error stopped this story only. Owner: ask the operator to investigate, then re-approve.",
     "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
     "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
@@ -557,6 +558,7 @@ STOP_REASONS = {
 STOP_KINDS = {
     "agent_sign_in_failed": "Waiting on the system",
     "agent_usage_limit": "Waiting on the system",
+    "dependency_closed_unmerged": "Needs your decision",
     "unexpected_error": "Needs a fix",
     "readiness_question": "Needs your decision",
     "checks_worktree_changed": "Needs a fix",

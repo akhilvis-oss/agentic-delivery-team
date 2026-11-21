@@ -201,7 +201,8 @@ def attempt(cfg, ctx, on_read=None):
     folder, record = ctx
     try:
         claims = [core.read(p) for p in (Path(cfg['state_dir']) / 'claims').glob('*.json')]
-        if record['pending'] or any(c['stage'] != 'finished' or c.get('error')
+        if record['pending'] or any((c['stage'] != 'finished' and not (c['stage'] == 'claimed'
+                                      and c.get('waiting'))) or c.get('error')
                                     or c.get('cleanup_pending') for c in claims):
             return False
         settings = cfg['upgrade']
