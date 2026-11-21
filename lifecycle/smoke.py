@@ -77,7 +77,11 @@ def load_config(path):
 
 def environment(home):
     """Never inherit GitHub/provider credentials, import paths or Git configuration."""
-    return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
+    bin_dir = core.private(Path(home).parent / "bin")
+    python = bin_dir / "python"
+    if not python.exists():
+        python.symlink_to(sys.executable)
+    return {"PATH": str(bin_dir) + ":/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
             "LANG": "en_US.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0"}

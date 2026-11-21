@@ -5,8 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 import http.client
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from types import SimpleNamespace
@@ -43,6 +46,33 @@ def config(tmp_path):
     path = tmp_path / "smoke.json"
     core.save(path, cfg)
     return smoke.load_config(path)
+
+
+def test_environment_python_runs_harness_interpreter(tmp_path):
+    env = smoke.environment(tmp_path / "home")
+    python = tmp_path / "bin" / "python"
+    assert shutil.which("python", path=env["PATH"]) == str(python)
+    assert python.is_symlink()
+    assert os.readlink(python) == sys.executable
+    result = subprocess.run(
+        ["python", "-B", "-c", "import sys; print(sys.executable)"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=True, timeout=10)
+    assert Path(result.stdout.strip()).samefile(sys.executable)
+
+
+def test_environment_preserves_only_existing_keys_and_path_suffix(tmp_path, monkeypatch):
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "PYTHONPATH",
+                "PYTHONHOME", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "PATH"):
+        monkeypatch.setenv(key, "inherited-fixture")
+    home = tmp_path / "home"
+    expected = {"PATH": str(tmp_path / "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                "HOME": str(home), "LANG": "en_US.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0"}
+    assert smoke.environment(home) == expected
+    assert smoke.environment(home) == expected
+    assert list((tmp_path / "bin").iterdir()) == [tmp_path / "bin" / "python"]
+    assert (tmp_path / "bin").stat().st_mode & 0o777 == 0o700
 
 
 def test_candidate_has_no_framework_authority(tmp_path, monkeypatch):
