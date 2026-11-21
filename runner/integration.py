@@ -427,15 +427,75 @@ def merge_evidence(core, cfg, client, pr, opts, job):
 
 
 def evidence_sections(body):
-    if not isinstance(body, str):
-        raise ValueError("PR body must be text")
-    matches = list(re.finditer(r"(?m)^ {0,3}(#{1,2})[ \t]+([^\r\n]+?)[ \t]*\r?$", body))
-    titles = [(len(m[1]), m[2]) for m in matches]
+    """Split only unambiguous Markdown; unknown block contexts fail closed."""
+    if (not isinstance(body, str)
+            or any(ord(c) < 32 and c not in "\t\r\n" or c in "\x7f\x85\u2028\u2029" for c in body)):
+        raise ValueError("PR body must be unambiguous Markdown text")
+    lines = body.splitlines(keepends=True)
+    starts, offset = [], 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    boundaries, blocks, fence = [], set(), None
+    for i, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", line):
+                fence = None
+                blocks.add(i)
+            continue
+        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if opening:
+            if opening[1][0] == "`" and "`" in opening[2]:
+                raise ValueError("Ambiguous fenced-code info string")
+            fence = (opening[1][0], len(opening[1]))
+            blocks.add(i)
+            continue
+        stripped = line.lstrip(" \t")
+        nested = stripped
+        container = re.match(r"(?:[-+*]|[0-9]+[.)])[ \t]+(.*)", nested)
+        while container:
+            nested = container[1].lstrip(" \t")
+            container = re.match(r"(?:[-+*]|[0-9]+[.)])[ \t]+(.*)", nested)
+        # These contexts can hide or nest headings; this editor deliberately
+        # does not claim to implement a complete Markdown/HTML block parser.
+        if (re.search(r"<!--|-->|<\s*/?\s*h[1-6](?:\s|>)|<(?:script|style|pre|textarea)\b",
+                      line, re.I)
+                or re.match(r"(?:`{3,}|~{3,}|>)", stripped)
+                or re.match(r" {0,3}<(?:/?[A-Za-z]|!|\?)", line)
+                or nested != stripped and re.match(
+                    r"(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|>|<)", nested)
+                or len(line.expandtabs(4)) - len(stripped) >= 4
+                and re.match(r"(?:#{1,6}(?:[ \t]|$)|[=-]+[ \t]*$)", stripped)):
+            raise ValueError("Ambiguous Markdown section context")
+        heading = re.fullmatch(r" {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)", line)
+        if heading:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2] or "").strip(" \t")
+            boundaries.append((starts[i], (len(heading[1]), title)))
+            blocks.add(i)
+            continue
+        underline = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        if not underline:
+            continue
+        previous = lines[i - 1].rstrip("\r\n") if i else ""
+        if not previous.strip(" \t") or i - 1 in blocks:
+            blocks.add(i)
+            continue
+        if (re.match(r"[ \t]*(?:>|[-+*][ \t]|[0-9]+[.)][ \t])", previous)
+                or previous.startswith(("    ", "\t")) or previous.endswith("\\")
+                or i > 1 and lines[i - 2].rstrip("\r\n").strip(" \t") and i - 2 not in blocks):
+            raise ValueError("Ambiguous Setext paragraph boundary")
+        boundaries.append((starts[i - 1], (1 if underline[1][0] == "=" else 2,
+                                          previous.strip(" \t"))))
+        blocks.update({i - 1, i})
+    if fence is not None:
+        raise ValueError("Unclosed fenced-code section context")
+    titles = [key for _, key in boundaries]
     if len(titles) != len(set(titles)):
         raise ValueError("Duplicate PR sections")
-    pieces = {titles[i]: body[m.start():matches[i + 1].start() if i + 1 < len(matches) else len(body)]
-              for i, m in enumerate(matches)}
-    return body[:matches[0].start()] if matches else body, titles, pieces
+    pieces = {key: body[start:boundaries[i + 1][0] if i + 1 < len(boundaries) else len(body)]
+              for i, (start, key) in enumerate(boundaries)}
+    return body[:boundaries[0][0]] if boundaries else body, titles, pieces
 
 
 def edit_pr_body(client, job, number, payload, tier):
