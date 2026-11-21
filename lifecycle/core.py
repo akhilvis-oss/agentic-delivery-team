@@ -1131,7 +1131,7 @@ class GitHub:
 
     def write_allowed(self, method, path):
         if method == "DELETE":
-            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3A(?:draft|approved)", path))
+            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3A(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+", path))
         if method == "PATCH" and re.fullmatch(r"/issues/comments/[1-9]\d*", path):
             return True
         if method == "PUT" and re.fullmatch(r"/issues/comments/[1-9]\d*/pin", path):
@@ -1219,12 +1219,7 @@ class GitHub:
         return self.pages(f"/issues/{number}/events")
 
     def set_state(self, number, target):
-        issue = self.issue(number)
-        labels = [x["name"] if isinstance(x, dict) else x for x in issue["labels"]]
-        labels = [x for x in labels if not x.startswith("status:")] + [
-            "status:" + target
-        ]
-        return self.request("PUT", f"/issues/{number}/labels", {"labels": labels})
+        return set_status(self, number, target)
 
     def notify(self, number):
         if self.cfg["actors"]["owner"].endswith("[bot]"):
@@ -1239,6 +1234,24 @@ class GitHub:
             f"/issues/{number}/assignees",
             {"assignees": [self.cfg["actors"]["owner"]]},
         )
+
+
+def set_status(client, number, target):
+    """Add the target, then remove only other statuses in this issue snapshot."""
+    issue = client.issue(number)
+    labels = [item["name"] if isinstance(item, dict) else item for item in issue["labels"]]
+    desired = "status:" + target
+    if desired not in labels:
+        client.request("POST", f"/issues/{number}/labels", {"labels": [desired]})
+    for label in labels:
+        if label.startswith("status:") and label != desired:
+            remove_status(client, number, label[len("status:"):])
+
+
+def remove_status(client, number, name):
+    """Remove one status label; transport validation still rejects unsafe paths."""
+    label = urllib.parse.quote("status:" + name, safe="")
+    return client.request("DELETE", f"/issues/{number}/labels/{label}")
 
 
 def app_client(cfg, role="runner", **token_options):
@@ -1890,7 +1903,7 @@ def _attest_approval(cfg, client, event):
         # Remove only the approval we cannot honour, preserving all other labels.
         removal_error = None
         try:
-            client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Aapproved")
+            remove_status(client, issue["number"], "approved")
         except Unavailable as exc:
             removal_error = exc
         rejected = int(latest["id"]) if latest is not None else 0
@@ -2009,7 +2022,7 @@ def _attest_approval(cfg, client, event):
         if snapshots[1] == pair:
             # Remove only draft; never overwrite a concurrent status or other label.
             try:
-                client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Adraft")
+                remove_status(client, issue["number"], "draft")
             except Unavailable:
                 reject_labels("Approval label cleanup failed; re-approve")
         if statuses(client.issue(issue["number"])) != ["status:approved"]:
@@ -2161,7 +2174,7 @@ def guard_issue(cfg, client, number):
     # Remove draft alone so the pending webhook still sees the same approval
     # event, rather than emitting a replacement approved label event.
     if canonical == "approved" and statuses == {"status:approved", "status:draft"}:
-        client.request("DELETE", f"/issues/{number}/labels/status%3Adraft")
+        remove_status(client, number, "draft")
         issue = client.issue(number)
     if canonical in {"blocked", "needs-owner", "needs-primary"}:
         client.notify(number)
@@ -2204,11 +2217,11 @@ def guard_issue(cfg, client, number):
     if actual == canonical:
         return False
     client.set_state(number, canonical)
-    # Bind to the event just written, never to the rejected prior change.
+    # The target may already be present, producing no new labeled event.
+    # Bind only to the newest matching workflow event, never another actor or label.
     restored_event = None
     try:
         written = [e for e in client.events(number) if e.get("event") == "labeled"
-                   and int(e["id"]) > max((int(old["id"]) for old in events), default=0)
                    and e.get("actor", {}).get("login") == cfg["actors"]["workflow"]
                    and e.get("label", {}).get("name") == "status:" + canonical]
         if written:
