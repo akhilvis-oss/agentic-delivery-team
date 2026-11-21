@@ -115,14 +115,6 @@ def client_for(core, cfg, config=None):
             return core.app_client(cfg, status_only=True).pages(
                 f"/commits/{head}/statuses")
 
-        def request(self, method, path, data=None):
-            if method == "PATCH" and re.fullmatch(r"/issues/[1-9]\d*", path):
-                raise ValueError("Delivery never edits issues through PATCH")
-            if method == "PATCH" and re.fullmatch(r"/pulls/[1-9]\d*", path):
-                if getattr(self, "_pr_body_write", None) != (path, data):
-                    raise ValueError("PR edits require edit_pr_body")
-            return super().request(method, path, data)
-
         def write_allowed(self, method, path):
             if method == "PATCH" and re.fullmatch(r"/issues/[1-9]\d*", path):
                 return False
@@ -442,17 +434,19 @@ def edit_pr_body(client, job, number, payload, tier):
     allowed = {(2, "Test evidence"), (2, "Acceptance evidence")}
     if tier == "control-critical":
         allowed.add((2, "Acceptance and evidence matrix"))
+    new_body = payload["body"]
     old_prefix, old_titles, old = evidence_sections(job["integration"]["body"])
-    prefix, titles, new = evidence_sections(payload["body"])
+    prefix, titles, new = evidence_sections(new_body)
     if (prefix != old_prefix or titles != old_titles
             or any(new[t] != old[t] for t in titles if t not in allowed)):
         raise ValueError("Only approved evidence sections may change")
     path = f"/pulls/{number}"
     if hasattr(client, "_pr_body_write"):
         raise ValueError("Nested PR edit refused")
-    client._pr_body_write = (path, payload)
+    data = {"body": new_body}
+    client._pr_body_write = (path, data)
     try:
-        return client.request("PATCH", path, payload)
+        return client.request("PATCH", f"/pulls/{number}", data)
     finally:
         del client._pr_body_write
 

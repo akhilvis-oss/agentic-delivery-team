@@ -617,6 +617,8 @@ def test_delivery_client_exact_body_patch_capability_and_issue_refusal():
             return method == "PATCH" and path == "/issues/1"
 
         def request(self, *args):
+            if not self.write_allowed(args[0], args[1]):
+                raise ValueError("Transport refuses unscoped writes")
             sent.append(args)
 
     client = api.client_for(SimpleNamespace(GitHub=Base), {})

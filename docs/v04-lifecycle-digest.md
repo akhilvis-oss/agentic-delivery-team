@@ -563,7 +563,7 @@ at <head>." The owner still merges control-critical work.
 After push, `edit_pr_body` alone may PATCH the bound PR, with a body-only payload
 and changes limited to Test evidence, Acceptance evidence and, for a
 control-critical PR, Acceptance and evidence matrix. All other sections remain
-byte-for-byte unchanged. The delivery client refuses PATCH on issue endpoints.
+byte-for-byte unchanged. The delivery client refuses `PATCH /issues/N`.
 A trusted gate may briefly fail between push and the description edit. The
 reviewed head, reviewer session and saved description become one durable local
 update; `pr-open` delivery returns to `created` to post the new Checker review
