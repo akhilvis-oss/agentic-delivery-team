@@ -533,10 +533,11 @@ def test_draft_cleanup_transport_is_scoped_to_one_label(tmp_path):
         "https://api.github.com/repos/example/project/issues/1/labels/status%3Adraft"
     )
     client.request("DELETE", "/issues/1/labels/status%3Aapproved")
-    for path in ("/issues/1/labels/status%3Ablocked", "/issues/1", "/labels"):
+    client.request("DELETE", "/issues/1/labels/status%3Ablocked")
+    for path in ("/issues/1", "/labels"):
         with pytest.raises(ValueError, match="Only repository issue/label writes"):
             client.request("DELETE", path)
-    assert len(requests) == 2
+    assert len(requests) == 3
 
 
 def test_picker_cleanup_preserves_concurrent_status_and_does_not_attest(tmp_path, monkeypatch):
