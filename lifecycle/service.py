@@ -187,6 +187,9 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
         if (record["job"] != source["id"] or record["commit"] != head
                 or not core.has_role(cfg, record["actor"], "runner")):
             return False
+        if (record.get("from") == record["to"] == "draft"
+                and record.get("reason") == "owner_withdrew" and record.get("continuation")):
+            return True
         if source["status"] == "ready_for_integration":
             return record["kind"] == "review" and record["outcome"] == "ready_for_integration"
         return (record["to"] == targets.get(source["status"])
@@ -233,7 +236,36 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
         claim["continuation_number"] = count + 1
 
 
+def withdraw_claim(cfg, client, path, claim, issue):
+    labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+    if (claim["stage"] == "finished" or "status:draft" not in labels
+            or not core.can_start(issue)):
+        return False
+    if not core.withdrawal(cfg, client, issue, claim["event"]):
+        return False
+    runner = runner_module()
+    job_path = (Path(cfg["state_dir"]) / "jobs" / claim["job"] / "runner-state"
+                / "tasks" / (claim["job"] + ".json"))
+    if job_path.exists():
+        config, job = source_work(cfg, claim["job"])
+        # A live phase stops at its next runner check. Never signal an agent.
+        if job["status"].startswith("running_"):
+            return True
+        runner.withdrawal_stop(config, job_path, job)
+        claim["head"] = job.get("head_commit")
+    else:
+        core.queue(cfg, core.withdrawal_record(cfg, claim["issue"], claim["job"], claim["event"]))
+        flush_outbox(cfg, client)
+    claim.update(stage="finished")
+    claim.pop("error", None)
+    claim.pop("waiting", None)
+    core.save(path, claim)
+    return True
+
+
 def stop_continuation(cfg, client, path, claim, reason, files=None):
+    if withdraw_claim(cfg, client, path, claim, client.issue(claim["issue"])):
+        return
     record = core.public_record(
         cfg, claim["issue"], claim["job"], 0, "blocked",
         event=claim["event"], reason=reason, conflict_files=files,
@@ -974,6 +1006,8 @@ class StoryQueue:
         return ({"story": holder} if holder is not None else None), None
 
     def stop(self, path, claim, body):
+        if withdraw_claim(self.cfg, self.client, path, claim, self.client.issue(claim["issue"])):
+            return
         record = core.public_record(self.cfg, claim["issue"], claim["job"], 0, "needs-owner",
                                     event=claim["event"], reason="dependency_closed_unmerged")
         record.update({"from": core.state(self.rows[claim["issue"]]),
@@ -1043,6 +1077,9 @@ def story_boundary(cfg, client, issue, failed, skipped, claims, *, claim=None,
             event = int(approval["event"]["id"])
             candidate = dict(issue=number, event=event,
                              job=f"issue-{number}-event-{event}", stage="claimed")
+        if withdraw_claim(cfg, client, Path(cfg["state_dir"]) / "claims" / (candidate["job"] + ".json"),
+                          candidate, client.issue(number)):
+            return
         record = core.public_record(
             cfg, number, candidate["job"], 0, "blocked", event=candidate["event"],
             reason="unexpected_error", exception_class=exception_name(exc),
@@ -1251,6 +1288,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             observed = {"issue": issue}
             with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim,
                                 observed=observed):
+                if withdraw_claim(cfg, client, path, claim, issue):
+                    continue
                 core.state(issue)
                 if claim["stage"] == "claimed" and core.can_start(issue):
                     waiting, problem = queue.decide(claim)
@@ -1339,6 +1378,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     continue
                 fresh = client.issue(claim["issue"])
                 observed["issue"] = fresh
+                if withdraw_claim(cfg, client, path, claim, fresh):
+                    continue
                 if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
                     claim.update(
                         stage="suspended", error="admission_changed_requires_reconciliation"
@@ -1404,6 +1445,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     core.save(path, claim)
                     fresh = client.issue(claim["issue"])
                     observed["issue"] = fresh
+                    if withdraw_claim(cfg, client, path, claim, fresh):
+                        continue
                 if claim["stage"] in {"dispatched", "enqueued"}:
                     remote_records = core.records(
                         cfg, client.comments(claim["issue"]), claim["issue"]

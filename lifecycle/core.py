@@ -468,6 +468,7 @@ def public_record(
         record["key"] = key([record["key"], owner_question, failed_tests])
     if continuation or stop_save_failed:
         if (target not in {"blocked", "needs-owner"}
+                and not (target == "draft" and reason == "owner_withdrew")
                 or type(continuation) is not bool or type(stop_save_failed) is not bool
                 or continuation and commit is None):
             raise ValueError("Invalid stop preservation details")
@@ -516,6 +517,7 @@ STOP_REASONS = {
     "continuation_commit_unrecorded": "The latest saved work could not be verified on this issue. Owner: ask the operator to reconcile it, or add Restart: fresh under Owner decisions and re-approve.",
     "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or add Restart: fresh under Owner decisions and re-approve.",
     "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (add Restart: fresh under Owner decisions and re-approve), or split the story.",
+    "owner_withdrew": "The owner withdrew this story. Owner: re-approve to start it again.",
     "pr_open_reapproval": "This story has an open PR. Owner: close the PR and re-approve to rebuild, or merge it and add `status:merged` to finish (#184).",
     "continuation_not_applied": "The continued commit is missing from the built head. Owner: reconcile the history before re-approving.",
     "owner_question": 'The builder needs your decision. Owner: add the answer to the story under "Owner decisions", then re-approve.',
@@ -565,6 +567,7 @@ STOP_KINDS = {
     "owner_requested_stop": "Needs your decision",
     "continuation_limit": "Needs your decision",
     "pr_open_reapproval": "Needs your decision",
+    "owner_withdrew": "Needs your decision",
     "owner_merge_required": "Needs your merge",
     "commit_refused": "Needs a fix",
     "delivery_disabled": "Needs a fix",
@@ -783,6 +786,9 @@ def record_body(record):
                                  for name in details["refusal"]["paths"]) + "\n"
         if details["refusal"].get("more"):
             explanation += f"and {details['refusal']['more']} more refused paths [truncated]\n"
+    if record.get("reason") == "owner_withdrew":
+        explanation = ("The owner withdrew this story. Its work is saved. Owner: re-approve to continue from it."
+                       if record.get("continuation") else STOP_REASONS["owner_withdrew"]) + "\n"
     tail = ""
     if record.get("conflict_files"):
         explanation += "\nConflicting files (repository-relative):\n" + "\n".join(
@@ -790,7 +796,7 @@ def record_body(record):
         ) + "\n"
     if record.get("stop_save_failed"):
         explanation += "\nThe builder's work couldn't be saved completely; owner: ask the operator to reconcile it.\n"
-    if record.get("continuation"):
+    if record.get("continuation") and record.get("reason") != "owner_withdrew":
         tail = ("\n\nSaved work is available. Re-approve to continue it, or add "
                 "Restart: fresh under Owner decisions and re-approve to restart fresh.")
     return (
@@ -823,7 +829,9 @@ def notice_body(cfg, client, entry):
     if (record["kind"] == "review" and context.get("findings")
             and not record.get("stop_details", {}).get("findings")):
         extra += finding_notice(cfg, context["findings"])
-    if context.get("delivery") and record.get("reason"):
+    if context.get("withdrawal_auto_merge_uncertain"):
+        extra += "Auto-merge may still be on. Owner: check the pull request.\n\n"
+    if context.get("delivery") and record.get("reason") and record["reason"] != "owner_withdrew":
         from runner.integration import REASONS, smoke_notice
 
         reason = record["reason"]
@@ -1373,6 +1381,12 @@ def flush(cfg, client):
                     entry.update(status="superseded", error="finished_issue")
                     save(path, entry)
                     continue
+                if (job_record and record.get("reason") != "owner_withdrew"
+                        and record.get("event") is not None
+                        and withdrawal(cfg, client, remote_issue, record["event"])):
+                    entry.update(status="superseded", error="owner_withdrew")
+                    save(path, entry)
+                    continue
                 if rejecting:
                     if not confirm_rejection(cfg, client, path, entry):
                         blocked_issues.add(record["issue"])
@@ -1384,6 +1398,12 @@ def flush(cfg, client):
                     remote_issue = client.issue(record["issue"])
                     if job_record and not can_start(remote_issue, remote):
                         entry.update(status="superseded", error="finished_issue")
+                        save(path, entry)
+                        continue
+                    if (job_record and record.get("reason") != "owner_withdrew"
+                            and record.get("event") is not None
+                            and withdrawal(cfg, client, remote_issue, record["event"])):
+                        entry.update(status="superseded", error="owner_withdrew")
                         save(path, entry)
                         continue
                     current = state(remote_issue)
@@ -1552,6 +1572,43 @@ def latest_event(cfg, events, target, role):
     return None
 
 
+def owner_draft_event(cfg, events):
+    """Only the configured owner's newest labeled status event can withdraw."""
+    event = max((e for e in events if e.get("event") == "labeled"
+                 and e.get("actor", {}).get("login") == cfg["actors"]["owner"]
+                 and e.get("label", {}).get("name", "").startswith("status:")),
+                key=lambda e: int(e["id"]), default=None)
+    return event if event and event["label"]["name"] == "status:draft" else None
+
+
+def withdrawal(cfg, client, issue, approval_event, *, events=None):
+    labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+    if "status:draft" not in labels or issue.get("state") == "closed":
+        return None
+    events = client.events(issue["number"]) if events is None else events
+    event = owner_draft_event(cfg, events)
+    if (event and int(event["id"]) > approval_event
+            and canonical_state(cfg, [e for e in events
+                                      if int(e["id"]) <= int(event["id"])]) == ("draft", event)):
+        return event
+    return None
+
+
+def withdrawal_record(cfg, number, job, event, *, head=None, continuation=False):
+    record = public_record(cfg, number, job, 0, "draft", commit=head, event=event,
+                           reason="owner_withdrew", continuation=continuation)
+    record.update(actor=cfg["actors"]["runner"], **{"from": "draft"})
+    return record
+
+
+def job_withdrawal_record(cfg, job):
+    binding = job["assignment"]["lifecycle"]
+    kept = bool(job.get("head_commit") and job.get("continuation")
+                and not job.get("stop_save_failed") and job["status"] != "failed")
+    return withdrawal_record(cfg, binding["issue"], job["id"], binding["event"],
+                             head=job.get("head_commit"), continuation=kept)
+
+
 def job_records(cfg, job):
     binding = job["assignment"].get("lifecycle")
     if not binding:
@@ -1689,17 +1746,33 @@ def job_records(cfg, job):
 
 def sync_job(config_path, job, client=None):
     cfg = load_config(config_path)
-    for record in job_records(cfg, job):
+    client = client or GitHub(cfg)
+    binding = job["assignment"].get("lifecycle")
+    withdrawn = (binding and withdrawal(cfg, client, client.issue(binding["issue"]), binding["event"]))
+    if withdrawn:
+        job["owner_withdrew"] = True
+    local = job_records(cfg, job)
+    if withdrawn or job.get("owner_withdrew"):
+        # Progress remains local; stops use one stable record identity even if
+        # a phase failure races the withdrawal or preservation recovers later.
+        local = ([] if job["status"] in {"queued", "running_worker", "running_readiness",
+                                        "running_reviewer", "changes_requested", "ready_for_integration"}
+                 else [job_withdrawal_record(cfg, job)])
+    for record in local:
         context = {}
         if record["kind"] == "review" and job.get("review", {}).get("findings"):
             context["findings"] = job["review"]["findings"]
-        if job.get("integration", {}).get("reason"):
+        if record.get("reason") == "owner_withdrew":
+            context["withdrawal_auto_merge_uncertain"] = bool(
+                job.get("withdrawal_auto_merge_uncertain")
+                or job.get("integration", {}).get("reason") == "auto_merge_disable_uncertain")
+        elif job.get("integration", {}).get("reason"):
             context.update(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
                            smoke_reporting=job["integration"].get("smoke_reporting", False))
         queue(cfg, record, notice_context=context)
     try:
         flush(cfg, client or GitHub(cfg))
-        if any(
+        if not job.get("owner_withdrew") and any(
             f["severity"] in cfg["pushback"]["minor"]
             for r in job.get("review_history", [])
             for f in r["result"]["findings"]
@@ -2168,6 +2241,12 @@ def guard_issue(cfg, client, number):
             queue(cfg, record, role="workflow")
             flush(cfg, client)
             return actual != canonical
+    if (canonical == "draft" and event is not None
+            and owner_draft_event(cfg, events) == event):
+        if statuses != {"status:draft"}:
+            client.set_state(number, "draft")
+            return True
+        return False
     if actual == canonical:
         return False
     client.set_state(number, canonical)

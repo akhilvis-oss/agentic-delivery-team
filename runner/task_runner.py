@@ -55,6 +55,7 @@ class IntegrityError(Blocked):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "owner_withdrew": ("owner_withdrew", "The owner withdrew this story."),
     "readiness_question": ("readiness_question", "Readiness requires an owner decision before building."),
     "checks_worktree_changed": ("checks_worktree_changed", "The worktree changed while the required checks ran. Owner: re-approve to build the story again."),
     "continuation_not_applied": ("continuation_not_applied", "The continued commit is missing from the built head."),
@@ -1275,6 +1276,8 @@ def verify_required_tests(config, state, path, job):
         checkout = verification_copy(config, head, folder)
         log_root = private_dir(state / "test-runs" / job["id"] / ("attempt-" + str(len(runs))))
         for index, args in enumerate(verification_commands(config)):
+            if config.get("lifecycle_config") and job["assignment"].get("lifecycle"):
+                check_lifecycle_admission(config, job)
             result = {"argv": list(args), "status": "running", "started_at": now(),
                       "exit_code": None, "reported_counts": None}
             entry["results"].append(result)
@@ -1522,7 +1525,8 @@ def save_job(config, path, job):
 def publish_receipt(config, path, job, client=None):
     options = config.get("github_receipts", {"enabled": False})
     if (not options.get("enabled") or not job.get("github_number")
-            or job["status"] not in TERMINAL or job.get("receipt_delivery")):
+            or job["status"] not in TERMINAL or job.get("receipt_delivery")
+            or job.get("owner_withdrew")):
         return
     # Mark before sending: crash/transport uncertainty must not cause duplicate posts.
     job["receipt_delivery"] = "attempted"
@@ -1625,6 +1629,17 @@ def check_dispatch_head(config, expected):
     if (git(config, "branch", "--show-current") != config["branch"]
             or git(config, "rev-parse", "HEAD") != expected):
         raise Blocked("Branch or HEAD changed before phase dispatch")
+
+
+def withdrawal_stop(config, path, job, client=None):
+    """Preserve work through the existing save policy; withdraw delivery once."""
+    integration_api().disable_withdrawn_merge(self_module(), config, path, job, client)
+    if job["status"] != "failed":
+        job["status"] = "needs_owner"
+    job.update(owner_withdrew=True, updated_at=now(),
+               blocked_reason=block_reason("owner_withdrew"))
+    save_at_stop(config, path, job, job.get("head_commit") or job["base_commit"])
+    save_job(config, path, job)
 
 
 def check_lifecycle_admission(config, job):
@@ -1798,6 +1813,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 ensure_reviewable(config, job)
                 before = fingerprint(config)
                 check_dispatch_head(config, job["head_commit"])
+                if lifecycle_cfg:
+                    check_lifecycle_admission(config, job)
                 try:
                     job["review_session"] = f"{job['id']}-round-{attempt}-reviewer"
                     job["review"] = execute(config, state, path, job, "reviewer")
@@ -1805,6 +1822,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     if fingerprint(config) != before:
                         raise RuntimeError("Worktree changed during read-only review")
                 validate_result(job["review"], "reviewer")
+                if lifecycle_cfg:
+                    check_lifecycle_admission(config, job)
                 verdict = job["review"]["status"]
                 if verdict == "blocked":
                     job["blocked_reason"] = block_reason("reviewer_reported_blocked")
