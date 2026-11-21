@@ -273,7 +273,7 @@ def test_app_token_refresh_rechecks_actor(tmp_path, monkeypatch):
 
 
 def test_preflight_posts_once_and_never_blind_retries(tmp_path, monkeypatch):
-    cfg = policy(tmp_path)
+    cfg = configured(tmp_path)
     h = Hub(cfg)
     h.issue(number=32, state="draft")
     monkeypatch.setattr(auth, "mint", lambda c, r, **kw: ("synthetic", AT + 3600))

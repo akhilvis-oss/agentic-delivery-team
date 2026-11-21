@@ -14,6 +14,10 @@ FETCH = service.fetch_target
 SYNTHETIC_TOKEN = "synthetic-" + "fetch-token"
 
 
+class Crash(BaseException):
+    """Simulated process loss bypasses story error isolation."""
+
+
 def command(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "user.name=Fixture",
@@ -31,7 +35,7 @@ def transport(tmp_path, monkeypatch):
     command(remote, "checkout", "-b", "target")
     command(remote, "commit", "--allow-empty", "-qm", "remote advance")
     cfg["base_branch"] = "target"
-    cfg["app_auth"] = {"runner": {"synthetic": True}}
+    cfg["app_auth"] = {"runner": {"app_id": 1, "keychain_service": "fixture", "keychain_account": "fixture"}}
     monkeypatch.setattr(service, "fetch_target", FETCH)
     minted, network = [], []
 
@@ -73,8 +77,8 @@ def test_fetch_pins_remote_commit_and_recovery_keeps_it(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_ASKPASS", "/must-not-run")
     expected = command(remote, "rev-parse", "HEAD")
     original = service.ensure_worktree
-    monkeypatch.setattr(service, "ensure_worktree", lambda *a: (_ for _ in ()).throw(RuntimeError("crash")))
-    with pytest.raises(RuntimeError, match="crash"):
+    monkeypatch.setattr(service, "ensure_worktree", lambda *a: (_ for _ in ()).throw(Crash("crash")))
+    with pytest.raises(Crash, match="crash"):
         service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
     assert claims(cfg)[0]["start_commit"] == expected
     command(remote, "commit", "--allow-empty", "-qm", "later advance")
@@ -196,8 +200,8 @@ def test_fetch_defaults_to_main(tmp_path, monkeypatch):
 def test_pre_fetch_dispatched_claim_retries_without_local_fallback(tmp_path, monkeypatch):
     cfg, hub, runner, remote, minted, network = transport(tmp_path, monkeypatch)
     original = service.ensure_worktree
-    monkeypatch.setattr(service, "ensure_worktree", lambda *a: (_ for _ in ()).throw(RuntimeError("crash")))
-    with pytest.raises(RuntimeError, match="crash"):
+    monkeypatch.setattr(service, "ensure_worktree", lambda *a: (_ for _ in ()).throw(Crash("crash")))
+    with pytest.raises(Crash, match="crash"):
         service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
     claim_path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))
     claim = core.read(claim_path)
@@ -250,10 +254,10 @@ def legacy_dispatch(tmp_path, monkeypatch, boundary):
 
     def crash(*args, **kwargs):
         original(*args, **kwargs)
-        raise RuntimeError("crash after " + boundary)
+        raise Crash("crash after " + boundary)
 
     monkeypatch.setattr(owner, name, crash)
-    with pytest.raises(RuntimeError, match="crash after"):
+    with pytest.raises(Crash, match="crash after"):
         service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
     monkeypatch.setattr(owner, name, original)
     path = next((Path(cfg["state_dir"]) / "claims").glob("*.json"))

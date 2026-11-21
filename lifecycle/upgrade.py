@@ -220,8 +220,7 @@ def attempt(cfg, ctx, on_read=None):
         if public:
             statuses = product
         else:
-            token, _ = app_tokens.mint(cfg, 'runner', status_only=True)
-            statuses = core.GitHub(cfg, token=token)
+            statuses = core.app_client(cfg, status_only=True)
         status = smoke_watch.smoke_status(statuses, commit, cfg['upgrade']['smoke_agent'],
                                           settings.get('framework_runner', cfg['actors']['runner']))
         if not status or status.get('state') != 'success':
@@ -290,7 +289,7 @@ def check(config_path):
         cfg = core.load_config(config_path)
         service.validate_local(cfg)
         for role in cfg.get('app_auth', {}):
-            app_tokens.mint(cfg, role)
+            app_tokens.get(cfg, role)
         return 0
     except app_tokens.AuthenticationError as error:
         message = str(error)
