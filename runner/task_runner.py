@@ -29,6 +29,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 TERMINAL = {"ready_for_integration", "needs_primary_review", "needs_owner", "blocked", "failed", "interrupted"}
 SUMMARIES = {
     "queued": "Assignment queued; no approval implied.",
+    "waiting_system": "Waiting on the system; service retry scheduled.",
     "running_worker": "Worker executing bounded assignment.",
     "running_reviewer": "Independent read-only review in progress.",
     "running_readiness": "Read-only story readiness check in progress.",
@@ -46,6 +47,15 @@ class Blocked(ValueError):
     """A prerequisite or safety failure requiring operator attention."""
 
 
+class AgentExit(RuntimeError):
+    """A listed exit code; never carries provider output."""
+
+    def __init__(self, code, *, retryable):
+        self.code = code
+        self.retryable = retryable
+        super().__init__(code)
+
+
 class IntegrityError(Blocked):
     """Durable assignment binding mismatch, including across fresh imports."""
 
@@ -55,6 +65,8 @@ class IntegrityError(Blocked):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "agent_sign_in_failed": ("agent_sign_in_failed", "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve."),
+    "agent_usage_limit": ("agent_usage_limit", "The agent reached its usage limit. Owner: re-approve once the limit resets."),
     "readiness_question": ("readiness_question", "Readiness requires an owner decision before building."),
     "checks_worktree_changed": ("checks_worktree_changed", "The worktree changed while the required checks ran. Owner: re-approve to build the story again."),
     "continuation_not_applied": ("continuation_not_applied", "The continued commit is missing from the built head."),
@@ -232,6 +244,12 @@ def load_config(path):
         raise ValueError("Runner requires a feature branch")
     if type(config.get("max_rounds", 2)) is not int or not 1 <= config.get("max_rounds", 2) <= 2:
         raise ValueError("At most two worker/review rounds are permitted")
+    for field in ("auth_exit_codes", "quota_exit_codes"):
+        values = config.get(field, [])
+        if not isinstance(values, list) or any(type(n) is not int or not 3 <= n <= 255 for n in values):
+            raise ValueError("exit_codes must be lists of integers from 3 to 255")
+    if set(config.get("auth_exit_codes", [])) & set(config.get("quota_exit_codes", [])):
+        raise ValueError("exit_codes lists must be disjoint")
     worker_check_attempts(config)
     if type(config.get("readiness", False)) is not bool:
         raise ValueError("readiness must be a boolean")
@@ -1358,7 +1376,8 @@ def execute_phase(config, state, job_path, job, role):
         job.setdefault("phase_slots", []).append({"round": job["round"], "role": role,
                                                   "slot": config["pool_slot"], "head": git(config, "rev-parse", "HEAD")})
         job["cli_version"] = check_cli(config)
-    folder = state / "runs" / job["id"] / f"round_{job['round']}_{role}"
+    suffix = f"_retry_{job['system_retries']}" if job.get("retry_phase_running") else ""
+    folder = state / "runs" / job["id"] / (f"round_{job['round']}_{role}" + suffix)
     if folder.exists():
         raise RuntimeError("Phase output exists; never reuse a previous result")
     private_dir(folder)
@@ -1398,12 +1417,18 @@ def execute_phase(config, state, job_path, job, role):
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"{role} exceeded phase time limit")
                     time.sleep(0.05)
+        code = None
         if proc.returncode and proc.returncode in config.get("quota_exit_codes", []):
-            result = {"status": "blocked", "summary": "Provider quota or rate limit; slot cooling down",
-                      "tests": [], "limitations": [], "rate_limited": True}
-            if role == "reviewer":
-                result["findings"] = []
-            return result
+            code = "agent_usage_limit"
+            if config.get("pool_slot"):
+                # The pool consumes this private hook on context exit. It must
+                # never become a worker result or a worker-reported stop.
+                job["_pool_report"] = {"rate_limited": True}
+        elif (not config.get("pool_slot") and proc.returncode
+              and proc.returncode in config.get("auth_exit_codes", [])):
+            code = "agent_sign_in_failed"
+        if code:
+            raise AgentExit(code, retryable=not output.exists())
         if proc.returncode:
             raise RuntimeError("Agent process failed; inspect private phase logs")
         result = read_answer(output)
@@ -1490,6 +1515,8 @@ def lifecycle_api():
 def save_job(config, path, job):
     job["schema_version"] = 2
     save(path, job)
+    if job["status"] == "waiting_system" or job.get("retry_local_end"):
+        return
     receipt = {"status": job["status"], "base_commit": job["base_commit"],
                "head_commit": job.get("head_commit"), "summary": SUMMARIES[job["status"]],
                "timestamp": job["updated_at"], "schema_version": 2,
@@ -1510,6 +1537,7 @@ def save_job(config, path, job):
         receipt["readiness_sessions"] = 1
     save(Path(config["state_dir"]) / "receipts" / f"{job['id']}.json", receipt)
     if (config.get("lifecycle_config") and job["assignment"].get("lifecycle")
+            and not job.get("retry_phase_running")
             and (not job.get("stop_saving") or job.get("stop_ready"))):
         try:
             lifecycle_api().sync_job(config["lifecycle_config"], job)
@@ -1634,7 +1662,33 @@ def check_lifecycle_admission(config, job):
         raise Blocked("Lifecycle admission changed; owner reconciliation required") from exc
 
 
+def service_claim_owns(cfg, config, job):
+    """Automatic retries require the service's durable event-bound claim."""
+    path = Path(cfg["state_dir"]) / "claims" / (job["id"] + ".json")
+    if not path.exists():
+        return False
+    claim = read(path)
+    binding = job["assignment"].get("lifecycle", {})
+    return (claim.get("stage") == "enqueued" and claim.get("job") == job["id"]
+            and claim.get("issue") == binding.get("issue")
+            and claim.get("event") == binding.get("event")
+            and claim.get("primary") == binding.get("primary")
+            and Path(config["state_dir"]).resolve() ==
+            (Path(cfg["state_dir"]) / "jobs" / job["id"] / "runner-state").resolve()
+            and claim.get("task") == job["assignment"]["task_text"]
+            and claim.get("worktree") == config["worktree"])
+
+
+def begin_system_retry(job, resume):
+    if resume:
+        job["retry_phase_running"] = True
+        # Clear the wait and mark running atomically in execute_phase's save.
+        job.pop("retry", None)
+
+
 def run_once(config, state=None, client=None, *, task_id=None):
+    service_retry = callable(config.get("_service_retry_clock"))
+    clock = config["_service_retry_clock"] if service_retry else time.time
     if task_id is not None and not ID.fullmatch(task_id):
         raise ValueError("Invalid exact task selection")
     state = private_dir(state or config["state_dir"])
@@ -1652,6 +1706,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 return
         for path, job in jobs:
             if job["status"].startswith("running_"):
+                job.pop("retry_phase_running", None)
                 job.update(status="interrupted", error="Previous runner stopped; reconcile child and worktree",
                            updated_at=now())
                 save_job(config, path, job)
@@ -1669,14 +1724,21 @@ def run_once(config, state=None, client=None, *, task_id=None):
                           and not config.get("phase_context")) or integration_api().options(config))):
                 integration_api().advance(self_module(), config, pending_path, pending)
                 return
-        queued = [(p, j) for p, j in jobs if j["status"] == "queued"
+        queued = [(p, j) for p, j in jobs if (j["status"] == "queued"
+                  or service_retry and j["status"] == "waiting_system"
+                  and j["retry"]["not_before"] <= clock())
                   and (task_id is None or j["id"] == task_id)
                   and j.get("not_before_epoch", 0) <= time.time()]
         if not queued:
             return
         path, job = queued[0]
         prerequisite = "assignment_preflight"
-        stop_expected = None
+        resume = job.get("retry") if job["status"] == "waiting_system" else None
+        context = job.get("system_retry_context", {}) if resume else {}
+        stop_expected = context.get("stop_expected")
+        prerequisite = context.get("prerequisite", prerequisite)
+        phase = resume["phase"] if resume else None
+        verification = context.get("verification")
         try:
             validate_agent(config)
             assignment = verify_assignment(config, job)
@@ -1685,6 +1747,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 lifecycle_cfg = lifecycle_api().load_config(config["lifecycle_config"])
                 if not assignment.get("lifecycle") or assignment["lifecycle"]["issue"] != job.get("github_number"):
                     raise Blocked("Lifecycle dispatch requires an event-bound service claim")
+            if resume and (not lifecycle_cfg or not service_claim_owns(lifecycle_cfg, config, job)):
+                raise Blocked("Retry requires its durable service claim")
             max_attempts = (1 + lifecycle_cfg["pushback"]["max_correction_rounds"]
                             if lifecycle_cfg else config.get("max_rounds", 2))
             if assignment.get("lifecycle", {}).get("primary"):
@@ -1695,7 +1759,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
             # primary dispatch would grant an uncounted extra build and review.
             escalation_status = "needs_owner" if assignment.get("continuation") else "needs_primary_review"
             dependency = assignment["after_task"]
-            if dependency:
+            if dependency and not resume:
                 predecessor = read(state / "tasks" / f"{dependency}.json")
                 if predecessor["status"] != "ready_for_integration":
                     job.update(waiting_for_task=dependency, updated_at=now())
@@ -1711,7 +1775,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 job.update(base_commit=reviewed, dependency_reviewed_head=reviewed)
                 job.pop("waiting_for_task", None)
             expected = job.get("head_commit") if assignment["kind"] == "review" else job["base_commit"]
-            if (git(config, "branch", "--show-current") != config["branch"]
+            if not resume and (git(config, "branch", "--show-current") != config["branch"]
                     or git(config, "rev-parse", "HEAD") != expected):
                 raise Blocked("Branch or HEAD changed since enqueue")
             prerequisite = "command_preflight"
@@ -1721,7 +1785,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
             job["protocol"] = PROTOCOL
             if (config.get("readiness", False) and assignment["kind"] == "work"
                     and not assignment.get("lifecycle", {}).get("primary")
-                    and not config.get("pool_slot") and not config.get("phase_context")):
+                    and not config.get("pool_slot") and not config.get("phase_context")
+                    and (not resume or phase == "readiness")):
                 check_dispatch_head(config, expected)
                 commit_preflight(config, job)
                 if lifecycle_cfg:
@@ -1729,11 +1794,14 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 job.update(round=1, readiness_stopped=True, readiness_sessions=1,
                            readiness_session=f"{job['id']}-round-1-readiness")
                 before = fingerprint(config)
+                phase = "readiness"
+                begin_system_retry(job, resume)
                 try:
                     job["readiness"] = execute(config, state, path, job, "readiness")
                 finally:
                     if fingerprint(config) != before:
                         raise RuntimeError("Worktree changed during read-only readiness")
+                job.pop("retry_phase_running", None)
                 validate_result(job["readiness"], "readiness")
                 if job["readiness"]["status"] == "questions":
                     job.update(status="needs_owner", blocked_reason=block_reason("readiness_question"),
@@ -1742,9 +1810,10 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     publish_receipt(config, path, job, client)
                     return
                 job.pop("readiness_stopped")
-            for attempt in range(1, max_attempts + 1):
+                resume = None
+            for attempt in range(job["round"] if resume else 1, max_attempts + 1):
                 job["round"] = attempt
-                if assignment["kind"] == "work":
+                if assignment["kind"] == "work" and not (resume and phase == "reviewer"):
                     prerequisite = "command_preflight"
                     verification_commands(config)
                     prerequisite = "agent_compatibility"
@@ -1752,12 +1821,22 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     check_cli(config)
                     prerequisite = "assignment_preflight"
                     check_dispatch_head(config, before_head)
-                    commit_preflight(config, job)
+                    if not resume:
+                        commit_preflight(config, job)
                     if lifecycle_cfg:
                         check_lifecycle_admission(config, job)
                     stop_expected = before_head
                     job["worker_check_attempts"] = worker_check_attempts(config)
-                    job["worker"] = execute(config, state, path, job, "worker")
+                    phase = "worker"
+                    begin_system_retry(job, resume)
+                    try:
+                        job["worker"] = execute(config, state, path, job, "worker")
+                    finally:
+                        if (git(config, "branch", "--show-current") != config["branch"]
+                                or git(config, "rev-parse", "HEAD") != before_head):
+                            raise CommitRefused("history_changed")
+                    job.pop("retry_phase_running", None)
+                    resume = None
                     validate_result(job["worker"], "worker")
                     if (git(config, "branch", "--show-current") != config["branch"]
                             or git(config, "rev-parse", "HEAD") != before_head):
@@ -1794,16 +1873,25 @@ def run_once(config, state=None, client=None, *, task_id=None):
                 if lifecycle_cfg:
                     check_lifecycle_admission(config, job)
                 prerequisite = "required_checks"
-                verification = verify_required_tests(config, state, path, job)
+                if not (resume and phase == "reviewer"):
+                    verification = verify_required_tests(config, state, path, job)
+                elif verification and (verification.get("head") != job["head_commit"]
+                                       or verification.get("status") not in {"passed", "failed"}
+                                       or verification not in job.get("verification_runs", [])):
+                    raise Blocked("Retry required-test evidence changed")
                 ensure_reviewable(config, job)
                 before = fingerprint(config)
                 check_dispatch_head(config, job["head_commit"])
+                phase = "reviewer"
+                begin_system_retry(job, resume)
                 try:
                     job["review_session"] = f"{job['id']}-round-{attempt}-reviewer"
                     job["review"] = execute(config, state, path, job, "reviewer")
                 finally:
                     if fingerprint(config) != before:
                         raise RuntimeError("Worktree changed during read-only review")
+                job.pop("retry_phase_running", None)
+                resume = None
                 validate_result(job["review"], "reviewer")
                 verdict = job["review"]["status"]
                 if verdict == "blocked":
@@ -1844,6 +1932,25 @@ def run_once(config, state=None, client=None, *, task_id=None):
                     job.update(status="changes_requested", updated_at=now())
                     save_job(config, path, job)
             job["updated_at"] = now()
+        except AgentExit as exc:
+            job.pop("retry_phase_running", None)
+            schedule = lifecycle_cfg.get("system_retry_minutes", [5, 20, 60]) if lifecycle_cfg else []
+            k = job.get("system_retries", 0) + 1
+            if (service_retry and lifecycle_cfg and exc.retryable
+                    and not config.get("pool_slot") and not config.get("phase_context")
+                    and not job.get("commit_refusals") and k <= len(schedule)
+                    and service_claim_owns(lifecycle_cfg, config, job)):
+                job.update(status="waiting_system", system_retries=k,
+                           retry={"code": exc.code, "attempt": k, "phase": phase,
+                                  "not_before": clock() + schedule[k - 1] * 60},
+                           system_retry_context={"stop_expected": stop_expected,
+                                                 "prerequisite": prerequisite,
+                                                 "verification": verification}, updated_at=now())
+                save_job(config, path, job)
+                return
+            job.pop("retry", None)
+            job.update(status="needs_owner" if lifecycle_cfg else "blocked",
+                       blocked_reason=block_reason(exc.code), updated_at=now())
         except CommitRefused as exc:
             # Publish the stop only after preservation has finished.
             job["stop_saving"] = bool(config.get("lifecycle_config") and stop_expected is not None)
@@ -1859,6 +1966,8 @@ def run_once(config, state=None, client=None, *, task_id=None):
         except Exception:
             job.update(status="failed", error="Execution or integrity check failed; inspect private logs",
                        updated_at=now())
+        job.pop("retry_phase_running", None)
+        job.pop("retry", None)
         if (config.get("lifecycle_config") and stop_expected is not None
                 and job["status"] in {"needs_owner", "blocked", "failed"}):
             save_at_stop(config, path, job, job.get("head_commit") or stop_expected)

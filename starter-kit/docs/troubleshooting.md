@@ -48,8 +48,10 @@ and an action; replies to a stand-up do not approve work. To re-approve, resolve
 the stop, remove the stopped status in **Labels**, then add `status:approved` as
 the configured owner. The next build reads the complete story, including
 **Owner decisions**. Every stop notice starts with one of four kinds. Only a
-condition that can clear by itself is **Waiting on the system**. Until automatic
-system retries are available, retry these stops by re-approving too. Uncertain
+condition that can clear by itself is **Waiting on the system**. Sign-in and usage-limit failures with dedicated configured exit codes retry
+automatically for service-owned jobs while the schedule has attempts left. The status
+comment shows the next attempt. After the final stop, resolve the cause and re-approve.
+Other system stops, standalone runs and pool runs still require re-approval. Uncertain
 writes need reconciliation before retrying; they are **Needs a fix**.
 
 The table covers all stop codes. In worker families, `*` means one of `preflight`,
@@ -70,7 +72,9 @@ Each code belongs to exactly one kind.
 | Needs your decision | `continuation_limit` | The story reached its two-continuation limit. Restart fresh or split the story, then re-approve. |
 | Needs your decision | `pr_open_reapproval` | Close the open PR and re-approve to rebuild, or merge it and add `status:merged` to finish. |
 | Needs your merge | `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
-| Waiting on the system | `worker_*_unavailable` | A required tool, dependency or environment was unavailable. Restore the prerequisite if needed, then re-approve to retry. |
+| Waiting on the system | `agent_sign_in_failed` | The agent could not sign in. The service retries automatically while attempts remain; ask the operator to restore sign-in, then re-approve after the final stop. |
+| Waiting on the system | `agent_usage_limit` | The agent reached its usage limit. The service retries automatically while attempts remain; re-approve once the limit resets after the final stop. |
+| Waiting on the system | `worker_*_unavailable` | A required tool, dependency or environment was unavailable. These stops do not retry by themselves. Restore the prerequisite if needed, then re-approve to retry. |
 | Needs a fix | `checks_worktree_changed` | The worktree changed while the required checks ran. Owner: re-approve to build the story again. Saved work from this integrity failure cannot be continued. |
 | Needs a fix | `prerequisite_failed`, `assignment_preflight` | Setup or a required safety check could not run or failed. Ask the operator to fix setup, then re-approve. |
 | Needs a fix | `worker_*_unrelated_failure` | A check failed outside the builder's changes. Arrange a fix for that failure, then re-approve. |

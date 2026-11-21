@@ -26,7 +26,7 @@ def test_missing_public_version_defaults_to_one_and_private_refuses_it(tmp_path)
     cfg = policy(tmp_path)
     assert core.load_config(cfg['config_path'])['statuses_version'] == 1
     public = dict(cfg, statuses_version=1)
-    for name in ['state_dir', 'repository_root', 'worktree_root', 'runner_config', 'primary_runner_config', 'token_env', 'product_token_env', 'config_path']:
+    for name in ['state_dir', 'repository_root', 'worktree_root', 'runner_config', 'primary_runner_config', 'token_env', 'product_token_env', 'system_retry_minutes', 'config_path']:
         public.pop(name, None)
     path = tmp_path / 'public.json'
     core.save(path, public)

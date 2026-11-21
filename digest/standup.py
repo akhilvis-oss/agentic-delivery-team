@@ -178,7 +178,7 @@ def local_jobs(cfg):
 def collect(cfg, client, since, at):
     policy = cfg["lifecycle"]
     sections = [[] for _ in SECTION_NAMES]
-    from lifecycle.service import heartbeat, queue_waiting, queue_wait_text
+    from lifecycle.service import heartbeat, queue_waiting, queue_wait_text, waiting_jobs
 
     waiting_stories = queue_waiting(policy)
     last_poll = heartbeat(policy)
@@ -201,6 +201,8 @@ def collect(cfg, client, since, at):
         pool_snapshots.append((coordinator, snapshot))
         for name, entry in snapshot["stories"].items():
             pool_ready[name] = entry["head"] if entry.get("status") == "ready_for_integration" else None
+    jobs = local_jobs(cfg)
+    waiting = {j.get("github_number") for j in waiting_jobs(policy)}
     demo_jobs = {}
     for issue in issues:
         if core.is_report(policy, issue):
@@ -264,7 +266,7 @@ def collect(cfg, client, since, at):
                 sections[4].append(
                     linked(f"Task #{number}: state age unavailable", url)
                 )
-            elif (at - changed).total_seconds() > policy["stale_seconds"][current]:
+            elif number not in waiting and (at - changed).total_seconds() > policy["stale_seconds"][current]:
                 sections[4].append(
                     linked(f"Task #{number}: stale {current}; no automatic retry", url)
                 )
@@ -300,7 +302,6 @@ def collect(cfg, client, since, at):
     followup_records = [
         core.read(p) for p in (Path(policy["state_dir"]) / "followups").glob("*.json")
     ]
-    jobs = local_jobs(cfg)
     committed, refused, demos = set(), set(), set()
     for job in jobs:
         number = (
@@ -378,7 +379,7 @@ def collect(cfg, client, since, at):
             sections[4].append(
                 linked(f"Task #{number}: lifecycle updates unsynced", url)
             )
-        if job["status"] in {
+        if number not in waiting and job["status"] in {
             "blocked",
             "failed",
             "interrupted",

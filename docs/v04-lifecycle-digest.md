@@ -494,6 +494,30 @@ produce a public "blocked → merged was rejected" comment and one failing lifec
 check; adding `status:merged` finishes the story. Auto-merge may still merge it
 by itself.
 
+
+## Waiting on agent sign-in or usage limits
+
+Set `system_retry_minutes` in the private lifecycle config (also supported by the
+combined example config). It defaults to `[5, 20, 60]`; `[]` disables automatic
+retries. Configure zero to five integer delays from 1 to 1,440 minutes. The attempt
+count spans both codes and every phase in one job. Each delay starts when that
+failure is saved, using the service poll clock. The first poll at or after the saved
+`not_before` runs the same phase. Changing the schedule changes status-comment
+content and follows the usual edit limit.
+
+The service keeps polling and updating its heartbeat while a job waits. Its pinned
+status comment shows `#N: waiting on the system (<code>), retry k of N no earlier
+than YYYY-MM-DD HH:MM UTC`. The stand-up does not call that wait stale or in need
+of attention. Waiting claims remain active and prevent upgrades. No new claim or
+running-state lifecycle record is published for a retry.
+
+Before considering any new claim, the service cancels waiting jobs whose admission
+changed. A changed story body ends with the held code and normal saved-work stop.
+A close, newer owner approval, or label outside running states ends locally without
+a stop record or saved continuation head. Normal closed-story cleanup still runs.
+A later claim can use older verified saved work, or starts fresh; the cancelled
+attempt's unpublished work is deliberately excluded. Withdrawal is separate.
+
 ## Approved-story queue
 
 Only one new story per repository runs at a time. Approved `priority:high` stories

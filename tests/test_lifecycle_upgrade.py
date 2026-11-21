@@ -478,7 +478,8 @@ def test_upgrade_private_setting_allowed_with_policy_file(tmp_path, monkeypatch)
     cfg, _ = configured(tmp_path, monkeypatch)
     public = core.read(cfg['config_path'])
     for key in ('state_dir', 'repository_root', 'worktree_root', 'runner_config',
-                'primary_runner_config', 'token_env', 'product_token_env', 'app_auth'):
+                'primary_runner_config', 'token_env', 'product_token_env', 'app_auth',
+                'system_retry_minutes'):
         public.pop(key, None)
     path = tmp_path / 'public.json'
     core.save(path, public)
