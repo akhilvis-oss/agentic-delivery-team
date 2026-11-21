@@ -820,3 +820,30 @@ def test_withdrawal_liveness_lock_unavailable_preserves_state(tmp_path, monkeypa
     with pytest.raises(core.Unavailable, match='Runner liveness lock unavailable'):
         service.withdraw_claim(cfg, hub.client(), claim_path, claim, hub.client().issue(1))
     assert (path.read_bytes(), claim_path.read_bytes()) == before and not stops(cfg, hub)
+
+
+def test_withdrawal_alias_preserves_raw_record_validation_and_runner_precedence(tmp_path, monkeypatch):
+    from test_lifecycle_status_names import comment, stored_alias
+
+    cfg = policy(tmp_path)
+    monkeypatch.setitem(core.STATUS_NAMES, 'legacy-draft', 'draft')
+    monkeypatch.setitem(core.STATUS_NAMES, 'legacy-stop', 'needs-owner')
+    record = core.withdrawal_record(cfg, 1, 'saved-job', 101,
+                                    head='a' * 40, continuation=True)
+    raw = stored_alias(record, 'legacy-draft')
+    raw['from'] = 'legacy-draft'
+    mapped, = core.records(cfg, [comment(raw)], 1)
+    assert mapped['from'] == mapped['to'] == 'draft'
+    assert mapped['continuation'] and mapped['commit'] == 'a' * 40
+    assert raw['to'] == raw['from'] == 'legacy-draft'
+    assert core.records(cfg, [comment(dict(raw, key=record['key']))], 1) == []
+    with pytest.raises(ValueError):
+        core.public_record(cfg, 1, 'saved-job', 0, 'legacy-draft',
+                           reason='owner_withdrew', continuation=True, commit='a' * 40)
+    hub = Hub(cfg)
+    hub.issue(state='in-progress')
+    draft = hub.event(1, 'draft')
+    hub.event(1, 'legacy-stop', 'runner')
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('draft', draft)
+    approval = hub.event(1, 'approved')
+    assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('approved', approval)

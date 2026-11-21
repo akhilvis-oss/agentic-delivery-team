@@ -149,7 +149,7 @@ copies of those files.
 ### Files to carry by feature
 
 Paths below are release-source paths. Keep your customised policy/config values when
-upgrading; replace code and workflows from the same tag. Directory entries mean
+upgrading; replace code and workflows from the same tag. The `lifecycle/statuses-version` file must travel with `core.py`. Directory entries mean
 **every file recursively**, including `__init__.py` and new modules; never copy only
 `core.py`. The service uses a full private release export, not the guard's sparse
 checkout.
