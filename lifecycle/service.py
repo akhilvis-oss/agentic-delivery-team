@@ -740,7 +740,10 @@ def poll_body(cfg, at, notices):
             + " seconds, plus time spent building or reviewing. If this time stops "
             "updating, ask the operator to restore the service; re-approving alone "
             "will not restart it.\n"
+            + "System retry schedule (minutes): "
+            + (", ".join(map(str, cfg.get("system_retry_minutes", [5, 20, 60]))) or "disabled") + ".\n"
             + "".join(line + "\n" for line in notices + owner_finish_notices(cfg)
+                      + waiting_lines(cfg)
                       + [queue_wait_text(n, wait) for n, wait in sorted(queue_waiting(cfg).items())])
             + (cfg["_upgrade_notice"] + "\n" if cfg.get("_upgrade_notice") else "")
             + "<!-- agentic-last-poll-v1 -->")
@@ -938,6 +941,9 @@ class StoryQueue:
     def holder(self, claim):
         local = jobs(self.cfg)
         by_job = {job["id"]: job for job in local}
+        claims = [core.read(p) for p in self.claims_dir.glob("*.json")]
+        stopped_claims = {c["job"] for c in claims
+                          if c["stage"] == "finished" and c.get("error") == "unexpected_error"}
         candidates = set()
 
         def holding(job):
@@ -968,11 +974,15 @@ class StoryQueue:
                     released.pop(str(number))
                     core.save(self.path, self.facts)
                 return True
+            # The error boundary retires claims without resaving runner jobs.
+            # Their stale retry cannot retain a slot, but an open PR above can.
+            if job["id"] in stopped_claims:
+                return False
             stopped = job["status"] in {"blocked", "needs_owner", "failed", "cancelled", "interrupted"}
             retry = isinstance(job.get("retry"), dict) and "not_before" in job["retry"]
             return not stopped or retry
 
-        for previous in (core.read(p) for p in self.claims_dir.glob("*.json")):
+        for previous in claims:
             n = previous["issue"]
             if n == claim["issue"] or self.rows.get(n, {}).get("state") == "closed":
                 continue
@@ -1099,6 +1109,87 @@ def story_boundary(cfg, client, issue, failed, skipped, claims, *, claim=None,
             remember_error(cfg, number, flush_error)
 
 
+def waiting_jobs(cfg):
+    active = {core.read(p)["job"] for p in (Path(cfg["state_dir"]) / "claims").glob("*.json")
+              if core.read(p)["stage"] == "enqueued"}
+    return [job for job in jobs(cfg) if job["id"] in active and job["status"] == "waiting_system"]
+
+
+def waiting_lines(cfg):
+    total = len(cfg.get("system_retry_minutes", [5, 20, 60]))
+    lines = []
+    for job in waiting_jobs(cfg):
+        retry = job["retry"]
+        due = dt.datetime.fromtimestamp(retry["not_before"], dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"#{job['github_number']}: waiting on the system ({retry['code']}), "
+                     f"retry {retry['attempt']} of {total} no earlier than {due}")
+    return sorted(lines)
+
+
+def cancel_waiting_claim(cfg, client, claim, *, fresh=None, history=None):
+    """Apply AC-7 to changes observed by the scan or later admission reads."""
+    if claim["stage"] != "enqueued" or not claim.get("config"):
+        return False
+    tool = runner_module()
+    path = (Path(cfg["state_dir"]) / "jobs" / claim["job"] / "runner-state"
+            / "tasks" / (claim["job"] + ".json"))
+    if not path.exists():
+        return False
+    job = core.read(path)
+    if job["status"] != "waiting_system":
+        return False
+    fresh = client.issue(claim["issue"]) if fresh is None else fresh
+    history = (core.records(cfg, client.comments(claim["issue"]), claim["issue"])
+               if history is None else history)
+    dispatches = [r for r in history if r["to"] == "dispatched"]
+    events = client.events(claim["issue"])
+    _, latest = core.canonical_state(cfg, events)
+    running = {"dispatched", "in-progress", "committed", "in-review", "changes-requested"}
+    owner_action = (core.state(fresh) not in running
+                    or latest is not None and int(latest["id"]) > claim["event"]
+                    and latest.get("actor", {}).get("login") == cfg["actors"]["owner"])
+    local = (fresh["state"] != "open" or owner_action or not core.can_start(fresh, history)
+             or not dispatches or dispatches[-1]["job"] != claim["job"])
+    changed = (fresh.get("body") or "") != claim["task"]
+    if not local and not changed:
+        return False
+    retry = job.pop("retry")
+    job.update(status="needs_owner", blocked_reason=tool.block_reason(retry["code"]),
+               updated_at=tool.now())
+    if local:
+        # Deliberately discard this attempt's unpublished continuation.
+        job["retry_local_end"] = True
+        for field in ("head_commit", "continuation", "stop_saving", "stop_ready"):
+            job.pop(field, None)
+        core.save(path, job)
+    else:
+        config = tool.load_config(claim["config"])
+        tool.verify_assignment(config, job)
+        if not tool.service_claim_owns(cfg, config, job):
+            raise core.IntegrityError("Waiting claim/job binding changed")
+        expected = job.get("system_retry_context", {}).get("stop_expected")
+        if expected is not None:
+            tool.save_at_stop(config, path, job, job.get("head_commit") or expected)
+        tool.save_job(config, path, job)
+        tool.publish_receipt(config, path, job)
+    claim.update(stage="finished", head=job.get("head_commit"))
+    claim.pop("error", None)
+    core.save(Path(cfg["state_dir"]) / "claims" / (claim["job"] + ".json"), claim)
+    return True
+
+
+def cancel_waiting(cfg, client, claims, issues, failed, skipped):
+    """Retire waiting attempts before continuation can inspect a new claim."""
+    for claim in claims:
+        if claim["stage"] != "enqueued" or not claim.get("config"):
+            continue
+        issue = issues.get(claim["issue"])
+        if issue is None or claim["issue"] in failed | skipped:
+            continue
+        with story_boundary(cfg, client, issue, failed, skipped, claims, claim=claim):
+            cancel_waiting_claim(cfg, client, claim)
+
+
 def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
          pending_hook=None, full_list=False):
     validate_local(cfg)
@@ -1203,6 +1294,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
             reconciled.append(issue)
         issues = reconciled
         by_number = {i["number"]: i for i in issues}
+        cancel_waiting(cfg, client, claims, by_number, failed, skipped)
         for issue in issues:
             if issue["number"] in failed | skipped:
                 continue
@@ -1309,6 +1401,9 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     observed["issue"] = issue
                     evidence = core.records(cfg, client.comments(claim["issue"]), claim["issue"])
                     finished = not core.can_start(issue, evidence)
+                if cancel_waiting_claim(cfg, client, claim, fresh=issue,
+                                        history=evidence if not finished else None):
+                    finished = not core.can_start(issue)
                 if finished:
                     claim["stage"] = "finished"
                     claim.pop("waiting", None)
@@ -1326,7 +1421,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         completed_job = runner.read(
                             Path(completed_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
                         )
-                        if (not completed_job.get("delivery_retired") and (completed_job.get("stop_saving")
+                        if (not completed_job.get("retry_local_end")
+                                and not completed_job.get("delivery_retired") and (completed_job.get("stop_saving")
                                 or completed_job["status"] == "ready_for_integration"
                                 or runner.integration_api().options(completed_config))):
                             runner.run_once(completed_config, task_id=claim["job"])
@@ -1379,6 +1475,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                 fresh = client.issue(claim["issue"])
                 observed["issue"] = fresh
                 if withdraw_claim(cfg, client, path, claim, fresh):
+                    continue
+                if cancel_waiting_claim(cfg, client, claim, fresh=fresh):
                     continue
                 if not core.can_start(fresh) or (fresh.get("body") or "") != claim["task"]:
                     claim.update(
@@ -1452,6 +1550,8 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                         cfg, client.comments(claim["issue"]), claim["issue"]
                     )
                     dispatches = [r for r in remote_records if r["to"] == "dispatched"]
+                    if cancel_waiting_claim(cfg, client, claim, fresh=fresh, history=remote_records):
+                        continue
                     if (
                         core.state(fresh)
                         not in (
@@ -1536,6 +1636,7 @@ def poll(cfg, client, *, run_jobs=True, clock=time.time, upgrade_enabled=False,
                     core.save(path, claim)
                 if run_jobs and claim["stage"] == "enqueued":
                     run_config = runner.load_config(claim["config"])
+                    run_config["_service_retry_clock"] = clock
                     runner.run_once(run_config)
                     job = runner.read(
                         Path(run_config["state_dir"]) / "tasks" / (claim["job"] + ".json")
