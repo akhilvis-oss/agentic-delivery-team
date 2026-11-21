@@ -246,7 +246,9 @@ def test_running_claim_is_left_for_next_runner_check(tmp_path, monkeypatch):
     core.save(path, job)
     hub.event(1, 'draft')
     monkeypatch.setattr(runner, 'run_once', lambda *a, **k: pytest.fail('immediate stop'))
-    service.poll(cfg, hub.client(), clock=lambda: 200)
+    with runner.lock(Path(config['state_dir']) / 'runner.lock') as acquired:
+        assert acquired
+        service.poll(cfg, hub.client(), clock=lambda: 200)
     assert core.read(path)['status'] == 'running_worker'
     assert newest_claim(cfg)['stage'] == 'enqueued'
     assert not stops(cfg, hub)
@@ -678,3 +680,143 @@ def test_owner_reapproval_clears_runner_only_withdrawal_hold(tmp_path):
     assert core.state(hub.issues[1]) == 'approved'
     dispatched = hub.event(1, 'dispatched', 'runner')
     assert core.canonical_state(cfg, hub.events_by_issue[1]) == ('dispatched', dispatched)
+
+
+@pytest.mark.parametrize('phase', ['worker', 'reviewer'])
+@pytest.mark.parametrize('live', [False, True])
+def test_withdrawal_after_phase_crash_recovers_unlocked_job_only(tmp_path, monkeypatch, phase, live):
+    from contextlib import nullcontext
+    cfg, hub, runner, calls, publications = story(tmp_path, monkeypatch)
+    execute = runner.execute
+
+    def crash(config, state, path, job, role):
+        if role == phase:
+            job.update(status='running_' + role, updated_at=runner.now())
+            runner.save_job(config, path, job)
+            if role == 'worker':
+                Path(config['worktree'], 'crash-partial.txt').write_text('preserved partial work\n')
+            raise SystemExit('synthetic runner crash')
+        return execute(config, state, path, job, role)
+
+    monkeypatch.setattr(runner, 'execute', crash)
+    with pytest.raises(SystemExit, match='synthetic runner crash'):
+        service.poll(cfg, hub.client(), clock=lambda: 100)
+    claim = newest_claim(cfg)
+    config, old = service.source_work(cfg, claim['job'])
+    path = Path(config['state_dir']) / 'tasks' / (old['id'] + '.json')
+    assert old['status'] == 'running_' + phase
+    hub.event(1, 'draft')
+    before = list(calls)
+    monkeypatch.setattr(runner, 'execute', lambda *a, **k: pytest.fail('crashed phase replayed'))
+    context = runner.lock(Path(config['state_dir']) / 'runner.lock') if live else nullcontext(True)
+    with context as acquired:
+        assert acquired
+        service.poll(cfg, hub.client(), clock=lambda: 200)
+        current = core.read(path)
+        final = core.read(Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json'))
+        if live:
+            assert current['status'] == 'running_' + phase
+            assert final['stage'] == 'enqueued' and not stops(cfg, hub)
+        else:
+            assert current['status'] == 'needs_owner'
+            assert current['interrupted_phase'] == 'running_' + phase
+            assert current['continuation'] and current['head_commit']
+            assert final['stage'] == 'finished' and not final.get('error')
+            record, = stops(cfg, hub)
+            assert record['from'] == record['to'] == 'draft'
+            assert record['continuation'] and record['commit'] == current['head_commit']
+            assert core.state(hub.issues[1]) == 'draft'
+            queue = service.StoryQueue(cfg, hub.client(), hub.issues, set(), Path(cfg['state_dir']) / 'claims')
+            assert queue.holder({'issue': 2}) is None
+    assert calls == before and not publications
+    if phase == 'worker':
+        assert Path(config['worktree'], 'crash-partial.txt').read_text() == 'preserved partial work\n'
+    if not live:
+        service.poll(cfg, hub.client(), clock=lambda: 300)
+        assert len(stops(cfg, hub)) == 1 and calls == before
+        hub.event(1, 'approved')
+        hub.approve()
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 400)
+        assert newest_claim(cfg)['continued_from'] == current['head_commit']
+
+
+@pytest.mark.parametrize('action', ['reapproval', 'newer_job'])
+def test_withdrawal_rereads_owner_and_job_after_lock_acquisition(tmp_path, monkeypatch, action):
+    from contextlib import contextmanager
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim = newest_claim(cfg)
+    claim_path = Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json')
+    config, job = service.source_work(cfg, claim['job'])
+    path = Path(config['state_dir']) / 'tasks' / (job['id'] + '.json')
+    job['status'] = 'running_worker'
+    core.save(path, job)
+    Path(config['worktree'], 'updated-under-lock.txt').write_text('new preserved work\n')
+    hub.event(1, 'draft')
+    observed = hub.client().issue(1)
+    lock = runner.lock
+    changed = []
+    expected = {}
+
+    @contextmanager
+    def acquire(path_to_lock):
+        with lock(path_to_lock) as acquired:
+            if acquired and not changed:
+                changed.append(True)
+                current = core.read(path)
+                current['fresh_marker'] = 'newer state'
+                if action == 'reapproval':
+                    core.save(path, current)
+                    hub.event(1, 'approved')
+                    hub.approve()
+                    expected['job_bytes'] = path.read_bytes()
+                    expected['claim_bytes'] = claim_path.read_bytes()
+                else:
+                    # The old runner completed before this service acquired
+                    # its lock. Keep the newly saved head and metadata.
+                    runner.withdrawal_stop(config, path, current)
+                    expected['head'] = current['head_commit']
+                    expected['commits'] = current['runner_commits']
+            yield acquired
+
+    monkeypatch.setattr(runner, 'lock', acquire)
+    result = service.withdraw_claim(cfg, hub.client(), claim_path, claim, observed)
+    assert changed
+    current = core.read(path)
+    assert current['fresh_marker'] == 'newer state'
+    if action == 'reapproval':
+        assert result is False and path.read_bytes() == expected['job_bytes']
+        assert claim_path.read_bytes() == expected['claim_bytes'] and not stops(cfg, hub)
+        assert core.state(hub.issues[1]) == 'approved'
+    else:
+        assert result is True and current['head_commit'] == expected['head']
+        assert current['runner_commits'] == expected['commits']
+        assert 'interrupted_phase' not in current
+        record, = stops(cfg, hub)
+        assert record['continuation'] and record['commit'] == expected['head']
+        assert core.read(claim_path)['stage'] == 'finished'
+
+
+
+def test_withdrawal_liveness_lock_unavailable_preserves_state(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 100)
+    claim = newest_claim(cfg)
+    config, job = service.source_work(cfg, claim['job'])
+    path = Path(config['state_dir']) / 'tasks' / (job['id'] + '.json')
+    claim_path = Path(cfg['state_dir']) / 'claims' / (claim['job'] + '.json')
+    job['status'] = 'running_worker'
+    core.save(path, job)
+    hub.event(1, 'draft')
+    before = (path.read_bytes(), claim_path.read_bytes())
+
+    @contextmanager
+    def unavailable(*args):
+        raise OSError('synthetic lock unavailable')
+        yield
+
+    monkeypatch.setattr(runner, 'lock', unavailable)
+    with pytest.raises(core.Unavailable, match='Runner liveness lock unavailable'):
+        service.withdraw_claim(cfg, hub.client(), claim_path, claim, hub.client().issue(1))
+    assert (path.read_bytes(), claim_path.read_bytes()) == before and not stops(cfg, hub)

@@ -248,12 +248,35 @@ def withdraw_claim(cfg, client, path, claim, issue):
                 / "tasks" / (claim["job"] + ".json"))
     if job_path.exists():
         config, job = source_work(cfg, claim["job"])
-        # A live phase stops at its next runner check. Never signal an agent.
+        # Only a held runner lock proves that a phase is still live. Never
+        # signal a persisted PID or replay an abandoned phase.
         if job["status"].startswith("running_"):
-            return True
-        if job["status"] == "waiting_system" and not runner.service_claim_owns(cfg, config, job):
-            raise core.IntegrityError("Waiting claim/job binding changed")
-        runner.withdrawal_stop(config, job_path, job)
+            with contextlib.ExitStack() as held:
+                try:
+                    acquired = held.enter_context(runner.lock(Path(config["state_dir"]) / "runner.lock"))
+                except OSError as exc:
+                    raise core.Unavailable("Runner liveness lock unavailable") from exc
+                if not acquired:
+                    return True
+                current = core.read(path)
+                fields = ("job", "issue", "event", "primary", "worktree", "config", "task", "stage")
+                if any(current.get(field) != claim.get(field) for field in fields):
+                    return True
+                claim.clear()
+                claim.update(current)
+                config, job = source_work(cfg, claim["job"])
+                if not runner.service_claim_owns(cfg, config, job):
+                    raise core.IntegrityError("Running claim/job binding changed")
+                fresh = client.issue(claim["issue"])
+                if not core.withdrawal(cfg, client, fresh, claim["event"]):
+                    return False
+                if job["status"].startswith("running_"):
+                    job["interrupted_phase"] = job["status"]
+                runner.withdrawal_stop(config, job_path, job)
+        else:
+            if job["status"] == "waiting_system" and not runner.service_claim_owns(cfg, config, job):
+                raise core.IntegrityError("Waiting claim/job binding changed")
+            runner.withdrawal_stop(config, job_path, job)
         claim["head"] = job.get("head_commit")
     else:
         core.queue(cfg, core.withdrawal_record(cfg, claim["issue"], claim["job"], claim["event"]))
