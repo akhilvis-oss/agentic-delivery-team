@@ -909,6 +909,9 @@ class StoryQueue:
     def holder(self, claim):
         local = jobs(self.cfg)
         by_job = {job["id"]: job for job in local}
+        claims = [core.read(p) for p in self.claims_dir.glob("*.json")]
+        stopped_claims = {c["job"] for c in claims
+                          if c["stage"] == "finished" and c.get("error") == "unexpected_error"}
         candidates = set()
 
         def holding(job):
@@ -939,11 +942,15 @@ class StoryQueue:
                     released.pop(str(number))
                     core.save(self.path, self.facts)
                 return True
+            # The error boundary retires claims without resaving runner jobs.
+            # Their stale retry cannot retain a slot, but an open PR above can.
+            if job["id"] in stopped_claims:
+                return False
             stopped = job["status"] in {"blocked", "needs_owner", "failed", "cancelled", "interrupted"}
             retry = isinstance(job.get("retry"), dict) and "not_before" in job["retry"]
             return not stopped or retry
 
-        for previous in (core.read(p) for p in self.claims_dir.glob("*.json")):
+        for previous in claims:
             n = previous["issue"]
             if n == claim["issue"] or self.rows.get(n, {}).get("state") == "closed":
                 continue

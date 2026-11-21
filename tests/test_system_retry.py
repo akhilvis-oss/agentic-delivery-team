@@ -666,3 +666,87 @@ def test_body_cancel_preserves_source_binding_integrity(tmp_path, monkeypatch, t
         service.poll(cfg, hub.client(), clock=lambda: 200)
     assert not any(r['reason'] == 'agent_sign_in_failed'
                    for r in core.records(cfg, hub.comments_by_issue[1], 1))
+
+
+@pytest.mark.parametrize('phase', ['worker', 'reviewer'])
+def test_queue_retains_real_wait_and_releases_final_stop(tmp_path, monkeypatch, phase):
+    from test_story_queue import add, started
+    cfg, hub, tool, attempts = retry_story(tmp_path, monkeypatch, role=phase,
+                                          failures=5, schedule=[1], partial=phase == 'worker')
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    original, = service.jobs(cfg)
+    assert original['status'] == 'waiting_system' and original['retry']['not_before'] == 160
+    add(hub, 2)
+    service.poll(cfg, hub.client(), clock=lambda: 159, full_list=True)
+    assert started(cfg) == [1]
+    assert service.queue_waiting(cfg) == {2: {'story': 1}}
+    body = service.poll_body(cfg, 159, [])
+    assert '#1: waiting on the system' in body and '#2: waiting for the story in progress, #1' in body
+    service.poll(cfg, hub.client(), clock=lambda: 160, full_list=True)
+    stopped = next(j for j in service.jobs(cfg) if j['id'] == original['id'])
+    assert stopped['status'] == 'needs_owner' and not stopped.get('retry')
+    assert stopped['continuation'] and stopped['head_commit']
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200, full_list=True)
+    assert 2 in started(cfg)
+
+
+@pytest.mark.parametrize('change', ['body', 'closed', 'approval', 'label'])
+def test_queue_wait_cancellation_frees_slot_before_admission(tmp_path, monkeypatch, change):
+    from test_story_queue import add, started
+    cfg, hub, tool, attempts = retry_story(tmp_path, monkeypatch, partial=True)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    old, = service.jobs(cfg)
+    add(hub, 2)
+    if change == 'body':
+        hub.issues[1]['body'] += '\nChanged approved scope'
+    elif change == 'closed':
+        hub.issues[1]['state'] = 'closed'
+    elif change == 'approval':
+        reapprove(hub)
+    else:
+        hub.event(1, 'needs-owner', 'owner')
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    stopped = next(j for j in service.jobs(cfg) if j['id'] == old['id'])
+    assert stopped['status'] == 'needs_owner' and not stopped.get('retry')
+    assert 2 in started(cfg)
+    if change == 'body':
+        assert stopped['continuation'] and stopped['head_commit']
+    else:
+        assert not stopped.get('continuation') and not stopped.get('head_commit')
+    if change == 'approval':
+        claims = [core.read(p) for p in (Path(cfg['state_dir']) / 'claims').glob('*.json')]
+        current = max((c for c in claims if c['issue'] == 1), key=lambda c: c['event'])
+        assert not current.get('continuation_error') and not current.get('continued_from')
+
+
+@pytest.mark.parametrize('pr_state', [None, 'open', 'closed'])
+def test_queue_terminal_error_claim_does_not_retain_unowned_wait(tmp_path, monkeypatch, pr_state):
+    from test_story_queue import add
+    cfg, hub, tool, attempts = retry_story(tmp_path, monkeypatch)
+    service.poll(cfg, hub.client(), clock=lambda: 100)
+    claim = newest_claim(cfg)
+    claim.update(stage='finished', error='unexpected_error')
+    folder = Path(cfg['state_dir']) / 'claims'
+    core.save(folder / (claim['job'] + '.json'), claim)
+    path = Path(cfg['state_dir']) / 'jobs' / claim['job'] / 'runner-state' / 'tasks' / (claim['job'] + '.json')
+    job = core.read(path)
+    assert job['status'] == 'waiting_system' and job['retry']
+    if pr_state:
+        job['integration'] = {'pr': 77}
+        core.save(path, job)
+        hub.prs[77] = {'number': 77, 'state': pr_state, 'merged': pr_state == 'closed'}
+    before = path.read_bytes()
+    add(hub, 2)
+    next_claim = {'issue': 2}
+    queue = service.StoryQueue(cfg, hub.client(), hub.issues, set(), folder)
+    expected = 1 if pr_state == 'open' else None
+    assert queue.holder(next_claim) == expected
+    assert queue.holder(next_claim) == expected
+    reads = sum(call[:2] == ('GET', '/pulls/77') for call in hub.calls)
+    assert reads == int(pr_state is not None)
+    # A later poll reuses a closed PR's stable release generation, but rechecks
+    # an open PR once. The finished claim never causes a runner-job resave.
+    later = service.StoryQueue(cfg, hub.client(), hub.issues, set(), folder)
+    assert later.holder(next_claim) == expected
+    assert sum(call[:2] == ('GET', '/pulls/77') for call in hub.calls) == (2 if pr_state == 'open' else reads)
+    assert path.read_bytes() == before
