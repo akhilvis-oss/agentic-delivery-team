@@ -66,7 +66,7 @@ def status_write_violations(source, filename):
                 return
             if method == "GET":
                 return
-            if method is None or path is None or not path.startswith("/"):
+            if method is None or "{value}" in method or path is None or not path.startswith("/"):
                 violations.append((node.lineno, "unreadable method or path"))
                 return
             if (path.startswith("/issues/") and "{value}" in path.split("/", 3)[-1]
@@ -123,6 +123,8 @@ def test_only_named_status_writers_in_lifecycle_and_runner():
     'client.request("PATCH", f"/issues/{number}", {"labels": labels})',
     'client.request("PATCH", f"/issues/{number}", {**payload})',
     'client.request(method, "/issues/1/labels", data)',
+    'client.request(f"{method}", "/issues/1/labels", data)',
+    'client.request("PO" + suffix, "/issues/1/labels", data)',
     'client.request("POST", path, data)',
     'client.request(path=path, method="DELETE")',
     'client.request("POST", f"{path}", data)',
