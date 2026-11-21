@@ -397,6 +397,37 @@ issue updates or a new stop allow a fresh scan. Read failures remain retryable,
 and a verified candidate is retained before writes for recovery without rescanning.
 Cached candidates still require fresh merge-authority verification before writes.
 
+### Stop notice identity
+
+Runner stop records are keyed by issue, lifecycle event and code; Product requests
+before approval keep their own record keys. Manual stops use the stop label event.
+Delivery evidence (PR link, reviewed head and optional smoke result) is rendered in
+the stop record's notice at send time. Approval rejections retain their existing
+notices. An owner stop is always noticed, even when the previous label remains.
+
+Restorations with exactly job `guard`, kind `guard` and reason
+`invalid_status_change` are excluded by `records()` from status, dispatch ownership
+and owner-merge evidence, including the 25 older parseable restoration records.
+`label-stop` records retain their existing behavior. A later guard recognizes a
+restoration only through an unedited workflow-authored data block naming the exact
+restored label event. If that event cannot be read back, no event is claimed and a
+later run may add one notice. Product and workflow stops without a matching recent
+record still receive a notice; a lost producer comment retried later may duplicate it.
+
+New minor follow-ups include their finding's severity, criterion and detail above
+the follow-up marker. New review notices show at most ten current findings and an
+“and N more” line when needed. Text is filtered through `public_quote` (100
+characters for criteria, 600 for details) at send time; findings already shown in
+stop details are not repeated. Supplemental prose fits within GitHub's 65,536
+character comment limit without changing the record data block or metadata.
+
+A reviewed worktree changed during required checks stops with
+`checks_worktree_changed` (“Needs a fix”) in the job, receipt, lifecycle notice and
+stand-up; smoke category validation recognizes the same registered code. Its
+public text asks the owner to re-approve to build again. Private verification
+retains `reviewed_worktree_changed` and `source_unchanged=False`; this work cannot
+be continued, and no reviewer is dispatched or interrupted check replayed.
+
 ### Continuing and restarting
 
 Re-approving continues the newest local saved work for this story, merged with

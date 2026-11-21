@@ -21,6 +21,7 @@ DECISION = {
 }
 MERGE = {"owner_merge_required"}
 FIX = {
+    "checks_worktree_changed",
     "commit_refused", "delivery_disabled", "delivery_configuration_invalid",
     "continuation_commit_unrecorded", "continuation_conflict", "continuation_not_applied",
     "invalid_status_change", "approval_not_attested", "prerequisite_failed",
@@ -47,7 +48,7 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
         "Needs your decision": 13, "Needs your merge": 1,
-        "Waiting on the system": 5, "Needs a fix": 80,
+        "Waiting on the system": 5, "Needs a fix": 81,
     }
 
 
@@ -91,9 +92,11 @@ def test_flush_non_stop_notice_is_unchanged(tmp_path, guard):
 
 
 @pytest.mark.parametrize("code", sorted(integration.REASONS))
-def test_direct_delivery_prefix_preserves_notice_and_stored_reason(delivery, monkeypatch, code):  # noqa: F811
+def test_delivery_record_prefix_preserves_notice_and_stored_reason(delivery, monkeypatch, code):  # noqa: F811
+    from test_single_stop_notice import delivery_records
+
+    cfg, hub = delivery_records(delivery, monkeypatch)
     config, path, job, client = delivery
-    # Exercise the delivery stop transport with each supported fixed reason.
     monkeypatch.setattr(integration, "merge_evidence", lambda *args: code)
     advance(delivery)
     assert job["integration"]["reason"] == code
@@ -105,7 +108,10 @@ def test_direct_delivery_prefix_preserves_notice_and_stored_reason(delivery, mon
     if code == "owner_merge_required":
         original += "\nhttps://github.com/example/kit/pull/9"
     original += "\nReviewed head: " + job["reviewed_head"]
-    assert notices == [EXPECTED[code] + ": " + original]
+    assert len(notices) == 1
+    assert notices[0].startswith(EXPECTED[code] + ": " + original)
+    assert core.PREFIX in notices[0]
+    assert core.records(cfg, hub.comments_by_issue[1], 1)[-1]["reason"] == code
     before = list(client.writes)
     advance(delivery)
     assert client.writes == before
