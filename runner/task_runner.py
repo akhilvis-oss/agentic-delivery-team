@@ -54,6 +54,7 @@ class IntegrityError(Blocked):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "checks_worktree_changed": ("checks_worktree_changed", "The worktree changed while the required checks ran. Owner: re-approve to build the story again."),
     "continuation_not_applied": ("continuation_not_applied", "The continued commit is missing from the built head."),
     "command_preflight": ("prerequisite_failed", "Configured command program unavailable or not executable."),
     "agent_compatibility": ("prerequisite_failed", "Agent compatibility check failed."),
@@ -1274,7 +1275,9 @@ def verify_required_tests(config, state, path, job):
             entry.update(status="blocked", reason="reviewed_worktree_changed")
         save_job(config, path, job)
         if not unchanged:
-            raise Blocked("Reviewed worktree changed during required tests")
+            exc = Blocked("Reviewed worktree changed during required tests")
+            exc.blocked_reason = block_reason("checks_worktree_changed")
+            raise exc
         if cleanup_failed:
             raise Blocked("Required-test cleanup unavailable; reconcile private scratch")
     return entry

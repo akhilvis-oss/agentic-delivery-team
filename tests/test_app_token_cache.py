@@ -216,3 +216,35 @@ def test_waiter_uses_clock_after_cache_lock_but_preserves_explicit_at(
     assert reached_lock
     assert len(calls) == (1 if explicit_at else 2)
     assert (value == first) is explicit_at
+
+
+def test_job_sync_smoke_status_reads_share_scoped_process_cache(tmp_path, monkeypatch):
+    cfg, _, calls = fake_tokens(tmp_path, monkeypatch)
+    app_tokens.clear_cache()
+    head = 'a' * 40
+    reads = []
+    original_spec = importlib.util.spec_from_file_location
+
+    def no_private_token_module(name, *args, **kwargs):
+        assert name != '_smoke_notice_tokens', 'Status reads must reuse the shared token cache'
+        return original_spec(name, *args, **kwargs)
+
+    def pages(client, path):
+        assert path == f'/commits/{head}/statuses'
+        reads.append((client.token, client.token_options))
+        return []
+
+    monkeypatch.setattr(importlib.util, 'spec_from_file_location', no_private_token_module)
+    monkeypatch.setattr(core.GitHub, 'pages', pages)
+    client = object.__new__(core.GitHub)
+    client.cfg = cfg
+    assert client.smoke_statuses(head) == []
+    assert client.smoke_statuses(head) == []
+    assert len(calls) == 1
+    assert calls[0][2] == {'status_only': True}
+    assert reads[0] == reads[1]
+    assert reads[0][1] == {'status_only': True}
+    app_tokens.invalidate(reads[0][0])
+    assert client.smoke_statuses(head) == []
+    assert len(calls) == 2
+    assert reads[-1][0] != reads[0][0]

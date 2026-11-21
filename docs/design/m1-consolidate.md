@@ -75,7 +75,7 @@ Every stop is one of these four kinds:
   - While retrying, the story stays `working`, and the status comment says why and when the next retry is.
   - Each retry re-checks the approval hash and the target branch first.
   - After the last retry, the story stops at `needs-owner`, with the reason.
-- **One notice per stop,** keyed by the stop. Today the guard and the runner can each post one; the second is removed.
+- **One notice per stop,** keyed by the stop. Runner and Product records carry their own notices; the guard adds a manual-stop notice only when needed.
 - **Stop codes stay fixed for automation, with one cause per code.**
   - The notice leads with the kind.
   - The record adds the exception type and the framework function where the stop came from, both public-safe names.
@@ -95,7 +95,7 @@ Every stop is one of these four kinds:
 - **Known versions only.** Each record carries an explicit JSON integer `version`, excluding booleans and floating-point values. Only version 1 currently parses; missing or unsupported versions are ignored. Supported versions are listed in one place in code. The version is not part of the record key.
 - **Validity comes from the unique data block, its author and a known version,** never from text before or after it, including continuation instructions. Existing data, key and author-role checks still apply. Rewording a notice can't orphan earlier records.
 - **Edited records:** when a comment's `updated_at` is later than its `created_at`, it is ignored for state, including stop records. Edited `merged` and `accepted` records retain finality so an edit cannot reopen a story. A comment missing either timestamp counts as unedited.
-- **Follow-ups:** naming ignored records in the status comment and stopping on inconsistent state after a record deletion are separate work. The existing guard-record construction defect is also a separate story (#192).
+- **Follow-ups:** naming ignored records in the status comment and stopping on inconsistent state after a record deletion are separate work. Restoration records remain informational; #202 recognizes their raw data blocks for notice deduplication without granting state authority.
 
 ### 6. Fewer API calls per poll
 
@@ -168,7 +168,7 @@ Approving again continues from the saved work.
 - **Less code.** Each replaced path is deleted in the same PR that replaces it. Together, `lifecycle/` and `runner/` have fewer lines than at this note's base commit: 6,817 at `651068f`. They're measured together so that code doesn't just move between them.
 - **No pasted commit IDs.** No owner step anywhere in the docs asks for a commit ID.
 - **Finished stories stay finished.** Replaying the #75 and #110 reopen cases leaves both stories closed.
-- **Old records still parse.** Every record comment in this repository still parses.
+- **Old records still parse.** Every record comment in this repository still parses, except restoration records with job `guard`, kind `guard` and reason `invalid_status_change`: these remain informational and are explicitly excluded from state.
 - **The migration runs cleanly.** `migrate-labels --dry-run` completes on a copy of an adopting project's issues.
 - **Readiness catches #113.** Replaying #113's criteria through the readiness pass produces the builder's question before any build.
 - **Smoke test.** Every M1 PR passes the live smoke test on its own code before merge.
