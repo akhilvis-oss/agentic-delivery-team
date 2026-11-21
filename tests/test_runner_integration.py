@@ -1030,6 +1030,8 @@ def test_auto_merge_enabled_with_unknown_or_allowed_repository_setting(delivery,
 
 @pytest.mark.parametrize("mode", ["disabled", "rejected", "missing_rejected"])
 def test_auto_merge_unavailable_needs_owner_once(delivery, monkeypatch, mode):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     _, path, job, client = delivery
     attempts = []
     if mode == "missing_rejected":
@@ -1113,6 +1115,8 @@ def test_category_normalizes_trusted_base_config(delivery, monkeypatch):
 @pytest.mark.parametrize("state,label", [("success", "passed"), ("failure", "failed"),
                                              ("error", "failed"), ("pending", "pending")])
 def test_owner_merge_notice_includes_smoke_result(delivery, monkeypatch, state, label):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     config, _, job, client = delivery
     config["integration"]["smoke_reporting"] = True
     client.allow_auto_merge = False
@@ -1153,6 +1157,8 @@ def test_smoke_notice_uses_separate_status_token(app_transport, monkeypatch):
 
 @pytest.mark.parametrize("setting", [None, False])
 def test_owner_merge_notice_smoke_off_mints_no_token(delivery, monkeypatch, setting):
+    from test_single_stop_notice import delivery_records
+    delivery_records(delivery, monkeypatch)
     config, _, job, client = delivery
     if setting is not None:
         config["integration"]["smoke_reporting"] = setting
@@ -1169,3 +1175,36 @@ def test_owner_merge_notice_smoke_off_mints_no_token(delivery, monkeypatch, sett
 def test_smoke_reporting_requires_boolean():
     with pytest.raises(ValueError, match="Smoke reporting"):
         integration.options({"integration": {"enabled": False, "smoke_reporting": "yes"}})
+
+
+@pytest.mark.parametrize('reporting', [True, False])
+def test_record_notice_preserves_isolated_smoke_status_transport(app_transport, monkeypatch, reporting):
+    core, cfg, _, prepare = app_transport
+    ordinary_api = prepare({'issues': 'write'})
+    ordinary = core.GitHub(cfg)
+    assert json.loads(ordinary_api.calls[2].data)['permissions'] == {'issues': 'write'}
+    status_api = prepare({'statuses': 'write'}) if reporting else None
+    head = 'a' * 40
+    reads = []
+
+    def pages(self, path):
+        reads.append((self is ordinary, path))
+        if self is ordinary:
+            raise core.Unavailable('Issue-scoped client cannot read commit statuses')
+        return [{'context': 'smoke/codex', 'state': 'success',
+                 'creator': {'login': cfg['actors']['runner']}}]
+
+    monkeypatch.setattr(core.GitHub, 'pages', pages)
+    record = core.public_record(cfg, 1, 'runner-job', 1, 'needs-owner',
+                                event=101, reason='owner_merge_required', pr=9, commit=head)
+    body = core.notice_body(cfg, ordinary, dict(record=record, notice_context={
+        'delivery': True, 'reviewed_head': head, 'smoke_reporting': reporting}))
+    assert head in body and '/pull/9' in body
+    if reporting:
+        assert 'smoke/codex: passed on the reviewed head.' in body
+        assert reads == [(False, '/commits/' + head + '/statuses')]
+        assert json.loads(status_api.calls[2].data)['permissions'] == {'statuses': 'write'}
+    else:
+        assert 'smoke' not in body.lower()
+        assert reads == []
+        assert len(ordinary_api.calls) == 4

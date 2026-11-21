@@ -483,6 +483,7 @@ def public_record(
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
     "readiness_question": 'Readiness needs your decision before building. Owner: answer under "Owner decisions", then re-approve.',
+    "checks_worktree_changed": "The worktree changed while the required checks ran. Owner: re-approve to build the story again.",
     "commit_refused": "The runner refused to commit this change. This kind of change needs an owner-delivered PR. Owner: arrange that PR before re-approving.",
     "delivery_disabled": "Delivery is off for this repository. Owner: enable delivery in the service configuration, then re-approve to publish the reviewed work.",
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
@@ -522,6 +523,7 @@ STOP_REASONS = {
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
     "readiness_question": "Needs your decision",
+    "checks_worktree_changed": "Needs a fix",
     "owner_question": "Needs your decision",
     "question_withheld": "Needs your decision",
     "scope_change": "Needs your decision",
@@ -769,6 +771,45 @@ def record_body(record):
     )
 
 
+def finding_notice(cfg, findings):
+    details = public_stop_details(cfg, {"findings": findings})
+    text = ""
+    for finding in details["findings"]:
+        text += "\nOpen finding: " + finding["severity"] + " — " + finding["criterion"] + "\n"
+        text += "\n".join("> " + line for line in finding["detail"].split("\n")) + "\n"
+    if details.get("more"):
+        text += f"\nand {details['more']} more\n"
+    return text
+
+
+def notice_body(cfg, client, entry):
+    """Render optional job context at transport time without altering the record."""
+    record = entry["record"]
+    body = entry.get("public_body", record_body(record))
+    context = entry.get("notice_context", {})
+    extra = ""
+    if (record["kind"] == "review" and context.get("findings")
+            and not record.get("stop_details", {}).get("findings")):
+        extra += finding_notice(cfg, context["findings"])
+    if context.get("delivery") and record.get("reason"):
+        from runner.integration import REASONS, smoke_notice
+
+        reason = record["reason"]
+        message = REASONS.get(reason, STOP_REASONS[reason])
+        if reason == "owner_merge_required" and record.get("pr"):
+            message += f"\nhttps://github.com/{cfg['repository']}/pull/{record['pr']}"
+            if context.get("smoke_reporting"):
+                message += "\n" + smoke_notice(client, cfg, context.get("reviewed_head", ""))
+        message += "\nReviewed head: " + context.get("reviewed_head", "unavailable")
+        extra += message + "\n\n"
+    # Budget only supplemental prose. Never truncate the record's data block.
+    available = 65535 - len(stop_notice(record.get("reason"), body))
+    if len(extra) > available:
+        marker = "\n[truncated]\n"
+        extra = extra[:max(0, available - len(marker))] + marker if available >= len(marker) else ""
+    return stop_notice(record.get("reason"), extra + body)
+
+
 def records(cfg, comments, expected_issue=None):
     trusted = {
         identity
@@ -783,6 +824,11 @@ def records(cfg, comments, expected_issue=None):
             continue
         try:
             item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if not isinstance(item, dict):
+                continue
+            if (item.get("job") == "guard" and item.get("kind") == "guard"
+                    and item.get("reason") == "invalid_status_change"):
+                continue
             if type(item["version"]) is not int or item["version"] not in SUPPORTED_RECORD_VERSIONS:
                 continue
             created = comment.get("created_at")
@@ -960,6 +1006,16 @@ class GitHub:
             raise Unavailable(str(error)) from None
         self.identity_verified = False
 
+    def smoke_statuses(self, head):
+        # Ordinary job-sync clients and delivery clients share the existing
+        # isolated status-only scope; issue/delivery tokens do not gain it.
+        spec = importlib.util.spec_from_file_location(
+            "_smoke_notice_tokens", Path(__file__).with_name("app_tokens.py"))
+        tokens = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tokens)
+        token, _ = tokens.mint(self.cfg, "runner", status_only=True)
+        return GitHub(self.cfg, token=token).pages(f"/commits/{head}/statuses")
+
     def ensure_actor(self):
         if self.token_expiry is not None and time.time() >= self.token_expiry - 60:
             self.refresh_app_token()
@@ -1127,7 +1183,7 @@ def bind_state(cfg):
         )
 
 
-def queue(cfg, record, *, role="runner", public_body=None):
+def queue(cfg, record, *, role="runner", public_body=None, notice_context=None):
     bind_state(cfg)
     if record["repository"] != cfg["repository"]:
         raise ValueError("Wrong outbox repository")
@@ -1136,6 +1192,8 @@ def queue(cfg, record, *, role="runner", public_body=None):
     entry = dict(record=record, role=role, status="pending", comment_attempted=False)
     if public_body is not None:
         entry["public_body"] = public_body
+    if notice_context is not None:
+        entry["notice_context"] = notice_context
     create(path, entry)
     return path
 
@@ -1392,8 +1450,7 @@ def flush(cfg, client):
                         client.request(
                             "POST",
                             f"/issues/{record['issue']}/comments",
-                            {"body": stop_notice(record.get("reason"),
-                                                 entry.get("public_body", record_body(record)))},
+                            {"body": notice_body(cfg, client, entry)},
                         )
                     except Unavailable as exc:
                         if not isinstance(exc, Uncertain):
@@ -1587,7 +1644,13 @@ def job_records(cfg, job):
 def sync_job(config_path, job, client=None):
     cfg = load_config(config_path)
     for record in job_records(cfg, job):
-        queue(cfg, record)
+        context = {}
+        if record["kind"] == "review" and job.get("review", {}).get("findings"):
+            context["findings"] = job["review"]["findings"]
+        if job.get("integration", {}).get("reason"):
+            context.update(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
+                           smoke_reporting=job["integration"].get("smoke_reporting", False))
+        queue(cfg, record, notice_context=context)
     try:
         flush(cfg, client or GitHub(cfg))
         if any(
@@ -1948,6 +2011,37 @@ def _finish_by_owner(cfg, client, number, finish):
     return True
 
 
+def restoration_noticed(cfg, comments, number, event, target):
+    """Recognize only an unedited workflow notice's exact raw restoration block.
+
+    Restoration records intentionally remain outside records(), including older
+    parseable shapes. Opening prose conveys no authority.
+    """
+    for comment in comments:
+        body = comment.get("body", "")
+        if (comment.get("user", {}).get("login") != cfg["actors"]["workflow"]
+                or body.count(PREFIX) != 1 or body.count(SUFFIX) != 1):
+            continue
+        try:
+            if (not isinstance(comment.get("updated_at"), str)
+                    or not isinstance(comment.get("created_at"), str)
+                    or stamp(comment["updated_at"]) != stamp(comment["created_at"])):
+                continue
+            item = json.loads(body.split(PREFIX)[1].split(SUFFIX)[0])
+            if not isinstance(item, dict):
+                continue
+            if (item.get("job") == "guard" and item.get("kind") == "guard"
+                    and item.get("reason") == "invalid_status_change"
+                    and item.get("repository") == cfg["repository"]
+                    and type(item.get("issue")) is int and item["issue"] == number
+                    and type(item.get("event")) is int and item["event"] == int(event["id"])
+                    and item.get("to") == target):
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
 def guard_issue(cfg, client, number):
     events = client.events(number)
     canonical, event = canonical_state(cfg, events)
@@ -1996,36 +2090,59 @@ def guard_issue(cfg, client, number):
         actual = state(issue)
     except ValueError:
         actual = None
-    if actual == canonical:
-        # Runner stops already publish their job-bound reason (whose event is
-        # the approval ID). Only manual stops need this label-event notice.
-        if (canonical in {"blocked", "needs-owner", "needs-primary"}
-                and not has_role(cfg, event.get("actor", {}).get("login"), "runner")
-                and not any(
-                r["to"] == canonical and r.get("reason") in STOP_REASONS
-                and r["event"] == int(event["id"])
-                for r in records(cfg, client.comments(number), number))):
+    if canonical in {"blocked", "needs-owner", "needs-primary"}:
+        actor = event.get("actor", {}).get("login")
+        # Compare concrete logins: the owner can also hold the Product role.
+        noticed = actor == cfg["actors"]["runner"]
+        comments = client.comments(number)  # Re-read after the producer's label write.
+        remote = records(cfg, comments, number)
+        if actor == cfg["actors"]["workflow"]:
+            noticed = noticed or restoration_noticed(cfg, comments, number, event, canonical)
+        noticed = noticed or any(r["job"] == "label-stop" and r["event"] == int(event["id"])
+                                 and r["to"] == canonical for r in remote)
+        if actor != cfg["actors"]["owner"] and actor in {
+                cfg["actors"]["product"], cfg["actors"]["workflow"]}:
+            previous = max((e for e in events if e.get("event") == "labeled"
+                            and e.get("label", {}).get("name", "").startswith("status:")
+                            and int(e["id"]) < int(event["id"])),
+                           key=lambda e: int(e["id"]), default=None)
+            previous = previous or event
+            noticed = noticed or any(
+                r["actor"] == actor and r["to"] == canonical
+                and r.get("reason") in STOP_REASONS
+                and r["reason"] != "approval_not_attested"
+                and stamp(r["timestamp"]) >= stamp(previous["created_at"])
+                for r in remote)
+        if not noticed:
+            if actual != canonical:
+                client.set_state(number, canonical)
             record = public_record(cfg, number, "label-stop", 0, canonical,
                                    event=int(event["id"]), kind="guard",
                                    reason="owner_requested_stop")
             queue(cfg, record, role="workflow")
             flush(cfg, client)
+            return actual != canonical
+    if actual == canonical:
         return False
     client.set_state(number, canonical)
+    # Bind to the event just written, never to the rejected prior change.
+    restored_event = None
+    try:
+        written = [e for e in client.events(number) if e.get("event") == "labeled"
+                   and int(e["id"]) > max((int(old["id"]) for old in events), default=0)
+                   and e.get("actor", {}).get("login") == cfg["actors"]["workflow"]
+                   and e.get("label", {}).get("name") == "status:" + canonical]
+        if written:
+            restored_event = int(max(written, key=lambda e: int(e["id"]))["id"])
+    except Unavailable:
+        pass  # No identity is safer than claiming an unrelated event.
     record = public_record(
         cfg,
         number,
         "guard",
         0,
         canonical,
-        event=max(
-            (
-                int(e["id"])
-                for e in events
-                if e.get("label", {}).get("name", "").startswith("status:")
-            ),
-            default=None,
-        ),
+        event=restored_event,
         kind="guard",
         reason="invalid_status_change",
     )
@@ -2340,8 +2457,8 @@ def followups(cfg, job, client):
                     f"Minor follow-up from #{binding['issue']}, job `{job['id']}`, "
                     f"round {review['round']}, finding {index + 1}.\n"
                     f"Reviewed commit: `{review['head']}`.\n"
-                    "The finding detail is retained privately. Primary triage is required; no approval implied.\n"
-                    + marker
+                    "Primary triage is required; no approval implied.\n"
+                    + finding_notice(cfg, [finding]) + "\n" + marker
                 )
                 try:
                     created = client.request(

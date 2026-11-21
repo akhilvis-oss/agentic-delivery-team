@@ -131,6 +131,8 @@ def test_record_requires_unique_data_block(tmp_path, extra):
     assert core.records(cfg, [comment], 1) == []
 
 
+# Sanitised fixture-* job names preserve all 413 baseline assertions; the 25
+# restoration shapes here do not exercise AC-6's exact job=guard exclusion.
 def test_all_413_sanitised_baseline_record_shapes_still_parse(tmp_path):
     cfg = policy(tmp_path)
     comments = json.loads((Path(__file__).parent / "fixtures/records/record-shapes-413.json").read_text())
