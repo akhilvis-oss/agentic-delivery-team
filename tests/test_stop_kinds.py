@@ -32,7 +32,7 @@ FIX = {
     "auto_merge_disable_uncertain", "unexpected_error",
 }
 CHECKS = ("preflight", "build", "story_tests", "runner_checks", "prerequisite")
-WAITING = {f"worker_{check}_unavailable" for check in CHECKS}
+WAITING = {f"worker_{check}_unavailable" for check in CHECKS} | {"agent_sign_in_failed", "agent_usage_limit"}
 FIX |= {f"worker_{check}" for check in CHECKS}
 FIX |= {f"worker_{check}_unrelated_failure" for check in CHECKS}
 FIX |= {f"worker_{check}_attempts_exhausted_{attempt}" for check in CHECKS
@@ -49,7 +49,7 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
         "Needs your decision": 14, "Needs your merge": 1,
-        "Waiting on the system": 5, "Needs a fix": 82,
+        "Waiting on the system": 7, "Needs a fix": 82,
     }
 
 
@@ -172,5 +172,8 @@ def test_troubleshooting_table_covers_each_stop_once_in_its_kind():
             matched |= matches
         seen.extend(matched)
         if kind.strip() == "Waiting on the system":
-            assert "re-approve" in action and "automatically" not in action
+            if matched <= {"agent_sign_in_failed", "agent_usage_limit"}:
+                assert "automatically" in action and "re-approve" in action
+            else:
+                assert "re-approve" in action and "automatically" not in action
     assert Counter(seen) == Counter({code: 1 for code in EXPECTED})
