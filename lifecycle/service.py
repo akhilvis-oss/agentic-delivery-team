@@ -207,7 +207,9 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
             valid = valid and source["assignment"]["task_text"] == claim["task"]
         if valid:
             git(cfg, "cat-file", "-e", head + "^{commit}")
-    except (ValueError, OSError, KeyError, core.Unavailable):
+    except (ValueError, OSError, KeyError, core.Unavailable) as exc:
+        if getattr(exc, "integrity_error", False):
+            raise
         valid = False
     if not valid:
         claim["continuation_error"] = "continuation_commit_unrecorded"

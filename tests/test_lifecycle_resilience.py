@@ -339,3 +339,51 @@ def test_reconciliation_lookup_failure_after_full_listing_is_also_isolated(tmp_p
 def test_unexpected_error_is_classified_as_needs_a_fix():
     assert core.STOP_KINDS['unexpected_error'] == 'Needs a fix'
     assert core.stop_notice('unexpected_error', 'Story stopped').startswith('Needs a fix: ')
+
+
+@pytest.mark.parametrize('origin', ['core', 'fresh_runner'])
+def test_continuation_integrity_failures_escape_service_boundary(tmp_path, monkeypatch, origin):
+    from test_lifecycle_continuation import saved_story
+    cfg, hub, _, _ = saved_story(tmp_path, monkeypatch)
+    error_type = core.IntegrityError
+    if origin == 'fresh_runner':
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('fresh_continuation_integrity_runner',
+                                                    Path('runner/task_runner.py'))
+        fresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fresh)
+        error_type = fresh.IntegrityError
+    assert issubclass(error_type, ValueError)
+    assert error_type.integrity_error is True
+    hub.event(1, 'approved', 'owner')
+    hub.approve()
+    before = list(hub.comments_by_issue[1])
+    called = []
+
+    def mismatched_source(*args):
+        called.append(True)
+        raise error_type('synthetic recovery binding mismatch')
+
+    monkeypatch.setattr(service, 'source_work', mismatched_source)
+    with pytest.raises(error_type):
+        service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    assert called
+    assert hub.comments_by_issue[1] == before
+    assert not stops(cfg, hub) and not error_files(cfg)
+
+
+def test_continuation_still_refuses_ordinary_value_error(tmp_path, monkeypatch):
+    from test_lifecycle_continuation import saved_story, newest_claim
+    cfg, hub, _, _ = saved_story(tmp_path, monkeypatch)
+    hub.event(1, 'approved', 'owner')
+    hub.approve()
+
+    def invalid_source(*args):
+        raise ValueError('synthetic invalid source')
+
+    monkeypatch.setattr(service, 'source_work', invalid_source)
+    service.poll(cfg, hub.client(), run_jobs=False, clock=lambda: 200)
+    claim = newest_claim(cfg)
+    assert claim['error'] == 'continuation_commit_unrecorded'
+    assert claim['stage'] == 'finished'
+    assert not stops(cfg, hub)
