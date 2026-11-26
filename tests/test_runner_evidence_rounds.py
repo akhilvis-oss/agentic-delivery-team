@@ -402,3 +402,34 @@ def test_evidence_identity_disables_commit_and_blob_replacements(tmp_path):
     tracked.write_bytes(b"original\n")
     runner.check_evidence_tree(config, head)
     assert runner.git(config, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.parametrize("target_kind", ["external", "dangling", "root"])
+def test_committed_link_identity_never_resolves_target(tmp_path, monkeypatch, target_kind):
+    import os
+    import subprocess
+
+    runner = fixtures.runner
+    root = tmp_path / "repo"
+    root.mkdir()
+    config = {"worktree": str(root), "agent": {}}
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    runner.git(config, "config", "user.name", "Fixture")
+    runner.git(config, "config", "user.email", "fixture@example.test")
+    target = {"external": str(tmp_path / "outside"), "dangling": "missing", "root": "."}[target_kind]
+    link = root / "link"
+    link.symlink_to(target)
+    runner.git(config, "add", ".")
+    runner.git(config, "commit", "-m", "Existing committed link")
+    head = runner.git(config, "rev-parse", "HEAD")
+    original_resolve = Path.resolve
+
+    def refuse_target_resolution(path, *args, **kwargs):
+        if path == link:
+            raise AssertionError("identity reads must not resolve a tracked link target")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", refuse_target_resolution)
+    runner.check_evidence_tree(config, head)
+    assert link.is_symlink() and os.readlink(link) == target
+    assert runner.git(config, "rev-parse", "HEAD") == head

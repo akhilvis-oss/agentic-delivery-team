@@ -409,13 +409,14 @@ def snapshot_entry(config, root, name, previous, policy, *, git_mode=False):
         raise CommitRefused("submodule_or_directory_not_supported", [name])
     if stat.S_ISLNK(info.st_mode):
         target = os.readlink(path)
-        try:
-            resolved = path.resolve().relative_to(root).as_posix()
-        except (ValueError, RuntimeError, OSError) as exc:
-            raise CommitRefused("external_or_invalid_symlink", [name]) from exc
-        checked_commit_path(resolved, root)
-        if denied(resolved, policy):
-            raise CommitRefused("denied_symlink_target", [name])
+        if not git_mode:
+            try:
+                resolved = path.resolve().relative_to(root).as_posix()
+            except (ValueError, RuntimeError, OSError) as exc:
+                raise CommitRefused("external_or_invalid_symlink", [name]) from exc
+            checked_commit_path(resolved, root)
+            if denied(resolved, policy):
+                raise CommitRefused("denied_symlink_target", [name])
         if stable_stat(path.lstat()) != stable_stat(info):
             raise CommitRefused("concurrent_change", [name])
         content = os.fsencode(target)
