@@ -74,6 +74,11 @@ IDs are unique lowercase letters/digits/hyphen/underscore, at most 80 characters
 
 Any agent can be configured if it can run non-interactively in a given folder, accept a prompt file or stdin, write a final JSON answer to a runner-named file, and exit nonzero on failure. A phase succeeds only after **zero process exit, a final answer passing the runner's complete schema, and the existing Git checks**. The runner saves stdout/stderr as private opaque logs; extra text, unknown events, or missing event streams never determine success. There are no per-agent parsers or code paths. Each job records `agent-file-v1` and the full matched version output.
 
+Install each agent CLI in a fixed location that does not update itself, for example
+a pinned package version in a dedicated prefix, and point the runner's `command`
+at that executable. When you upgrade the CLI on purpose, change `version_pattern`
+to match and perform the documented compatibility verification.
+
 The `agent` object contains:
 
 | Field | Contract |

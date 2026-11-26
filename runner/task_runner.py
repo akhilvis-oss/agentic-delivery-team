@@ -723,6 +723,15 @@ def expand(value, config, **phase):
     return value.format(worktree=config["worktree"], agent_home=config["agent_home"], **phase)
 
 
+def compatibility_failure(message, version=""):
+    if isinstance(version, bytes):
+        version = version.decode("utf-8", errors="replace")
+    version = version.strip()[:200] if isinstance(version, str) else ""
+    error = Blocked(message + "; Found version: " + json.dumps(version))
+    error.blocked_reason = block_reason("agent_compatibility")
+    return error
+
+
 def check_cli(config):
     validate_agent(config)
     for key in ("command", "version_command"):
@@ -731,11 +740,13 @@ def check_cli(config):
     try:
         result = subprocess.run(args, cwd=config["worktree"], env=environment(config),
                                 capture_output=True, text=True, timeout=10, check=True)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise Blocked("Agent CLI version probe failed; no model call made") from exc
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise compatibility_failure("Agent CLI version probe failed; no model call made",
+                                    getattr(exc, "stdout", "")) from exc
     version = result.stdout.strip()
     if not version or not re.fullmatch(config["agent"]["version_pattern"], version):
-        raise Blocked("Unsupported agent CLI; version output does not match configured pattern")
+        raise compatibility_failure("Unsupported agent CLI; version output does not match configured pattern",
+                                    version)
     return version
 
 

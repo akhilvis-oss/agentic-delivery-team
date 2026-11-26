@@ -15,6 +15,11 @@ choices. Use Python 3.11 or later, Git, GitHub CLI and one installed coding agen
 For App authentication and launchd, use macOS. Required GitHub checks need a public
 repository or a paid plan. Stop if a prerequisite is missing.
 
+Install each agent CLI in a fixed location that does not update itself, for example
+a pinned package version in a dedicated prefix, and point the runner's `command`
+at that executable. When you upgrade the CLI on purpose, change `version_pattern`
+to match and perform the documented compatibility verification.
+
 The agent assigns `TAG`, `RELEASE_REPO`, `EXPORT`, `RELEASE_JSON` and `CHECKOUT` to
 owner-approved values. The three release paths are new scratch locations outside the
 adopter checkout; `TAG` is the validated tag string. Require `TAG` to match `v[0-9]+\.[0-9]+\.[0-9]+` before any command;
