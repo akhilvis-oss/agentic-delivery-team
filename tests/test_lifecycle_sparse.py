@@ -118,16 +118,15 @@ def test_missing_rules_stops_guard_with_plain_message(tmp_path, workflow):
 
 
 def test_upgrade_inventory_exists_and_matches_guard_checkout():
-    doc = (ROOT / "docs/quickstart.md").read_text().split("### Files to carry by feature\n", 1)[1]
-    rows = [line.split("|")[1:3] for line in doc.splitlines() if line.startswith("| ")][2:]
-    inventory = {feature.strip(): re.findall(r"`([^`]+)`", paths) for feature, paths in rows}
-    for paths in inventory.values():
-        assert paths
-        assert all((ROOT / path).exists() for path in paths)
-    guard = inventory["Lifecycle guard sparse checkout"]
+    inventory = json.loads((ROOT / "release-files.json").read_text())
+    destinations = {entry["destination"] for entry in inventory["entries"]
+                    if entry["kind"] in {"framework", "adopter"}}
+    for entry in inventory["entries"]:
+        assert (ROOT / entry["source"]).exists()
     for workflow in WORKFLOWS:
-        assert sparse_paths(workflow) == [path.rstrip("/") for path in guard]
-    assert "lifecycle/private_content.py" in inventory["Private-content check"]
+        for path in sparse_paths(workflow):
+            assert path in destinations or any(name.startswith(path + "/") for name in destinations)
+    assert "lifecycle/private_content.py" in destinations
     manifest = json.loads((ROOT / "templates/agentic-kit.example.json").read_text())
     example = (ROOT / "docs/versions-and-features.md").read_text().split("```json\n")[1].split("```")[0]
     assert json.loads(example) == manifest

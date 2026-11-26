@@ -31,10 +31,16 @@ jobs:
           sparse-checkout: |
             /lifecycle/
             /.github/task-lifecycle.json
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+            /.github/agentic-kit.json
+      - name: Read the lifecycle feature switch without credentials
+        id: kit
+        run: python3 -I lifecycle/kit_switch.py --output "$GITHUB_OUTPUT"
+      - if: steps.kit.outputs.lifecycle == 'on'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
       - name: Validate the label event or synchronize the PR
+        if: steps.kit.outputs.lifecycle == 'on'
         env:
           RUNNER_GITHUB_TOKEN: ${{ github.token }}
         run: >-

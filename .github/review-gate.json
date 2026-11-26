@@ -43,7 +43,14 @@
           "*credential*",
           "tests/test_trusted_gate.py",
           "lifecycle/*",
-          "tests/test_lifecycle*"
+          "tests/test_lifecycle*",
+          "INSTALL.md",
+          "UPGRADE.md",
+          "release-files.json",
+          "scripts/release_files.py",
+          "scripts/verify_install.py",
+          "tests/test_release_files.py",
+          "tests/test_verify_install.py"
         ]
       },
       {

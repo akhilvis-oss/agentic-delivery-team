@@ -48,13 +48,12 @@ A project uses one kit version for everything and turns features on as it needs 
 
 ## Get started
 
-Start small and add pieces as you need them. **[Quickstart](docs/quickstart.md)** walks through each level.
+Ask your agent to follow `INSTALL.md` (or `UPGRADE.md`) at the release tag, then run the checker.
 
-| Level | You get | Time |
-| --- | --- | --- |
-| 1. Rules and review gate | Agents follow one working agreement; every PR is reviewed in proportion to its risk | About 15 minutes |
-| 2. Task runner | Bounded delegation with an independent reviewer and runner-made commits | About an hour |
-| 3. Lifecycle and stand-up | Approval-driven dispatch, guarded states and a daily digest | Half a day, plus bot identities |
+The [install runbook](INSTALL.md), [upgrade runbook](UPGRADE.md) and
+[quickstart](docs/quickstart.md) use one release manifest and the same read-only
+checker. All carried files are installed; feature switches choose what runs.
+Manual setup follows the same runbooks.
 
 ## Limits
 
