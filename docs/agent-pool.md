@@ -43,6 +43,11 @@ version patterns and genuinely read-only reviewer flags for your CLI. Every phas
 starts a fresh process; no session files, resume or fork are used. A slot is a local
 execution resource, not proof of a separate human account or model independence.
 
+Install each agent CLI in a fixed location that does not update itself, for example
+a pinned package version in a dedicated prefix, and point the runner's `command`
+at that executable. When you upgrade the CLI on purpose, change `version_pattern`
+to match and perform the documented compatibility verification.
+
 For unattended Codex automation, prefer API keys with owner-controlled provider
 spending limits. The [official authentication documentation](https://learn.chatgpt.com/docs/auth?surface=cli)
 recommends API keys for automation. If using per-person subscriptions, use one seat

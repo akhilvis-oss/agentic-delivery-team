@@ -298,6 +298,20 @@ root suppress repeated alerts for the same outage; a fresh heartbeat clears the 
 outage on the next watchdog check. Later outages can raise a new issue. Recovery does
 not close the earlier issue automatically.
 
+Each locked watchdog run records its time in private `watchdog-run.json`. If both
+the poll and the watchdog's previous run are older than the alert threshold, it
+waits once after waking before alerting, with no GitHub request during the wait.
+The outage journal records that wake time: checks keep waiting through one threshold
+from it, but never start another wait for the same heartbeat. A poll clears the
+wait; an existing alert or alert attempt takes priority over waiting. A missing
+previous run keeps the existing immediate-alert behaviour.
+
+This sleep signal has limits. A sleep a little shorter than the threshold can
+still alert. A brief wake, such as a background "dark wake", with no service poll
+before the next sleep can alert on the following wake. A service that died during
+sleep is reported up to one threshold after waking. A clock set backwards past
+the recorded wake ends the wait instead of extending it.
+
 Known rejected writes can retry. A lost create response is reconciled using the
 trusted Product author and deterministic marker before another write is considered.
 An attempted alert absent from GitHub remains uncertain, visible in `status`, and
@@ -312,7 +326,8 @@ The kit supplies `templates/lifecycle-serve.plist.example` and
 `templates/lifecycle-watchdog.plist.example`; it never installs or loads them.
 The owner may copy them into private files named `org.example.agentic-lifecycle.plist`
 and `org.example.agentic-lifecycle-watchdog.plist` under `$HOME/Library/LaunchAgents`.
-Use a distinct pair of labels and filenames for each private state root.
+Use a distinct pair of labels and filenames for each private state root. Keep the
+watchdog's `StartInterval` shorter than `heartbeat_alert_seconds`.
 
 For a framework service's opt-in `main` upgrades, do one final manual re-pin and
 record its commit as private `upgrade.initial_commit`. Confirm that the smoke

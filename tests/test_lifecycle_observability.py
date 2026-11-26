@@ -338,3 +338,113 @@ def test_untrusted_alert_marker_is_not_report(tmp_path):
             "body": "<!-- agentic-service-alert-v1:fake -->",
         },
     )
+
+
+def test_watchdog_records_each_locked_run_before_deciding(tmp_path, monkeypatch):
+    cfg, client = configured(tmp_path)
+    root = Path(cfg["state_dir"])
+    beat(cfg, 100)
+    original = service.heartbeat
+    now = 120
+
+    def recorded_before_read(config):
+        assert core.read(root / "watchdog-run.json") == {"last_run": now}
+        return original(config)
+
+    monkeypatch.setattr(service, "heartbeat", recorded_before_read)
+    for now, expected in [(120, "healthy"), (221, "alerted"), (500, "already_alerted")]:
+        assert service.watchdog(cfg, client, clock=lambda: now)["status"] == expected
+        assert core.read(root / "watchdog-run.json") == {"last_run": now}
+    assert client.posts == 1
+
+
+def test_watchdog_waits_after_sleep_through_threshold_then_alerts(tmp_path, monkeypatch):
+    cfg, client = configured(tmp_path)
+    root = Path(cfg["state_dir"])
+    beat(cfg, 100)
+    assert service.watchdog(cfg, client, clock=lambda: 120)["status"] == "healthy"
+    searches = []
+    original = client.pages
+    monkeypatch.setattr(client, "pages", lambda path: (searches.append(path), original(path))[1])
+
+    for now in (1000, 1060, 1120):
+        assert service.watchdog(cfg, client, clock=lambda: now) == {
+            "status": "waiting_after_wake"
+        }
+        assert core.read(root / "watchdog.json") == {"heartbeat": 100, "wake": 1000}
+        assert core.read(root / "watchdog-run.json") == {"last_run": now}
+        assert searches == [] and client.posts == 0
+    assert service.watchdog(cfg, client, clock=lambda: 1121)["status"] == "alerted"
+    assert searches == ["/issues?state=all"] and client.posts == 1
+    assert service.watchdog(cfg, client, clock=lambda: 1500)["status"] == "already_alerted"
+    assert client.posts == 1
+
+
+def test_watchdog_poll_during_wake_wait_clears_journal_for_next_outage(tmp_path):
+    cfg, client = configured(tmp_path)
+    root = Path(cfg["state_dir"])
+    beat(cfg, 100)
+    assert service.watchdog(cfg, client, clock=lambda: 120)["status"] == "healthy"
+    assert service.watchdog(cfg, client, clock=lambda: 1000)["status"] == "waiting_after_wake"
+    beat(cfg, 1050)
+    assert service.watchdog(cfg, client, clock=lambda: 1051)["status"] == "healthy"
+    assert core.read(root / "watchdog.json") == {}
+    assert client.posts == 0
+    assert service.watchdog(cfg, client, clock=lambda: 2000)["status"] == "waiting_after_wake"
+    assert core.read(root / "watchdog.json") == {"heartbeat": 1050, "wake": 2000}
+    assert client.posts == 0
+
+
+def test_watchdog_long_run_interval_cannot_repeat_wake_wait(tmp_path):
+    cfg, client = configured(tmp_path)
+    beat(cfg, 100)
+    assert service.watchdog(cfg, client, clock=lambda: 120)["status"] == "healthy"
+    assert service.watchdog(cfg, client, clock=lambda: 1000)["status"] == "waiting_after_wake"
+    assert service.watchdog(cfg, client, clock=lambda: 2000)["status"] == "alerted"
+    assert service.watchdog(cfg, client, clock=lambda: 4000)["status"] == "already_alerted"
+    assert client.posts == 1
+
+
+def test_watchdog_clock_backwards_past_wake_ends_wait(tmp_path):
+    cfg, client = configured(tmp_path)
+    beat(cfg, 100)
+    assert service.watchdog(cfg, client, clock=lambda: 120)["status"] == "healthy"
+    assert service.watchdog(cfg, client, clock=lambda: 1000)["status"] == "waiting_after_wake"
+    assert service.watchdog(cfg, client, clock=lambda: 900)["status"] == "alerted"
+    assert core.read(Path(cfg["state_dir"]) / "watchdog-run.json") == {"last_run": 900}
+    assert client.posts == 1
+
+
+@pytest.mark.parametrize(
+    "record,expected,search_count,post_count",
+    [
+        ({"issue": 7, "attempted": False}, "already_alerted", 0, 0),
+        ({"attempted": True}, "uncertain_requires_reconciliation", 1, 0),
+        ({"attempted": False}, "alerted", 1, 1),
+    ],
+)
+def test_watchdog_prior_alert_attempt_takes_priority_over_wait(
+    tmp_path, monkeypatch, record, expected, search_count, post_count
+):
+    cfg, client = configured(tmp_path)
+    root = Path(cfg["state_dir"])
+    beat(cfg, 100)
+    core.save(root / "watchdog-run.json", {"last_run": 120})
+    core.save(root / "watchdog.json", {"heartbeat": 100, "wake": 1000, **record})
+    searches = []
+    original = client.pages
+    monkeypatch.setattr(client, "pages", lambda path: (searches.append(path), original(path))[1])
+    assert service.watchdog(cfg, client, clock=lambda: 1050)["status"] == expected
+    assert len(searches) == search_count and client.posts == post_count
+
+
+def test_watchdog_locked_run_does_not_replace_run_time(tmp_path):
+    cfg, client = configured(tmp_path)
+    core.bind_state(cfg)
+    root = Path(cfg["state_dir"])
+    core.save(root / "watchdog-run.json", {"last_run": 100})
+    with core.lock(root / "watchdog.lock") as acquired:
+        assert acquired
+        assert service.watchdog(cfg, client, clock=lambda: 500) == {"status": "locked"}
+    assert core.read(root / "watchdog-run.json") == {"last_run": 100}
+    assert client.posts == 0
