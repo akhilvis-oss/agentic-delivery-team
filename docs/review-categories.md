@@ -59,7 +59,7 @@ See [`templates/review-gate.example.json`](../templates/review-gate.example.json
 | --- | --- |
 | `repo_url` | `https://github.com/OWNER/REPO`; issue and review links must point here |
 | `allowed_bases` | Branches PRs may target |
-| `requirement_ids` | `null`, or `{"pattern": regex, "allowed": [ids] or null}`; when set, control-critical PRs list IDs and map each to evidence |
+| `requirement_ids` | Defaults to `null` in the example; opt in with `{"pattern": regex, "allowed": [ids] or null}`; when set, control-critical PRs list IDs and map each to evidence |
 | `scope_acknowledgements` | Number of `SCOPE-N` checkboxes required for control-critical PRs |
 | `domain_evidence` | `{"section": name, "labels": [...]}`; defaults to `Numeric verification` with `Hand-worked`, `Point-in-time`, `Missing data` |
 | `gate_paths` | Object with nonempty `code`, `config`, `workflows`, `tests` lists of installed file paths. Every listed file must classify as control-critical. Defaults match this kit; adopters should explicitly configure their own inventory. |

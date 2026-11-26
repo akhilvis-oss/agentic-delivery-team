@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -25,6 +26,8 @@ REASONS = {
     "publication_failed": "Publishing the reviewed commit or pull request failed; reconcile before retrying.",
     "publication_uncertain": "A publication write may have completed; inspect GitHub before retrying.",
     "stale_head": "The pull request or local head changed; a fresh review is required.",
+    "pr_evidence_incomplete": "The pull request's review sections from the runner's public evidence are missing, repeated or not public-safe for the tier its changes need. Owner: fix the runner's public evidence, then re-approve to rebuild from the saved work.",
+    "requirement_ids_unsupported": "This project's gate rules require requirement IDs, which runner pull requests don't support yet. Owner: set `requirement_ids` to null in the gate rules, then re-approve, or deliver this story by hand.",
     "gate_category_higher": "The trusted base rules require a higher review category than declared.",
     "required_check_failed": "A required check failed; inspect the pull request checks before correcting.",
     "merge_conditions_missing": "Merge evidence is missing or contradicted; owner reconciliation is required.",
@@ -35,6 +38,12 @@ REASONS = {
 
 class EvidenceMissing(ValueError):
     pass
+
+
+class DraftRefused(RuntimeError):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
 
 
 class OwnerMergeRequired(RuntimeError):
@@ -252,7 +261,7 @@ def criteria(text):
     return block, ids
 
 
-def body_for(runner, config, job, cfg, opts, receipt_url):
+def body_for(runner, config, job, cfg, opts, receipt_url, *, invalid_story_tier=False):
     original, ids = criteria(job["assignment"]["task_text"])
     decisions = story_section(job["assignment"]["task_text"], "Owner decisions")
     quoted_decisions = ("\n".join("> " + line for line in decisions.splitlines())
@@ -264,7 +273,8 @@ def body_for(runner, config, job, cfg, opts, receipt_url):
     # The evidence link contains only the runner's fixed summaries and SHA/count
     # metadata. Raw argv, output, paths and agent prose stay private.
     counts = [r.get("reported_counts") for r in job["verification_runs"][-1].get("results", [])]
-    body = (f"## Review tier\nTier: {opts['declared_tier']}\n\n"
+    tier_note = ("An invalid story review tier was ignored.\n" if invalid_story_tier else "")
+    body = (f"## Review tier\nTier: {opts['declared_tier']}\n{tier_note}\n"
             f"## Maker summary\nMaker context: runner job {job['id']}\n"
             f"Closes #{job['github_number']}\n\n"
             f"## Test evidence\nTested head: {head}\n"
@@ -285,6 +295,54 @@ def body_for(runner, config, job, cfg, opts, receipt_url):
                         for ac in ids)
         body += "\n## Independent Checker\nVerdict: PENDING\n"
     return body + "\n" + opts.get("public_evidence", "")
+
+
+def draft(runner, config, job, cfg, opts, client, receipt_url, *, saved=None):
+    """Choose once from target rules, then validate fixed public evidence.
+
+    Persisted drafts keep their original rules and tier across publication stages.
+    Existing deliveries without a draft retain their original configured tier.
+    """
+    gate = load_gate()
+    if saved is None:
+        try:
+            target = cfg.get("base_branch", "main")
+            branch = client.request("GET", "/branches/" + urllib.parse.quote(target, safe=""))
+            target_sha = branch["commit"]["sha"]
+            if not runner.SHA.fullmatch(target_sha):
+                raise ValueError("Invalid target head")
+            rules = trusted_rules(client, cfg, target_sha, gate)
+            paths = runner.git(config, "diff", "--no-renames", "--name-only", "-z",
+                               job.get("review_base") or job["base_commit"], job["head_commit"]).split("\0")
+            if paths and paths[-1] == "":
+                paths.pop()
+            minimum, _, _ = gate.required_tiers(paths, rules)
+        except Exception:
+            raise DraftRefused("publication_failed") from None
+        section = story_section(job["assignment"]["task_text"], "Review tier")
+        value = next((line.strip().lower() for line in (section or "").splitlines()
+                      if line.strip()), "")
+        invalid = section is not None and value not in TIERS
+        tier = max([opts["declared_tier"], minimum, *([value] if value in TIERS else [])],
+                   key=TIERS.index)
+        saved = {"chosen_tier": tier, "invalid_story_tier": invalid,
+                 "target_sha": target_sha, "rules": rules, "changed_files": paths}
+    if saved["chosen_tier"] == "control-critical" and saved["rules"].get("requirement_ids") is not None:
+        raise DraftRefused("requirement_ids_unsupported")
+    body = body_for(runner, config, job, cfg, {**opts, "declared_tier": saved["chosen_tier"]},
+                    receipt_url, invalid_story_tier=saved["invalid_story_tier"])
+    errors = gate.validate({"body": body, "head": {"sha": job["head_commit"]},
+                            "base": {"ref": cfg.get("base_branch", "main")}},
+                           saved["changed_files"], saved["rules"])
+    from lifecycle.private_content import scan_text
+    findings = list(scan_text(body))
+    if errors or findings:
+        for error in errors:
+            print("PR evidence: " + error, file=sys.stderr)
+        for number, finding in findings:
+            print(f"PR evidence: private-content finding at line {number}: {finding}", file=sys.stderr)
+        raise DraftRefused("pr_evidence_incomplete")
+    return saved, body
 
 
 def snapshot(pr):
@@ -311,15 +369,20 @@ def bound_pr(client, cfg, config, job, delivery):
     return pr
 
 
-def category(client, cfg, pr, gate):
+def trusted_rules(client, cfg, target_sha, gate):
     # Config comes from the immutable target BASE, never the story checkout.
-    encoded = client.request("GET", "/contents/.github/review-gate.json?ref=" + pr["base"]["sha"])
+    encoded = client.request("GET", "/contents/.github/review-gate.json?ref=" + target_sha)
     with tempfile.TemporaryDirectory(prefix="trusted-gate-") as scratch:
         config_path = Path(scratch) / "review-gate.json"
         config_path.write_bytes(base64.b64decode(encoded["content"], validate=False))
         rules = gate.load_config(config_path)
     if rules["repo_url"] != "https://github.com/" + cfg["repository"] or rules["tiers"]["order"] != TIERS:
         raise ValueError("Unsupported trusted rules")
+    return rules
+
+
+def category(client, cfg, pr, gate):
+    rules = trusted_rules(client, cfg, pr["base"]["sha"], gate)
     def api(path):
         prefix = "/repos/" + cfg["repository"]
         if not path.startswith(prefix + "/"):
@@ -438,7 +501,7 @@ def advance(runner, config, path, job, client=None):
             runner.save_job(config, path, job)
         return
     runner.integration_api()  # Register fixed public reasons before persistence.
-    delivery = job.setdefault("integration", {"stage": "new"})
+    delivery = job.setdefault("integration", {"stage": "new", "draft_pending": True})
     if delivery["stage"] in {"merged", "owner", "blocked"}:
         return
     core = runner.lifecycle_api()
@@ -555,6 +618,14 @@ def advance(runner, config, path, job, client=None):
             return
         if not delivery.get("pr"):
             authorize()
+        if delivery["stage"] == "new" and delivery.get("draft_pending"):
+            saved, _ = draft(runner, config, job, cfg, opts, client,
+                             "https://github.com/" + cfg["repository"] + "/issues/"
+                             + str(job["github_number"]) + "#issuecomment-1")
+            delivery.update(draft=saved, chosen_tier=saved["chosen_tier"])
+            delivery.pop("draft_pending")
+            persist()
+        opts = {**opts, "declared_tier": delivery.get("chosen_tier", opts["declared_tier"])}
         if delivery["stage"] == "new":
             write("push", lambda: client.push(runner, config, job["head_commit"]))
             delivery["stage"] = "pushed"
@@ -566,7 +637,11 @@ def advance(runner, config, path, job, client=None):
                 "POST", f"/issues/{job['github_number']}/comments",
                 {"body": "Sanitized task receipt\n```json\n" + json.dumps(receipt, indent=2) + "\n```"}))
             delivery["receipt_url"] = posted["html_url"]
-            delivery["body"] = body_for(runner, config, job, cfg, opts, posted["html_url"])
+            if "draft" in delivery:
+                _, delivery["body"] = draft(runner, config, job, cfg, opts, client,
+                                             posted["html_url"], saved=delivery["draft"])
+            else:
+                delivery["body"] = body_for(runner, config, job, cfg, opts, posted["html_url"])
             # Persist body before creating; never regenerate from mutable config.
             delivery["stage"] = "receipted"
             persist()
@@ -665,6 +740,8 @@ def advance(runner, config, path, job, client=None):
             persist()
     except core.Uncertain:
         stop("publication_uncertain")
+    except DraftRefused as exc:
+        stop(exc.reason, exc.reason != "publication_failed")
     except EvidenceMissing:
         stop("merge_conditions_missing", True)
     except ValueError:

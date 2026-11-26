@@ -80,6 +80,10 @@ def story(tmp_path, monkeypatch, enabled=False):
     monkeypatch.setattr(runner, "execute", execute)
     monkeypatch.setattr(api, "client_for", lambda *a: Delivery())
     monkeypatch.setattr(api, "category", lambda *a: ([], "standard"))
+    def fixed_draft(tool, settings, job, policy, opts, client, receipt_url, *, saved=None):
+        return {"chosen_tier": opts["declared_tier"]}, api.body_for(
+            tool, settings, job, policy, opts, receipt_url)
+    monkeypatch.setattr(api, "draft", fixed_draft)
     monkeypatch.setattr(api, "merge_evidence", lambda *a: "pending")
     return cfg, hub, runner, calls, publications
 

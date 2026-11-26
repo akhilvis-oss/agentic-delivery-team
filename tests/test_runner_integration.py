@@ -13,6 +13,7 @@ import test_runner as fixtures
 runner = fixtures.runner
 setup = fixtures.setup
 integration = runner.integration_api()
+REAL_DRAFT = integration.draft
 REAL_ADMIT = runner.lifecycle_api().admit_phase
 
 DELIVERY_PERMISSIONS = {
@@ -354,6 +355,12 @@ def delivery(setup, monkeypatch):
     monkeypatch.setattr(core, "sync_job", lambda *args: None)
     monkeypatch.setattr(core, "admit_phase", lambda *args: True)
     client = Client(job, config)
+    # Existing transport tests isolate post-publication policy. Drafting has its
+    # own real-gate coverage; preserve the original synthetic tier and body here.
+    def fixed_draft(tool, settings, task, policy, opts, transport, receipt_url, *, saved=None):
+        return {"chosen_tier": opts["declared_tier"]}, integration.body_for(
+            tool, settings, task, policy, opts, receipt_url)
+    monkeypatch.setattr(integration, "draft", fixed_draft)
     runner.save_job(config, path, job)
     return config, path, job, client
 
