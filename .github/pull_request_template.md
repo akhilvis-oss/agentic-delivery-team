@@ -21,6 +21,11 @@ REQUIRED: what changed and why, scope/exclusions, known limitations and rollback
 Tested head: REQUIRED: full 40-character PR head SHA (standard and above).
 REQUIRED: exact commands and results/counts; mark skipped or NOT RUN with reason.
 
+## Impact
+Measured against the base: extra agent sessions per story, GitHub requests per poll,
+suite and CI time; production lines added/removed and new config keys, statuses, codes
+or adopter-copied files; new owner steps. Zero unless the story justifies it.
+
 ## Assumptions
 REQUIRED: reasonable choices made within approved scope, or "None". Escalate instead
 if an assumption conflicts with approved direction, enters a must-ask category or
