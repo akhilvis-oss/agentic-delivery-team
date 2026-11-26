@@ -49,6 +49,7 @@ STATES = {
     "accepted",
     "merged",
 }
+STATUS_NAMES = {name: name for name in STATES}
 SHA = re.compile(r"[0-9a-f]{40}")
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,79}")
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?")
@@ -74,6 +75,28 @@ class TransitionRejected(ValueError):
 
 class Uncertain(Unavailable):
     """A write may have reached GitHub; never blindly repeat it."""
+
+
+def read_statuses_version(path, *, missing=False):
+    """Read data only; candidates predating this file require version one."""
+    try:
+        value = Path(path).read_bytes()
+    except FileNotFoundError:
+        if missing and not Path(path).is_symlink():
+            return 1
+        raise
+    if not re.fullmatch(rb"[1-9][0-9]*\n?", value):
+        raise ValueError("Malformed statuses version")
+    return int(value)
+
+
+try:
+    REQUIRED_STATUSES_VERSION = read_statuses_version(Path(__file__).with_name("statuses-version"))
+except (OSError, ValueError):
+    raise SystemExit(
+        "Lifecycle guard unavailable: cannot load lifecycle/statuses-version; "
+        "restore the lifecycle package from the same kit release."
+    ) from None
 
 
 def now():
@@ -183,6 +206,10 @@ def load_config(path, *, local=True):
         if set(policy) & local_fields:
             raise ValueError("Private settings must not appear in public policy")
         cfg = {**policy, **cfg}
+    version = cfg.get("statuses_version", 1)
+    if type(version) is not int or version != REQUIRED_STATUSES_VERSION:
+        raise ValueError(f"statuses_version must be integer {REQUIRED_STATUSES_VERSION}")
+    cfg["statuses_version"] = version
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", cfg.get("repository", "")):
         raise ValueError("Explicit repository required")
     if "upgrade" in cfg:
@@ -315,9 +342,9 @@ def is_report(cfg, issue):
 def state(issue):
     names = [x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])]
     statuses = [x[7:] for x in names if x.startswith("status:")]
-    if len(statuses) != 1 or statuses[0] not in STATES:
+    if len(statuses) != 1 or statuses[0] not in STATUS_NAMES:
         raise StatusLabelError("Issue needs exactly one known status label")
-    return statuses[0]
+    return STATUS_NAMES[statuses[0]]
 
 
 def has_role(cfg, identity, role):
@@ -325,6 +352,7 @@ def has_role(cfg, identity, role):
 
 
 def permitted(cfg, source, target, actor):
+    source, target = STATUS_NAMES.get(source), STATUS_NAMES.get(target)
     allowed = cfg["transitions"].get(source, {}).get(target, [])
     if target == "approved" and actor != cfg["actors"]["owner"]:
         return False
@@ -337,7 +365,13 @@ def permitted(cfg, source, target, actor):
     return any(has_role(cfg, actor, role) for role in allowed)
 
 
-def public_record(
+def public_record(cfg, *args, **kwargs):
+    """New records use only the current STATES names."""
+    return _record(STATES, cfg, *args, **kwargs)
+
+
+def _record(
+    accepted_names,
     cfg,
     issue,
     job,
@@ -363,13 +397,14 @@ def public_record(
     exception_class=None,
     function=None,
 ):
+    mapped_target = STATUS_NAMES.get(target)
     if (
         type(issue) is not int
         or issue < 1
         or not ID.fullmatch(job)
         or type(round_number) is not int
         or not 0 <= round_number <= 3
-        or target not in STATES
+        or target not in accepted_names
         or commit is not None
         and not SHA.fullmatch(commit)
         or event is not None
@@ -394,7 +429,7 @@ def public_record(
         raise ValueError("Invalid gate result")
     if kind == "approval":
         if (
-            target != "approved"
+            mapped_target != "approved"
             or approved_by != cfg["actors"]["owner"]
             or event is None
             or not isinstance(scope_sha256, str)
@@ -404,7 +439,7 @@ def public_record(
     elif scope_sha256 is not None or approved_by is not None:
         raise ValueError("Approval metadata only belongs to approval records")
     if kind == "finish" and (
-        target != "merged" or event is None or reason != "finished_by_owner"
+        mapped_target != "merged" or event is None or reason != "finished_by_owner"
         or job != "owner-finish" or round_number != 0 or commit is not None
         or pr is not None or gate is not None or outcome is not None
         or severities not in (None, {}) or owner_question is not None
@@ -417,7 +452,7 @@ def public_record(
         type(n) is not int or n < 0 for n in counts.values()
     ):
         raise ValueError("Invalid severity counts")
-    if target in {"blocked", "needs-owner", "needs-primary"}:
+    if mapped_target in {"blocked", "needs-owner", "needs-primary"}:
         reason = reason or "execution_failed"
         if reason not in STOP_REASONS:
             raise ValueError("Unknown stop reason")
@@ -459,7 +494,7 @@ def public_record(
         ]
     )
     if owner_question is not None or failed_tests is not None:
-        if target not in {"blocked", "needs-owner", "needs-primary"}:
+        if mapped_target not in {"blocked", "needs-owner", "needs-primary"}:
             raise ValueError("Stop details require a stopped task")
         if owner_question is not None:
             if isinstance(owner_question, str):
@@ -473,7 +508,8 @@ def public_record(
             record["failed_tests"] = failed_tests
         record["key"] = key([record["key"], owner_question, failed_tests])
     if continuation or stop_save_failed:
-        if (target not in {"blocked", "needs-owner"}
+        if (mapped_target not in {"blocked", "needs-owner"}
+                and not (mapped_target == "draft" and reason == "owner_withdrew")
                 or type(continuation) is not bool or type(stop_save_failed) is not bool
                 or continuation and commit is None):
             raise ValueError("Invalid stop preservation details")
@@ -491,7 +527,7 @@ def public_record(
         record["conflict_files"] = conflict_files
         record["key"] = key([record["key"], conflict_files])
     if stop_details is not None:
-        if target not in {"blocked", "needs-owner", "needs-primary"}:
+        if mapped_target not in {"blocked", "needs-owner", "needs-primary"}:
             raise ValueError("Stop details require a stopped task")
         record["stop_details"] = public_stop_details(cfg, stop_details)
         record["key"] = key([record["key"], record["stop_details"]])
@@ -524,6 +560,7 @@ STOP_REASONS = {
     "continuation_commit_unrecorded": "The latest saved work could not be verified on this issue. Owner: ask the operator to reconcile it, or add Restart: fresh under Owner decisions and re-approve.",
     "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or add Restart: fresh under Owner decisions and re-approve.",
     "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (add Restart: fresh under Owner decisions and re-approve), or split the story.",
+    "owner_withdrew": "The owner withdrew this story. Owner: re-approve to start it again.",
     "pr_open_reapproval": "This story has an open PR. Owner: close the PR and re-approve to rebuild, or merge it and add `status:merged` to finish (#184).",
     "continuation_not_applied": "The continued commit is missing from the built head. Owner: reconcile the history before re-approving.",
     "owner_question": 'The builder needs your decision. Owner: add the answer to the story under "Owner decisions", then re-approve.',
@@ -575,6 +612,7 @@ STOP_KINDS = {
     "owner_requested_stop": "Needs your decision",
     "continuation_limit": "Needs your decision",
     "pr_open_reapproval": "Needs your decision",
+    "owner_withdrew": "Needs your decision",
     "owner_merge_required": "Needs your merge",
     "commit_refused": "Needs a fix",
     "delivery_disabled": "Needs a fix",
@@ -793,6 +831,9 @@ def record_body(record):
                                  for name in details["refusal"]["paths"]) + "\n"
         if details["refusal"].get("more"):
             explanation += f"and {details['refusal']['more']} more refused paths [truncated]\n"
+    if record.get("reason") == "owner_withdrew":
+        explanation = ("The owner withdrew this story. Its work is saved. Owner: re-approve to continue from it."
+                       if record.get("continuation") else STOP_REASONS["owner_withdrew"]) + "\n"
     tail = ""
     if record.get("conflict_files"):
         explanation += "\nConflicting files (repository-relative):\n" + "\n".join(
@@ -800,7 +841,7 @@ def record_body(record):
         ) + "\n"
     if record.get("stop_save_failed"):
         explanation += "\nThe builder's work couldn't be saved completely; owner: ask the operator to reconcile it.\n"
-    if record.get("continuation"):
+    if record.get("continuation") and record.get("reason") != "owner_withdrew":
         tail = ("\n\nSaved work is available. Re-approve to continue it, or add "
                 "Restart: fresh under Owner decisions and re-approve to restart fresh.")
     return (
@@ -833,7 +874,9 @@ def notice_body(cfg, client, entry):
     if (record["kind"] == "review" and context.get("findings")
             and not record.get("stop_details", {}).get("findings")):
         extra += finding_notice(cfg, context["findings"])
-    if context.get("delivery") and record.get("reason"):
+    if context.get("withdrawal_auto_merge_uncertain"):
+        extra += "Auto-merge may still be on. Owner: check the pull request.\n\n"
+    if context.get("delivery") and record.get("reason") and record["reason"] != "owner_withdrew":
         from runner.integration import REASONS, smoke_notice
 
         reason = record["reason"]
@@ -873,14 +916,17 @@ def records(cfg, comments, expected_issue=None):
                 continue
             if type(item["version"]) is not int or item["version"] not in SUPPORTED_RECORD_VERSIONS:
                 continue
+            if item["to"] not in STATUS_NAMES or item["from"] not in STATUS_NAMES:
+                continue
             created = comment.get("created_at")
             updated = comment.get("updated_at")
             # Retain finality even if a finished record was edited later.
-            if (item["to"] not in {"merged", "accepted"}
+            if (STATUS_NAMES[item["to"]] not in {"merged", "accepted"}
                     and created is not None and updated is not None
                     and stamp(updated) > stamp(created)):
                 continue
-            expected = public_record(
+            expected = _record(
+                STATUS_NAMES,
                 cfg,
                 item["issue"],
                 item["job"],
@@ -910,9 +956,10 @@ def records(cfg, comments, expected_issue=None):
                 or item["key"] != expected["key"]
                 or item["repository"] != cfg["repository"]
                 or item["actor"] != actor
-                or item["from"] not in STATES
+                or item["from"] not in STATUS_NAMES
             ):
                 continue
+            item = dict(item, to=STATUS_NAMES[item["to"]], **{"from": STATUS_NAMES[item["from"]]})
             if item["to"] == "merged" and actor == cfg["actors"]["owner"]:
                 continue
             if item["kind"] == "finish" and item["from"] == "merged":
@@ -1092,7 +1139,7 @@ class GitHub:
 
     def write_allowed(self, method, path):
         if method == "DELETE":
-            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3A(?:draft|approved)", path))
+            return bool(re.fullmatch(r"/issues/[1-9]\d*/labels/status%3A(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+", path))
         if method == "PATCH" and re.fullmatch(r"/issues/comments/[1-9]\d*", path):
             return True
         if method == "PUT" and re.fullmatch(r"/issues/comments/[1-9]\d*/pin", path):
@@ -1180,12 +1227,7 @@ class GitHub:
         return self.pages(f"/issues/{number}/events")
 
     def set_state(self, number, target):
-        issue = self.issue(number)
-        labels = [x["name"] if isinstance(x, dict) else x for x in issue["labels"]]
-        labels = [x for x in labels if not x.startswith("status:")] + [
-            "status:" + target
-        ]
-        return self.request("PUT", f"/issues/{number}/labels", {"labels": labels})
+        return set_status(self, number, target)
 
     def notify(self, number):
         if self.cfg["actors"]["owner"].endswith("[bot]"):
@@ -1200,6 +1242,24 @@ class GitHub:
             f"/issues/{number}/assignees",
             {"assignees": [self.cfg["actors"]["owner"]]},
         )
+
+
+def set_status(client, number, target):
+    """Add the target, then remove only other statuses in this issue snapshot."""
+    issue = client.issue(number)
+    labels = [item["name"] if isinstance(item, dict) else item for item in issue["labels"]]
+    desired = "status:" + target
+    if desired not in labels:
+        client.request("POST", f"/issues/{number}/labels", {"labels": [desired]})
+    for label in labels:
+        if label.startswith("status:") and label != desired:
+            remove_status(client, number, label[len("status:"):])
+
+
+def remove_status(client, number, name):
+    """Remove one status label; transport validation still rejects unsafe paths."""
+    label = urllib.parse.quote("status:" + name, safe="")
+    return client.request("DELETE", f"/issues/{number}/labels/{label}")
 
 
 def app_client(cfg, role="runner", **token_options):
@@ -1383,6 +1443,12 @@ def flush(cfg, client):
                     entry.update(status="superseded", error="finished_issue")
                     save(path, entry)
                     continue
+                if (job_record and record.get("reason") != "owner_withdrew"
+                        and record.get("event") is not None
+                        and withdrawal(cfg, client, remote_issue, record["event"])):
+                    entry.update(status="superseded", error="owner_withdrew")
+                    save(path, entry)
+                    continue
                 if rejecting:
                     if not confirm_rejection(cfg, client, path, entry):
                         blocked_issues.add(record["issue"])
@@ -1394,6 +1460,12 @@ def flush(cfg, client):
                     remote_issue = client.issue(record["issue"])
                     if job_record and not can_start(remote_issue, remote):
                         entry.update(status="superseded", error="finished_issue")
+                        save(path, entry)
+                        continue
+                    if (job_record and record.get("reason") != "owner_withdrew"
+                            and record.get("event") is not None
+                            and withdrawal(cfg, client, remote_issue, record["event"])):
+                        entry.update(status="superseded", error="owner_withdrew")
                         save(path, entry)
                         continue
                     current = state(remote_issue)
@@ -1543,23 +1615,41 @@ def flush(cfg, client):
             raise TransitionRejected("; ".join(rejections))
 
 
-def latest_event(cfg, events, target, role):
-    status_events = [
-        e
-        for e in events
-        if e.get("event") in {"labeled", "unlabeled"}
-        and e.get("label", {}).get("name", "").startswith("status:")
-    ]
-    labeled = [e for e in status_events if e["event"] == "labeled"]
-    if not labeled:
+def owner_draft_event(cfg, events):
+    """Only the configured owner's newest labeled status event can withdraw."""
+    event = max((e for e in events if e.get("event") == "labeled"
+                 and e.get("actor", {}).get("login") == cfg["actors"]["owner"]
+                 and e.get("label", {}).get("name", "").startswith("status:")),
+                key=lambda e: int(e["id"]), default=None)
+    return event if event and event["label"]["name"] == "status:draft" else None
+
+
+def withdrawal(cfg, client, issue, approval_event, *, events=None):
+    labels = {x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])}
+    if "status:draft" not in labels or issue.get("state") == "closed":
         return None
-    newest = max(labeled, key=lambda e: int(e["id"]))
-    if (
-        newest["label"]["name"] == "status:" + target
-        and newest.get("actor", {}).get("login") == cfg["actors"][role]
-    ):
-        return newest
+    events = client.events(issue["number"]) if events is None else events
+    event = owner_draft_event(cfg, events)
+    if (event and int(event["id"]) > approval_event
+            and canonical_state(cfg, [e for e in events
+                                      if int(e["id"]) <= int(event["id"])]) == ("draft", event)):
+        return event
     return None
+
+
+def withdrawal_record(cfg, number, job, event, *, head=None, continuation=False):
+    record = public_record(cfg, number, job, 0, "draft", commit=head, event=event,
+                           reason="owner_withdrew", continuation=continuation)
+    record.update(actor=cfg["actors"]["runner"], **{"from": "draft"})
+    return record
+
+
+def job_withdrawal_record(cfg, job):
+    binding = job["assignment"]["lifecycle"]
+    kept = bool(job.get("head_commit") and job.get("continuation")
+                and not job.get("stop_save_failed") and job["status"] != "failed")
+    return withdrawal_record(cfg, binding["issue"], job["id"], binding["event"],
+                             head=job.get("head_commit"), continuation=kept)
 
 
 def job_records(cfg, job):
@@ -1701,17 +1791,33 @@ def job_records(cfg, job):
 
 def sync_job(config_path, job, client=None):
     cfg = load_config(config_path)
-    for record in job_records(cfg, job):
+    client = client or GitHub(cfg)
+    binding = job["assignment"].get("lifecycle")
+    withdrawn = (binding and withdrawal(cfg, client, client.issue(binding["issue"]), binding["event"]))
+    if withdrawn:
+        job["owner_withdrew"] = True
+    local = job_records(cfg, job)
+    if withdrawn or job.get("owner_withdrew"):
+        # Progress remains local; stops use one stable record identity even if
+        # a phase failure races the withdrawal or preservation recovers later.
+        local = ([] if job["status"] in {"queued", "running_worker", "running_readiness",
+                                        "running_reviewer", "changes_requested", "ready_for_integration"}
+                 else [job_withdrawal_record(cfg, job)])
+    for record in local:
         context = {}
         if record["kind"] == "review" and job.get("review", {}).get("findings"):
             context["findings"] = job["review"]["findings"]
-        if job.get("integration", {}).get("reason"):
+        if record.get("reason") == "owner_withdrew":
+            context["withdrawal_auto_merge_uncertain"] = bool(
+                job.get("withdrawal_auto_merge_uncertain")
+                or job.get("integration", {}).get("reason") == "auto_merge_disable_uncertain")
+        elif job.get("integration", {}).get("reason"):
             context.update(delivery=True, reviewed_head=job.get("reviewed_head", "unavailable"),
                            smoke_reporting=job["integration"].get("smoke_reporting", False))
         queue(cfg, record, notice_context=context)
     try:
         flush(cfg, client or GitHub(cfg))
-        if any(
+        if not job.get("owner_withdrew") and any(
             f["severity"] in cfg["pushback"]["minor"]
             for r in job.get("review_history", [])
             for f in r["result"]["findings"]
@@ -1768,17 +1874,23 @@ def canonical_state(cfg, events):
     """Only authenticated label-event actors can advance the canonical state."""
     current = "draft"
     latest = None
+    withdrawn = False
     for event in sorted(events, key=lambda e: int(e["id"])):
         if event.get("event") != "labeled":
             continue
         name = event.get("label", {}).get("name", "")
         if not name.startswith("status:"):
             continue
-        target = name[7:]
-        if target in STATES and permitted(
-            cfg, current, target, event.get("actor", {}).get("login")
-        ):
+        actor = event.get("actor", {}).get("login")
+        # An admitted runner write may finish after an owner withdrawal.
+        # Workflow PR-close transitions remain effective until re-approval.
+        if withdrawn and actor == cfg["actors"]["runner"]:
+            continue
+        target = STATUS_NAMES.get(name[7:])
+        if target is not None and permitted(cfg, current, target, actor):
             current, latest = target, event
+            if actor == cfg["actors"]["owner"]:
+                withdrawn = target == "draft"
     return current, latest
 
 
@@ -1870,7 +1982,7 @@ def _attest_approval(cfg, client, event):
         # Remove only the approval we cannot honour, preserving all other labels.
         removal_error = None
         try:
-            client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Aapproved")
+            remove_status(client, issue["number"], "approved")
         except Unavailable as exc:
             removal_error = exc
         rejected = int(latest["id"]) if latest is not None else 0
@@ -1939,8 +2051,9 @@ def _attest_approval(cfg, client, event):
     boundary = 0
     current = "draft"
     for item in sorted(events, key=lambda e: int(e["id"])):
-        target = item.get("label", {}).get("name", "")[7:]
-        if item.get("event") == "labeled" and target in STATES and permitted(
+        name = item.get("label", {}).get("name", "")
+        target = STATUS_NAMES.get(name[7:]) if name.startswith("status:") else None
+        if item.get("event") == "labeled" and target is not None and permitted(
                 cfg, current, target, item.get("actor", {}).get("login")):
             current = target
             if target != "approved":
@@ -1988,7 +2101,7 @@ def _attest_approval(cfg, client, event):
         if snapshots[1] == pair:
             # Remove only draft; never overwrite a concurrent status or other label.
             try:
-                client.request("DELETE", f"/issues/{issue['number']}/labels/status%3Adraft")
+                remove_status(client, issue["number"], "draft")
             except Unavailable:
                 reject_labels("Approval label cleanup failed; re-approve")
         if statuses(client.issue(issue["number"])) != ["status:approved"]:
@@ -2019,9 +2132,9 @@ def owner_finish_event(cfg, events):
         if event.get("event") != "labeled":
             continue
         name = event.get("label", {}).get("name", "")
-        target = name[7:] if name.startswith("status:") else None
+        target = STATUS_NAMES.get(name[7:]) if name.startswith("status:") else None
         actor = event.get("actor", {}).get("login")
-        if target in STATES and permitted(cfg, current, target, actor):
+        if target is not None and permitted(cfg, current, target, actor):
             if target == "merged":
                 return (current, event) if actor == cfg["actors"]["owner"] else None
             current = target
@@ -2140,7 +2253,7 @@ def guard_issue(cfg, client, number):
     # Remove draft alone so the pending webhook still sees the same approval
     # event, rather than emitting a replacement approved label event.
     if canonical == "approved" and statuses == {"status:approved", "status:draft"}:
-        client.request("DELETE", f"/issues/{number}/labels/status%3Adraft")
+        remove_status(client, number, "draft")
         issue = client.issue(number)
     if canonical in {"blocked", "needs-owner", "needs-primary"}:
         client.notify(number)
@@ -2180,14 +2293,20 @@ def guard_issue(cfg, client, number):
             queue(cfg, record, role="workflow")
             flush(cfg, client)
             return actual != canonical
+    if (canonical == "draft" and event is not None
+            and owner_draft_event(cfg, events) == event):
+        if statuses != {"status:draft"}:
+            client.set_state(number, "draft")
+            return True
+        return False
     if actual == canonical:
         return False
     client.set_state(number, canonical)
-    # Bind to the event just written, never to the rejected prior change.
+    # The target may already be present, producing no new labeled event.
+    # Bind only to the newest matching workflow event, never another actor or label.
     restored_event = None
     try:
         written = [e for e in client.events(number) if e.get("event") == "labeled"
-                   and int(e["id"]) > max((int(old["id"]) for old in events), default=0)
                    and e.get("actor", {}).get("login") == cfg["actors"]["workflow"]
                    and e.get("label", {}).get("name") == "status:" + canonical]
         if written:

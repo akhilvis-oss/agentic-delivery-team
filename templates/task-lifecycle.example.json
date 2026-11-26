@@ -17,7 +17,8 @@
       "draft": [
         "owner",
         "product",
-        "workflow"
+        "workflow",
+        "runner"
       ],
       "blocked": [
         "owner",
@@ -63,6 +64,9 @@
       ],
       "merged": [
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "dispatched": {
@@ -94,6 +98,9 @@
       ],
       "merged": [
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "in-progress": {
@@ -124,6 +131,9 @@
         "runner"
       ],
       "merged": [
+        "owner"
+      ],
+      "draft": [
         "owner"
       ]
     },
@@ -159,6 +169,9 @@
       ],
       "merged": [
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "in-review": {
@@ -192,6 +205,9 @@
         "runner"
       ],
       "merged": [
+        "owner"
+      ],
+      "draft": [
         "owner"
       ]
     },
@@ -227,6 +243,9 @@
       ],
       "merged": [
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "needs-primary": {
@@ -261,6 +280,9 @@
       ],
       "merged": [
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "blocked": {
@@ -282,6 +304,9 @@
         "owner"
       ],
       "merged": [
+        "owner"
+      ],
+      "draft": [
         "owner"
       ]
     },
@@ -310,6 +335,9 @@
         "workflow",
         "runner",
         "owner"
+      ],
+      "draft": [
+        "owner"
       ]
     },
     "pr-open": {
@@ -335,6 +363,9 @@
       ],
       "merged": [
         "workflow",
+        "owner"
+      ],
+      "draft": [
         "owner"
       ]
     },
