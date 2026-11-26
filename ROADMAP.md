@@ -27,12 +27,10 @@ A review on 14 November traced the failures since v0.5.3 to a few design causes.
 - **Safety net** ([design note](docs/design/safety-net.md)): recorded GitHub responses as test fixtures, and a live smoke test that runs one tiny story with the real agent on candidate code before it is used.
 - **Consolidated lifecycle:** one way to continue a stopped story, four kinds of stop, a queue with dependencies, a readiness pass after approval, and guards so finished stories never reopen and one story's error can't stop another.
 - **Delivery policy:** tier chosen from the gate's rules or the story ([#115](https://github.com/akhilvis-oss/agentic-delivery-team/issues/115)), per-criterion review evidence, protected tests ([#80](https://github.com/akhilvis-oss/agentic-delivery-team/issues/80)), failed checks back to the builder ([#59](https://github.com/akhilvis-oss/agentic-delivery-team/issues/59)), and a verified direct merge where auto-merge isn't available.
-- **One-command adoption and upgrade** ([#95](https://github.com/akhilvis-oss/agentic-delivery-team/issues/95)), with environment profiles per project ([#99](https://github.com/akhilvis-oss/agentic-delivery-team/issues/99)).
 - Later in this track: parallel stories ([#76](https://github.com/akhilvis-oss/agentic-delivery-team/issues/76)) and readable stand-ups ([#68](https://github.com/akhilvis-oss/agentic-delivery-team/issues/68)).
 
 ## v0.6: Set up and run without touching config
 For owners who only talk to their product agent.
-- **Setup wizard** ([#82](https://github.com/akhilvis-oss/agentic-delivery-team/issues/82)): one command opens a local page that checks prerequisites, creates the bot Apps with one click, stores keys in the keychain, lets you choose agents for each role and set up slots, installs the repository pieces as a pull request, guides the dedicated OS user, starts the service and shows its status.
 - **Owner-tunable settings** ([#81](https://github.com/akhilvis-oss/agentic-delivery-team/issues/81)): inactivity-based time limits instead of a fixed timeout; behaviour settings in an owner-merged repository file the product agent can propose changes to; a story size field.
 - **Coding-agent identity** ([#31](https://github.com/akhilvis-oss/agentic-delivery-team/issues/31)): pull requests authored by a bot without workflow or merge rights, so GitHub itself enforces the merge policy.
 - **Protected regression suite** ([#80](https://github.com/akhilvis-oss/agentic-delivery-team/issues/80)): an owner-owned list of tests the builder can't change, run from the trusted base branch.
@@ -42,7 +40,7 @@ For owners who only talk to their product agent.
 - **Claude Code as a tested agent** ([#53](https://github.com/akhilvis-oss/agentic-delivery-team/issues/53)), as builder and reviewer.
 
 ## Later
-- Framework validation of the kit version and feature-switch record; today it is a convention for agents, not read by framework code (see [versions and feature switches](docs/versions-and-features.md)).
+- The hosted guard reads `features.lifecycle` from the trusted kit record; other switches remain conventions for agents. Install and upgrade follow the tagged runbooks and checker (see [versions and feature switches](docs/versions-and-features.md)).
 - Resuming agent sessions ([#20](https://github.com/akhilvis-oss/agentic-delivery-team/issues/20)).
 - Unattended product agent through an API key, and stories published under the product agent's own identity.
 - Key stores beyond the macOS Keychain.

@@ -1,0 +1,396 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "source": "digest/__init__.py",
+      "destination": "digest/__init__.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "digest/standup.py",
+      "destination": "digest/standup.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "lifecycle/__init__.py",
+      "destination": "lifecycle/__init__.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/__init__.py",
+      "destination": "lifecycle/__init__.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/app_tokens.py",
+      "destination": "lifecycle/app_tokens.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/app_tokens.py",
+      "destination": "lifecycle/app_tokens.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/core.py",
+      "destination": "lifecycle/core.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/core.py",
+      "destination": "lifecycle/core.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/preflight.py",
+      "destination": "lifecycle/preflight.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/preflight.py",
+      "destination": "lifecycle/preflight.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/private_content.py",
+      "destination": "lifecycle/private_content.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/private_content.py",
+      "destination": "lifecycle/private_content.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/product.py",
+      "destination": "lifecycle/product.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/product.py",
+      "destination": "lifecycle/product.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/service.py",
+      "destination": "lifecycle/service.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/service.py",
+      "destination": "lifecycle/service.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/smoke.py",
+      "destination": "lifecycle/smoke.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/smoke.py",
+      "destination": "lifecycle/smoke.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/smoke_watch.py",
+      "destination": "lifecycle/smoke_watch.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/smoke_watch.py",
+      "destination": "lifecycle/smoke_watch.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/statuses-version",
+      "destination": "lifecycle/statuses-version",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/statuses-version",
+      "destination": "lifecycle/statuses-version",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "lifecycle/upgrade.py",
+      "destination": "lifecycle/upgrade.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/upgrade.py",
+      "destination": "lifecycle/upgrade.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "runner/config.example.json",
+      "destination": "runner/config.example.json",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/integration.py",
+      "destination": "runner/integration.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/launchd.plist.example",
+      "destination": "runner/launchd.plist.example",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/pool.example.json",
+      "destination": "runner/pool.example.json",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/pool.py",
+      "destination": "runner/pool.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/profile.example.json",
+      "destination": "runner/profile.example.json",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/smoke.example.json",
+      "destination": "runner/smoke.example.json",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "runner/task_runner.py",
+      "destination": "runner/task_runner.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export; populate example configurations privately."
+    },
+    {
+      "source": "gate/review_gate.py",
+      "destination": "scripts/review_gate.py",
+      "kind": "framework"
+    },
+    {
+      "source": "scripts/check_private_content.py",
+      "destination": "scripts/check_private_content.py",
+      "kind": "framework"
+    },
+    {
+      "source": "LICENSE",
+      "destination": "LICENSE.agentic-delivery-team",
+      "kind": "framework"
+    },
+    {
+      "source": "templates/task-lifecycle.yml",
+      "destination": ".github/workflows/task-lifecycle.yml",
+      "kind": "framework"
+    },
+    {
+      "source": "gate/review_gate.py",
+      "destination": "gate/review_gate.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "scripts/check_private_content.py",
+      "destination": "scripts/check_private_content.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    },
+    {
+      "source": "starter-kit/PRODUCT_AGENT.md",
+      "destination": "PRODUCT_AGENT.md",
+      "kind": "framework"
+    },
+    {
+      "source": "starter-kit/docs/dry-run.md",
+      "destination": "docs/dry-run.md",
+      "kind": "framework"
+    },
+    {
+      "source": "starter-kit/docs/troubleshooting.md",
+      "destination": "docs/troubleshooting.md",
+      "kind": "framework"
+    },
+    {
+      "source": "starter-kit/.github/ISSUE_TEMPLATE/story.yml",
+      "destination": ".github/ISSUE_TEMPLATE/story.yml",
+      "kind": "framework"
+    },
+    {
+      "source": "starter-kit/AGENTS.md",
+      "destination": "AGENTS.md",
+      "kind": "adopter",
+      "feature": "product_files"
+    },
+    {
+      "source": "starter-kit/docs/product/vision.md",
+      "destination": "docs/product/vision.md",
+      "kind": "adopter",
+      "feature": "product_files"
+    },
+    {
+      "source": "starter-kit/docs/product/roadmap.md",
+      "destination": "docs/product/roadmap.md",
+      "kind": "adopter",
+      "feature": "product_files"
+    },
+    {
+      "source": "starter-kit/docs/product/decision-log.md",
+      "destination": "docs/product/decision-log.md",
+      "kind": "adopter",
+      "feature": "product_files"
+    },
+    {
+      "source": "templates/review-gate.example.json",
+      "destination": ".github/review-gate.json",
+      "kind": "adopter",
+      "feature": "review_gate"
+    },
+    {
+      "source": "templates/review-gate.yml",
+      "destination": ".github/workflows/review-gate.yml",
+      "kind": "adopter",
+      "feature": "review_gate"
+    },
+    {
+      "source": "templates/pull_request_template.md",
+      "destination": ".github/pull_request_template.md",
+      "kind": "adopter",
+      "feature": "review_gate"
+    },
+    {
+      "source": "templates/task-lifecycle.example.json",
+      "destination": ".github/task-lifecycle.json",
+      "kind": "adopter",
+      "feature": "lifecycle"
+    },
+    {
+      "source": "templates/agentic-kit.example.json",
+      "destination": ".github/agentic-kit.json",
+      "kind": "adopter",
+      "feature": "review_gate"
+    },
+    {
+      "source": "templates/actions-policy-pull-request-target.json",
+      "destination": "templates/actions-policy-pull-request-target.json",
+      "kind": "settings",
+      "owner_action": "Owner imports the template in GitHub Settings, after checking its repository-specific values."
+    },
+    {
+      "source": "templates/app-auth.example.json",
+      "destination": "templates/app-auth.example.json",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/branch-ruleset.json",
+      "destination": "templates/branch-ruleset.json",
+      "kind": "settings",
+      "owner_action": "Owner imports the template in GitHub Settings, after checking its repository-specific values."
+    },
+    {
+      "source": "templates/claude-code-product-agent.settings.json",
+      "destination": "templates/claude-code-product-agent.settings.json",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/lifecycle-launch.sh",
+      "destination": "templates/lifecycle-launch.sh",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/lifecycle-serve-upgrade.plist.example",
+      "destination": "templates/lifecycle-serve-upgrade.plist.example",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/lifecycle-serve.plist.example",
+      "destination": "templates/lifecycle-serve.plist.example",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/lifecycle-smoke.plist.example",
+      "destination": "templates/lifecycle-smoke.plist.example",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/lifecycle-watchdog.plist.example",
+      "destination": "templates/lifecycle-watchdog.plist.example",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "templates/standup.example.json",
+      "destination": "templates/standup.example.json",
+      "kind": "private",
+      "owner_action": "Owner configures this optional component outside the repository when enabling its feature."
+    },
+    {
+      "source": "lifecycle/kit_switch.py",
+      "destination": "lifecycle/kit_switch.py",
+      "kind": "framework"
+    },
+    {
+      "source": "lifecycle/kit_switch.py",
+      "destination": "lifecycle/kit_switch.py",
+      "kind": "private",
+      "owner_action": "Include in the fixed private release export."
+    }
+  ],
+  "kit_only": [
+    ".github/*",
+    ".gitignore",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "ROADMAP.md",
+    "SECURITY.md",
+    "docs/*",
+    "requirements-dev.txt",
+    "tests/*",
+    "starter-kit/README.md",
+    "INSTALL.md",
+    "UPGRADE.md",
+    "release-files.json",
+    "scripts/release_files.py",
+    "scripts/verify_install.py"
+  ],
+  "features": {
+    "review_gate": [],
+    "product_files": [],
+    "runner": [],
+    "pool": [
+      "runner"
+    ],
+    "lifecycle": [
+      "runner"
+    ],
+    "standup": [
+      "lifecycle"
+    ]
+  }
+}

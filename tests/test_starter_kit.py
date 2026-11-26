@@ -145,11 +145,12 @@ def test_kit_manifest_template_lists_known_features():
 
 def test_feature_table_lists_dependencies():
     # A feature that needs another must say so, and the example must respect it (#87 review).
+    import json
+    manifest = json.loads((ROOT / "release-files.json").read_text())
+    dependencies = manifest["features"]
+    assert "runner" in dependencies["pool"] and "runner" in dependencies["lifecycle"]
+    assert "lifecycle" in dependencies["standup"]
     text = (ROOT / "docs/versions-and-features.md").read_text()
-    rows = {line.split("|")[1].strip(" `"): line.split("|")[4] for line in text.splitlines()
-            if line.startswith("| `")}
-    assert "`runner`" in rows["pool"] and "`runner`" in rows["lifecycle"]
-    assert "`lifecycle`" in rows["standup"]
     assert "except the lifecycle and stand-up" in text
 
 
@@ -163,7 +164,7 @@ def test_changelog_covers_current_kit_version():
 
 def test_feature_switches_document_lack_of_framework_enforcement():
     text = (ROOT / "docs/versions-and-features.md").read_text()
-    assert "The kit file is not read by framework code today." in text
+    assert "The hosted lifecycle guard reads `features.lifecycle`" in text
     assert "agents are told to read and respect it" in text
     assert "[roadmap](../ROADMAP.md#later)" in text
 
