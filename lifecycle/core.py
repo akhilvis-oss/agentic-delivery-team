@@ -548,6 +548,7 @@ def _record(
 
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "runner_evidence_missing": "The last correction round changed no files and the review still needs changes, usually because it asked for evidence the runner's own checks don't produce. Owner: read the findings; if they name a check, add it to the runner's required check commands, then re-approve to continue from the saved work.",
     "agent_sign_in_failed": "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve.",
     "agent_usage_limit": "The agent reached its usage limit. Owner: re-approve once the limit resets.",
     "dependency_closed_unmerged": "A dependency could not be used. Owner: reconcile the dependency and re-approve.",
@@ -595,6 +596,7 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "runner_evidence_missing": "Needs a fix",
     "agent_sign_in_failed": "Waiting on the system",
     "agent_usage_limit": "Waiting on the system",
     "dependency_closed_unmerged": "Needs your decision",
@@ -1709,8 +1711,8 @@ def job_records(cfg, job):
     head = job.get("head_commit")
     if (
         status == "running_worker"
-        and committed
-        and committed[-1]["round"] == job["round"]
+        and (job["round"] in job.get("evidence_rounds", [])
+             or committed and committed[-1]["round"] == job["round"])
     ):
         target = "committed"
     review = job.get("review", {})

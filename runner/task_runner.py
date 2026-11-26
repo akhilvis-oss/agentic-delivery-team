@@ -65,6 +65,7 @@ class IntegrityError(Blocked):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "runner_evidence_missing": ("runner_evidence_missing", "The last correction round changed no files and the review still needs changes, usually because it asked for evidence the runner's own checks don't produce. Owner: read the findings; if they name a check, add it to the runner's required check commands, then re-approve to continue from the saved work."),
     "owner_withdrew": ("owner_withdrew", "The owner withdrew this story."),
     "agent_sign_in_failed": ("agent_sign_in_failed", "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve."),
     "agent_usage_limit": ("agent_usage_limit", "The agent reached its usage limit. Owner: re-approve once the limit resets."),
@@ -392,7 +393,7 @@ def stable_stat(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def snapshot_entry(config, root, name, previous, policy):
+def snapshot_entry(config, root, name, previous, policy, *, git_mode=False):
     path = checked_commit_path(name, root)
     if denied(name, policy):
         raise CommitRefused("denied_path", [name])
@@ -408,13 +409,14 @@ def snapshot_entry(config, root, name, previous, policy):
         raise CommitRefused("submodule_or_directory_not_supported", [name])
     if stat.S_ISLNK(info.st_mode):
         target = os.readlink(path)
-        try:
-            resolved = path.resolve().relative_to(root).as_posix()
-        except (ValueError, RuntimeError, OSError) as exc:
-            raise CommitRefused("external_or_invalid_symlink", [name]) from exc
-        checked_commit_path(resolved, root)
-        if denied(resolved, policy):
-            raise CommitRefused("denied_symlink_target", [name])
+        if not git_mode:
+            try:
+                resolved = path.resolve().relative_to(root).as_posix()
+            except (ValueError, RuntimeError, OSError) as exc:
+                raise CommitRefused("external_or_invalid_symlink", [name]) from exc
+            checked_commit_path(resolved, root)
+            if denied(resolved, policy):
+                raise CommitRefused("denied_symlink_target", [name])
         if stable_stat(path.lstat()) != stable_stat(info):
             raise CommitRefused("concurrent_change", [name])
         content = os.fsencode(target)
@@ -427,11 +429,14 @@ def snapshot_entry(config, root, name, previous, policy):
             for component in name.split("/")[:-1]:
                 descriptors.append(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                            dir_fd=descriptors[-1]))
-            fd = os.open(name.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
+            fd = os.open(name.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=descriptors[-1])
             with os.fdopen(fd, "rb") as handle:
                 before = os.fstat(handle.fileno())
                 if (not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino)
                         != (info.st_dev, info.st_ino)):
+                    raise CommitRefused("concurrent_change", [name])
+                if git_mode and stable_stat(before) != stable_stat(info):
                     raise CommitRefused("concurrent_change", [name])
                 content = handle.read(policy["max_file_bytes"] + 1)
                 if stable_stat(os.fstat(handle.fileno())) != stable_stat(before):
@@ -441,12 +446,48 @@ def snapshot_entry(config, root, name, previous, policy):
         finally:
             for directory in reversed(descriptors):
                 os.close(directory)
-        mode = "100755" if info.st_mode & 0o111 else "100644"
+        mode = "100755" if info.st_mode & (0o100 if git_mode else 0o111) else "100644"
     else:
         raise CommitRefused("special_file_not_supported", [name])
+    if git_mode and stable_stat(path.lstat()) != stable_stat(info):
+        raise CommitRefused("concurrent_change", [name])
     if len(content) > policy["max_file_bytes"]:
         raise CommitRefused("file_size_limit", [name])
     return mode, content
+
+
+def check_evidence_tree(config, starting_head):
+    """Bind actual tracked bytes/types/Git modes to the raw fixed starting tree.
+
+    The working index (including its stat cache and object ids) is not evidence
+    of file identity. Read the committed inventory in one batch and hash each
+    no-follow snapshot locally, without filters or replacement objects.
+    """
+    root = Path(config["worktree"]).resolve()
+    tree = trusted_git(config, "ls-tree", "-r", "-l", "-z", starting_head,
+                       extra_env={"GIT_NO_REPLACE_OBJECTS": "1"})
+    for row in tree.split(b"\0"):
+        if not row:
+            continue
+        meta, raw_name = row.split(b"\t", 1)
+        mode, kind, oid, size = meta.decode("ascii").split()
+        name = os.fsdecode(raw_name)
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise Blocked("Evidence round requires supported tracked file types")
+        # This is an identity check of already committed files, not a commit
+        # candidate: use the committed size as the read bound, without applying
+        # candidate deny patterns or configured commit-size limits.
+        actual_mode, content = snapshot_entry(
+            config, root, name, (mode, oid),
+            {"deny_patterns": [], "max_file_bytes": int(size)}, git_mode=True)
+        if actual_mode != mode or content is None:
+            raise Blocked("Evidence round tracked file type or mode differs from starting HEAD")
+        header = b"blob " + str(len(content)).encode("ascii") + b"\0"
+        algorithm = "sha1" if len(oid) == 40 else "sha256"
+        digest = hashlib.new(algorithm, header)
+        digest.update(content)
+        if digest.hexdigest() != oid:
+            raise Blocked("Evidence round tracked bytes differ from starting HEAD")
 
 
 @contextlib.contextmanager
@@ -936,6 +977,9 @@ LIFECYCLE_NOTES = {
         "or build check fails because of your own changes, keep correcting within this run, "
         "up to {worker_check_attempts} total check attempts (including the first attempt). "
         "Report ready_for_review only once the required checks pass. "
+        "If a correction needs no file change, for example a request for evidence "
+        "the runner's checks produce, return `ready_for_review` without changes. "
+        "The runner re-runs its checks and asks for a fresh review. "
         "If a check cannot run because of the environment, a dependency or a missing tool, "
         "stop immediately. If the attempts run out, stop. In either case report blocked "
         "with the check name in private results. Failures unrelated to your changes also stop. "
@@ -1881,6 +1925,18 @@ def run_once(config, state=None, client=None, *, task_id=None):
                             job["status"] = escalation_status
                             break
                         job.update(disagreement=disagreement, disagreement_exchanges=1)
+                    elif (lifecycle_cfg and (attempt > 1 or assignment.get("continuation"))
+                          and not dirty_paths(config)):
+                        # Status/diff can hide modified bytes behind assume-unchanged
+                        # or skip-worktree. Refuse untrusted index entries, without
+                        # clearing their flags or reviewing the old head.
+                        if any(row and not row.startswith("H ") for row in
+                               git(config, "ls-files", "-v", "-z").split("\0")):
+                            raise Blocked("Evidence round requires tracked files without index trust flags")
+                        check_evidence_tree(config, before_head)
+                        job["head_commit"] = before_head
+                        job.setdefault("evidence_rounds", []).append(attempt)
+                        save_job(config, path, job)
                     else:
                         runner_commit(config, path, job, before_head)
                 if assignment.get("continuation"):
@@ -1948,6 +2004,10 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         job["review"]["status"] = verdict
                     if job.get("disagreement") and verdict == "needs_changes":
                         job["status"] = escalation_status if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
+                        break
+                    if (verdict == "needs_changes" and attempt == max_attempts
+                            and attempt in job.get("evidence_rounds", [])):
+                        job.update(status="needs_owner", blocked_reason=block_reason("runner_evidence_missing"))
                         break
                     if verdict == "needs_changes" and assignment["lifecycle"]["primary"]:
                         job["status"] = "needs_owner"
