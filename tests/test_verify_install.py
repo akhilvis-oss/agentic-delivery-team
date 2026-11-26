@@ -291,3 +291,32 @@ def test_install_setup_labels_uses_only_trusted_export(adopter, tmp_path):
                                  'PYTHONDONTWRITEBYTECODE': '1'})
     assert not marker.exists()
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize('replacement', ['commit', 'blob'])
+def test_local_git_replacements_cannot_hide_changed_default_branch_bytes(adopter, replacement):
+    # Healthy data still passes; replacement refs must not change what "committed" means.
+    assert verify(adopter)[0] == 0
+    name = 'lifecycle/core.py'
+    good_commit = command(adopter, 'rev-parse', 'HEAD').decode().strip()
+    good_blob = command(adopter, 'rev-parse', good_commit + ':' + name).decode().strip()
+    bad_bytes = b'changed committed framework bytes\n'
+    (adopter / name).write_bytes(bad_bytes)
+    commit(adopter)
+    bad_commit = command(adopter, 'rev-parse', 'HEAD').decode().strip()
+    bad_blob = command(adopter, 'rev-parse', bad_commit + ':' + name).decode().strip()
+    original, substitute = ((bad_commit, good_commit) if replacement == 'commit'
+                            else (bad_blob, good_blob))
+    command(adopter, 'replace', original, substitute)
+    assert command(adopter, '--no-replace-objects', 'show', bad_commit + ':' + name) == bad_bytes
+    assert checker.default_commit(adopter) == bad_commit
+    before = {str(p.relative_to(adopter)): p.read_bytes()
+              for p in adopter.rglob('*') if p.is_file()}
+    code, output = verify(adopter)
+    after = {str(p.relative_to(adopter)): p.read_bytes()
+             for p in adopter.rglob('*') if p.is_file()}
+    assert before == after
+    assert checker.default_commit(adopter) == bad_commit
+    assert code == 1
+    assert name + ' FAIL release bytes' in output
+    assert checker.committed_file(adopter, bad_commit, name) == bad_bytes

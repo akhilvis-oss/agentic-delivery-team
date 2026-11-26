@@ -65,7 +65,8 @@ def git(repo, *args):
     env = {'PATH': os.defpath, 'GIT_CONFIG_NOSYSTEM': '1',
            'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
            'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0',
-           'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': ''}
+           'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': '',
+           'GIT_NO_REPLACE_OBJECTS': '1'}
     if 'SYSTEMROOT' in os.environ:
         env['SYSTEMROOT'] = os.environ['SYSTEMROOT']
     return subprocess.check_output(
