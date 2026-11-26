@@ -1824,14 +1824,24 @@ def watchdog(cfg, client, *, clock=time.time):
     with core.lock(root / "watchdog.lock") as acquired:
         if not acquired:
             return {"status": "locked"}
+        now = clock()
+        run_path = root / "watchdog-run.json"
+        previous = core.read(run_path).get("last_run") if run_path.exists() else None
+        core.save(run_path, {"last_run": now})
         path = root / "watchdog.json"
         journal = core.read(path) if path.exists() else {}
         last = heartbeat(cfg)
-        if last is not None and clock() - last <= threshold:
+        if last is not None and now - last <= threshold:
             core.save(path, {})
             return {"status": "healthy"}
         if journal.get("heartbeat", "missing") != last:
             journal = {"heartbeat": last}
+        if "issue" not in journal and "attempted" not in journal:
+            if "wake" not in journal and previous is not None and now - previous > threshold:
+                journal["wake"] = now
+                core.save(path, journal)
+            if "wake" in journal and 0 <= now - journal["wake"] <= threshold:
+                return {"status": "waiting_after_wake"}
         marker = (
             "<!-- agentic-service-alert-v1:"
             + core.key([cfg["repository"], last])
