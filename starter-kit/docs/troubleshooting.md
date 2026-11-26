@@ -86,7 +86,9 @@ Each code belongs to exactly one kind.
 | Needs a fix | `unexpected_error` | An unexpected error stopped this story only. Ask the operator to investigate the named framework function, then re-approve. The old job will not run again. |
 | Needs a fix | `execution_failed` | Execution stopped or was interrupted. Ask the operator to reconcile the interrupted work, then re-approve. |
 | Needs a fix | `publication_failed`, `publication_uncertain`, `auto_merge_disable_uncertain` | Publishing (including refused writes and failed pushes) or cancelling auto-merge failed or has an unknown outcome. Inspect the PR on GitHub and ask the operator to reconcile it before retrying. |
-| Needs a fix | `stale_head`, `gate_category_higher`, `merge_conditions_missing` | The reviewed head or required evidence is no longer sufficient. Arrange a fresh review or complete the missing evidence on the PR. |
+| Needs a fix | `stale_head`, `gate_category_higher`, `merge_conditions_missing` | The reviewed head or required evidence is no longer sufficient, or target rules changed after drafting. Arrange a fresh review or complete the missing evidence on the PR. |
+| Needs a fix | `pr_evidence_incomplete` | Fixed runner public evidence is missing, repeated or not public-safe for the chosen tier. Fix the public evidence, then re-approve to rebuild from saved work. |
+| Needs a fix | `requirement_ids_unsupported` | The target gate requires requirement IDs for control-critical work. Set `requirement_ids` to null and re-approve, or deliver by hand. |
 | Needs a fix | `approval_not_attested`, `invalid_status_change` | Approval was rejected or the guard restored a stopped status. Read the preceding comment, resolve it and re-approve. |
 | Needs a fix | `delivery_disabled`, `delivery_configuration_invalid` | Delivery is off or its settings are incomplete. Ask the operator to enable delivery or fix its configuration, then re-approve. |
 | Needs a fix | `commit_refused` | The runner refused to commit. Arrange an owner-delivered PR for the refused change before re-approving. |

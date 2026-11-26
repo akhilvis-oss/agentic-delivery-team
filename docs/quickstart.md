@@ -20,7 +20,7 @@ You get one working agreement for every agent, and pull requests reviewed in pro
 1. Copy [`gate/review_gate.py`](../gate/review_gate.py) to `scripts/review_gate.py`.
 2. Copy [`templates/review-gate.example.json`](../templates/review-gate.example.json) to `.github/review-gate.json` and edit:
    - `repo_url` and `allowed_bases`;
-   - `requirement_ids` (your ID scheme, or `null`);
+   - `requirement_ids` (`null` by default; opt in with your ID scheme for manually delivered control-critical PRs);
    - `domain_evidence`: what domain-critical evidence means for your project;
    - the path patterns for each category; add `docs/product/*` to **control-critical** so only you can change scope;
    - `gate_paths`: the gate's own code, config, workflow and tests, which must stay control-critical.

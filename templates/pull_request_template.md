@@ -51,8 +51,8 @@ Hand-worked: REQUIRED: test(s) with hand-calculated expected values, or N/A with
 Point-in-time: REQUIRED: test(s) proving no future data is used, or N/A with reason.
 Missing data: REQUIRED: test(s) for missing/stale inputs, or N/A with reason.
 
-<!-- ===== Control-critical. Delete for other categories. Delete Requirement IDs and
-the IDs column if your config has "requirement_ids": null. ===== -->
+<!-- ===== Control-critical. Delete for other categories. Delete this section unless your config sets `requirement_ids`;
+delete the IDs column too when requirement IDs are off. ===== -->
 ## Requirement IDs
 REQUIRED: explicitly list applicable requirement IDs (no ranges).
 
