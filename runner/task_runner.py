@@ -1876,6 +1876,12 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         job.update(disagreement=disagreement, disagreement_exchanges=1)
                     elif (lifecycle_cfg and (attempt > 1 or assignment.get("continuation"))
                           and not dirty_paths(config)):
+                        # Status/diff can hide modified bytes behind assume-unchanged
+                        # or skip-worktree. Refuse untrusted index entries, without
+                        # clearing their flags or reviewing the old head.
+                        if any(row and not row.startswith("H ") for row in
+                               git(config, "ls-files", "-v", "-z").split("\0")):
+                            raise Blocked("Evidence round requires tracked files without index trust flags")
                         job["head_commit"] = before_head
                         job.setdefault("evidence_rounds", []).append(attempt)
                         save_job(config, path, job)

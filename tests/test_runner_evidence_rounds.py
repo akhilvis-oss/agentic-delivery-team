@@ -163,3 +163,64 @@ def test_no_change_exceptions_remain_refused(tmp_path, monkeypatch, mode):
     else:
         assert job["status"] == "blocked"
         assert job["commit_refusals"][-1]["reason"] == "no_committable_changes"
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+@pytest.mark.parametrize("continuation", [False, True])
+def test_evidence_round_refuses_hidden_tracked_changes(tmp_path, monkeypatch, flag, continuation):
+    if continuation:
+        cfg, hub, runner, old = saved_story(tmp_path, monkeypatch)
+        hub.event(1, "approved", "owner")
+        hub.approve()
+    else:
+        cfg, hub, runner = configured_service(tmp_path, monkeypatch)
+    reviews, checks, hidden = [], [], []
+    original_verify = runner.verify_required_tests
+
+    def verify(config, state, path, job):
+        checks.append(job["round"])
+        return original_verify(config, state, path, job)
+
+    def execute(config, state, path, job, role):
+        job.update(status="running_" + role, updated_at=core.now())
+        runner.save_job(config, path, job)
+        if role == "worker":
+            if not continuation and job["round"] == 1:
+                fixtures.deliver(config)
+            else:
+                head = runner.git(config, "rev-parse", "HEAD")
+                if continuation:
+                    assert head == old["head_commit"]
+                committed = runner.git(config, "show", head + ":delivery.txt")
+                runner.git(config, "update-index", flag, "delivery.txt")
+                tracked = Path(config["worktree"], "delivery.txt")
+                tracked.write_text("hidden modified tracked bytes\n")
+                assert tracked.read_text().rstrip("\n") != committed
+                assert runner.git(config, "rev-parse", "HEAD") == head
+                assert runner.git(config, "status", "--porcelain=v1") == ""
+                assert runner.git(config, "diff", "HEAD", "--binary") == ""
+                assert runner.dirty_paths(config) == []
+                hidden.append((config, head, runner.git(config, "ls-files", "-v")))
+            return fixtures.result("ready_for_review")
+        reviews.append(job["round"])
+        return fixtures.result("needs_changes" if job["round"] == 1 and not continuation
+                               else "ready_for_integration", role)
+
+    monkeypatch.setattr(runner.integration_api(), "advance", lambda *args: None)
+    monkeypatch.setattr(runner, "verify_required_tests", verify)
+    monkeypatch.setattr(runner, "execute", execute)
+    service.poll(cfg, hub.client(), clock=lambda: 200)
+    claim = newest_claim(cfg)
+    job = next(j for j in service.jobs(cfg) if j["id"] == claim["job"])
+    config, starting_head, flags = hidden.pop()
+    assert not hidden
+    assert runner.git(config, "rev-parse", "HEAD") == starting_head
+    assert Path(config["worktree"], "delivery.txt").read_text() == "hidden modified tracked bytes\n"
+    assert runner.git(config, "ls-files", "-v") == flags
+    assert not job.get("evidence_rounds"), (
+        f"hidden modified bytes admitted as an evidence round: checks={checks}, reviews={reviews}, "
+        f"status={job['status']}, unchanged_head={starting_head}"
+    )
+    assert checks == ([] if continuation else [1])
+    assert reviews == ([] if continuation else [1])
+    assert job["status"] == "blocked"
