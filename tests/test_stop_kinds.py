@@ -30,6 +30,7 @@ FIX = {
     "execution_failed", "publication_failed", "publication_uncertain", "stale_head",
     "gate_category_higher", "required_check_failed", "merge_conditions_missing",
     "auto_merge_disable_uncertain", "unexpected_error",
+    "pr_evidence_incomplete", "requirement_ids_unsupported",
 }
 CHECKS = ("preflight", "build", "story_tests", "runner_checks", "prerequisite")
 WAITING = {f"worker_{check}_unavailable" for check in CHECKS} | {"agent_sign_in_failed", "agent_usage_limit"}
@@ -49,11 +50,14 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
         "Needs your decision": 16, "Needs your merge": 1,
-        "Waiting on the system": 7, "Needs a fix": 82,
+        "Waiting on the system": 7, "Needs a fix": 84,
     }
 
 
-@pytest.mark.parametrize("code,kind", sorted(EXPECTED.items()))
+@pytest.mark.parametrize("code,kind", sorted(
+    (min(code for code, value in EXPECTED.items() if value == kind), kind)
+    for kind in set(EXPECTED.values())
+))
 @pytest.mark.parametrize("saved_body", [False, True])
 def test_flush_prefixes_every_stop_at_send_time(tmp_path, code, kind, saved_body):
     cfg = policy(tmp_path)

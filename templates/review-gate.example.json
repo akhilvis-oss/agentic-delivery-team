@@ -5,10 +5,7 @@
     "main",
     "develop"
   ],
-  "requirement_ids": {
-    "pattern": "REQ-\\d{3}",
-    "allowed": null
-  },
+  "requirement_ids": null,
   "scope_acknowledgements": 3,
   "domain_evidence": {
     "section": "Numeric verification",

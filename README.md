@@ -85,8 +85,10 @@ This repository uses its own gate on its own pull requests: [`.github/review-gat
 python -m pip install -r requirements-dev.txt
 python scripts/check_private_content.py
 python -m ruff check .
-python -m pytest -q
+python -m pytest -q -p no:cacheprovider -n auto
 ```
+
+The serial command, `python -m pytest -q -p no:cacheprovider` (without `-n auto`), still works.
 
 ## Licence
 

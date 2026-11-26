@@ -17,8 +17,9 @@ This repository runs its own task lifecycle. Every issue carries one `status:` l
    python -m pip install -r requirements-dev.txt
    python scripts/check_private_content.py
    python -m ruff check .
-   python -m pytest -q
+   python -m pytest -q -p no:cacheprovider -n auto
    ```
+   The serial command, `python -m pytest -q -p no:cacheprovider` (without `-n auto`), still works.
 4. Open a pull request using the template. Declare the review category your changed files require (the `review-gate` check will tell you if it's too low), copy the issue's acceptance criteria verbatim, and report test results exactly as run.
 5. Hand-built PRs use `Refs #N`, rather than closing keywords such as `Closes #N`. After merging, the configured owner finishes the story by adding `status:merged`; wait for the guard's finish record and issue closure. Runner-managed task PRs keep their closing keyword. Close any open runner PR before finishing by hand.
 

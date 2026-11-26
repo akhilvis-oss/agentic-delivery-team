@@ -419,9 +419,43 @@ paths or secrets in it. For domain-critical changes include the configured domai
 evidence labels. For control-critical changes the runner includes a six-column
 matrix and pending structural Checker section; the actual fresh review is posted
 as a separate `Checker: PASS` GitHub review, with `commit_id`, reviewer session and
-receipt link. Custom requirement-ID mappings require operator-provided evidence;
-missing or duplicate sections fail closed at the gate and require reconciliation.
+receipt link. Requirement-ID mappings are not supported in runner PRs. The example gate rules
+default `requirement_ids` to `null`; projects may opt in for manually delivered
+control-critical PRs. A control-critical runner delivery with IDs enabled stops
+before publication with `requirement_ids_unsupported`. Missing, repeated or unsafe
+operator sections stop with `pr_evidence_incomplete` before the push.
 The runner does not infer domain evidence or scope acknowledgements from a PASS.
+
+Before publication, the runner reads the current target branch head and that
+head's `.github/review-gate.json`, then uses the gate's own classification for
+`git diff --no-renames --name-only -z <review_base-or-base_commit> <reviewed head>`.
+The chosen tier is the highest of that minimum, the configured `declared_tier`
+floor, and the first nonblank line under the approved story's `## Review tier`
+or `### Review tier` heading (case-insensitive). The story line must be one of
+`light`, `standard`, `domain-critical`, or `control-critical`; an invalid value
+is ignored and noted without echoing it in the PR's Review tier section.
+The chosen tier is persisted. Older saved deliveries keep their configured tier.
+Unavailable, invalid or unsupported target rules stop as `publication_failed`.
+
+The gate's `validate` and the public-content scanner check a placeholder-receipt
+body before push, and the final body before PR creation. Gate diagnostics stay
+on local standard error; public stop notices use fixed text only. Operator
+`public_evidence` is appended unchanged and should contain:
+
+| Chosen tier / changed paths | Operator-provided sections |
+| --- | --- |
+| Light | None required by the default gate |
+| Standard | `Security review` |
+| Domain-critical | `Security review` and the configured domain-evidence section with every configured label exactly once |
+| Control-critical | `Security review` with all three labelled lines, and `Risk and scope` with every required SCOPE checkbox checked |
+| Any tier that also changes domain-critical paths | The configured domain-evidence section in addition to the tier's sections |
+
+Check this fixed text once against every tier the project's paths can require.
+The runner supplies its own criteria, test evidence and control evidence matrix
+with a pending Checker. It never invents security, risk or domain evidence from
+agent output. Re-approving after either new evidence/requirement-ID stop rebuilds
+from saved work and obtains a fresh review. `declared_tier` stays required and
+`public_evidence` stays optional; there is no new configuration or startup check.
 
 The default required Actions build workflow is `.github/workflows/ci.yml`; set
 `integration.checks_workflow` for a different installed path. The required build
