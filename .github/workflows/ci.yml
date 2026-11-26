@@ -39,7 +39,7 @@ jobs:
       - name: Lint
         run: python -m ruff check --no-cache .
       - name: Tests
-        run: python -m pytest -q -p no:cacheprovider
+        run: python -m pytest -q -p no:cacheprovider -n auto
 
   checks-macos:
     runs-on: macos-15
@@ -62,4 +62,4 @@ jobs:
       - name: Lint
         run: python -m ruff check --no-cache .
       - name: Tests
-        run: python -m pytest -q -p no:cacheprovider
+        run: python -m pytest -q -p no:cacheprovider -n auto
