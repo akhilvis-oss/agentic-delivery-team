@@ -574,7 +574,7 @@ STOP_REASONS = {
     "approval_not_attested": "Approval could not be verified and its label was removed. Owner: resolve conflicting labels, then remove and re-add status:approved to re-approve.",
     "owner_requested_stop": "The task was stopped by a permitted label change. Owner: add any decision under Owner decisions, resolve the reason for stopping, then re-approve.",
     "repository_evidence": "Repository evidence is available, but the task still needs your decision. Owner: answer under Owner decisions, then re-approve.",
-    "prerequisite_failed": "A required tool or safety check couldn't run or failed; owner: fix the prerequisite and authorize a new task.",
+    "prerequisite_failed": "A required tool or safety check couldn't run or failed. Owner: fix it, then re-approve to start again.",
     "assignment_preflight": "Assignment safety checks stopped the task; owner: reconcile the assignment before authorizing a new task.",
     "worker_reported_blocked": "The builder could not finish a required check; owner: ask the operator to fix setup, then re-approve.",
     "reviewer_reported_blocked": "Independent review could not accept the work; owner: resolve the outstanding review before authorizing further correction.",
@@ -807,6 +807,8 @@ def record_body(record):
     explanation = ""
     if record["to"] in {"blocked", "needs-owner", "needs-primary"}:
         explanation = STOP_REASONS.get(record.get("reason"), STOP_REASONS["execution_failed"]) + "\n"
+        if record.get("reason") == "prerequisite_failed" and record.get("continuation"):
+            explanation = "A required tool or safety check couldn't run or failed. Owner: fix it, then re-approve.\n"
         if record.get("reason") == "unexpected_error" and record.get("function"):
             explanation = ("An unexpected error stopped this story only, in "
                            + record["function"]
@@ -869,12 +871,31 @@ def finding_notice(cfg, findings):
     return text
 
 
+def prerequisite_cause(value):
+    """Accept only the runner's fixed prerequisite diagnostics, never raw errors."""
+    if isinstance(value, str) and (value in {
+        "Configured command program unavailable or not executable.",
+        "Agent compatibility check failed.",
+        "Assignment safety preflight failed.",
+        "Runner required checks unavailable or failed.",
+    } or re.fullmatch(r"Configured (?:command|version_command|required check [1-9][0-9]{0,5}) "
+                      r"program missing or not executable", value)):
+        return value
+    return None
+
+
 def notice_body(cfg, client, entry):
     """Render optional job context at transport time without altering the record."""
     record = entry["record"]
     body = entry.get("public_body", record_body(record))
     context = entry.get("notice_context", {})
     extra = ""
+    cause = prerequisite_cause(context.get("prerequisite_cause"))
+    if record.get("reason") == "prerequisite_failed" and cause:
+        extra += cause + "\n\n"
+        if cause == "Agent compatibility check failed.":
+            extra += ("The agent CLI's version check failed: the installed CLI may have changed, "
+                      "or its version command didn't run. Compare it with the runner's pinned `version_pattern`.\n\n")
     if (record["kind"] == "review" and context.get("findings")
             and not record.get("stop_details", {}).get("findings")):
         extra += finding_notice(cfg, context["findings"])
@@ -1809,6 +1830,10 @@ def sync_job(config_path, job, client=None):
                  else [job_withdrawal_record(cfg, job)])
     for record in local:
         context = {}
+        if record.get("reason") == "prerequisite_failed":
+            cause = prerequisite_cause(job.get("blocked_reason", {}).get("reason"))
+            if cause:
+                context["prerequisite_cause"] = cause
         if record["kind"] == "review" and job.get("review", {}).get("findings"):
             context["findings"] = job["review"]["findings"]
         if record.get("reason") == "owner_withdrew":
