@@ -69,3 +69,16 @@ def test_both_workflows_gate_setup_and_guard_without_switch_credentials():
     assert "      - if: steps.kit.outputs.lifecycle == 'on'\n        uses: actions/setup-python@" in text
     guard = text.split('      - name: Validate the label event or synchronize the PR\n')[1]
     assert "if: steps.kit.outputs.lifecycle == 'on'" in guard
+
+
+def test_deep_json_has_only_the_fixed_error_and_no_github_output(tmp_path):
+    source, output = tmp_path / 'kit.json', tmp_path / 'output'
+    source.write_text('{"features":{"lifecycle":' + '[' * 10000 +
+                      '"CANARY-DEEP-JSON"' + ']' * 10000 + '}}')
+    result = subprocess.run([sys.executable, '-I', str(ROOT / 'lifecycle/kit_switch.py'),
+                             '--kit', str(source), '--output', str(output)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0 and result.stdout == ''
+    assert result.stderr == kit_switch.MESSAGE + '\n'
+    assert not output.exists()
+    assert 'CANARY-DEEP-JSON' not in result.stderr

@@ -118,7 +118,7 @@ MIT notice with the copied code and never overwrite the project's own licence. `
   owner stores each base64 PEM using their interactive Keychain tool, with references
   only in their private App-auth config. Do not open their private config afterwards.
   Using the owner's populated private config, run the fixed command
-  `python -m lifecycle.core --config "$PRIVATE_CONFIG" setup-labels`. Ask the owner to
+  `python -I "$EXPORT/lifecycle/core.py" --config "$PRIVATE_CONFIG" setup-labels`. Ask the owner to
   install the matching lifecycle and watchdog launchd templates with unique labels,
   fixed install/Python references and private logs. Start them only with authorization,
   and confirm a fresh heartbeat. `docs/v04-lifecycle-digest.md` supplies the same-tag

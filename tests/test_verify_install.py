@@ -145,7 +145,8 @@ def test_manual_service_install_matches_private_and_framework_sources(adopter, t
 @pytest.mark.parametrize(('comparison', 'expected'), [('ahead', 0), ('identical', 0), ('behind', 1), ('diverged', 1)])
 def test_main_track_service_requires_tag_or_descendant(adopter, tmp_path, monkeypatch, comparison, expected):
     folder = tmp_path / 'versions'
-    current, tag = 'a' * 40, 'b' * 40
+    tag = 'b' * 40
+    current = tag if comparison == 'identical' else 'a' * 40
     install = folder / current / 'install'
     install.mkdir(parents=True)
     files = {'release-files.json': (ROOT / 'release-files.json').read_bytes()}
@@ -155,7 +156,13 @@ def test_main_track_service_requires_tag_or_descendant(adopter, tmp_path, monkey
         path = install / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-    (folder / 'switch').write_text(json.dumps({'current': current, 'ignored': 'CANARY-SWITCH-FIELD'}))
+    from lifecycle import upgrade
+    record = upgrade.empty()
+    record['current'] = current
+    upgrade.write(folder, record)
+    # Exercise the real producer's key=value protocol; ignore all unrelated fields.
+    with (folder / 'switch').open('a') as handle:
+        handle.write('ignored=CANARY-SWITCH-FIELD\n')
     requests = []
     def public(endpoint):
         requests.append(endpoint)
@@ -172,9 +179,12 @@ def test_main_track_service_requires_tag_or_descendant(adopter, tmp_path, monkey
 def test_main_track_service_empty_switch_and_changed_files_fail(adopter, tmp_path, monkeypatch):
     folder = tmp_path / 'versions'
     folder.mkdir()
-    (folder / 'switch').write_text(json.dumps({'current': ''}))
+    from lifecycle import upgrade
+    record = upgrade.empty()
+    upgrade.write(folder, record)
     assert verify(adopter, service_install=folder)[0] == 1
-    (folder / 'switch').write_text(json.dumps({'current': 'a' * 40}))
+    record['current'] = 'a' * 40
+    upgrade.write(folder, record)
     monkeypatch.setattr(checker, 'public_json', lambda path: {'sha': 'b' * 40, 'status': 'ahead'})
     monkeypatch.setattr(checker, 'public_archive', lambda sha: {'runner/task_runner.py': b'expected'})
     path = folder / ('a' * 40) / 'install/runner/task_runner.py'
@@ -232,7 +242,52 @@ def test_service_hash_asset_cannot_substitute_an_older_tag_commit(adopter, tmp_p
     hashes.write_text(json.dumps(asset))
     folder = tmp_path / 'versions'
     folder.mkdir()
-    (folder / 'switch').write_text(json.dumps({'current': 'a' * 40}))
+    from lifecycle import upgrade
+    record = upgrade.empty()
+    record['current'] = 'a' * 40
+    upgrade.write(folder, record)
     monkeypatch.setattr(checker, 'public_json', lambda endpoint: {'sha': 'b' * 40, 'status': 'ahead'})
     code, output = verify(adopter, hashes=hashes, service_install=folder)
     assert code == 1 and 'service FAIL ' in output
+
+
+@pytest.mark.parametrize('text', [
+    'current=\n', 'current\n', 'previous=' + 'a' * 40 + '\n',
+    'current=' + 'a' * 39 + '\n', 'current=' + 'A' * 40 + '\n',
+    'current=' + 'a' * 40 + '\ncurrent=' + 'a' * 40 + '\n',
+    'current=' + 'a' * 40 + '\ncurrent=' + 'b' * 40 + '\n',
+    ' current=' + 'a' * 40 + '\n',
+    'current =' + 'a' * 40 + '\ncurrent=' + 'a' * 40 + '\n',
+    '{"current": "' + 'a' * 40 + '"}\n',
+])
+def test_main_track_switch_refuses_empty_malformed_and_duplicate_current(adopter, tmp_path, monkeypatch, text):
+    folder = tmp_path / 'versions'
+    folder.mkdir()
+    (folder / 'switch').write_text(text + 'notice=CANARY-UNINSPECTED-FIELD\n')
+    calls = []
+    monkeypatch.setattr(checker, 'public_json', lambda endpoint: calls.append(endpoint))
+    code, output = verify(adopter, service_install=folder)
+    assert code == 1 and 'service FAIL ' in output
+    assert calls == []
+    assert 'CANARY-UNINSPECTED-FIELD' not in output
+
+
+def test_install_setup_labels_uses_only_trusted_export(adopter, tmp_path):
+    import os
+    import shlex
+    import sys
+    matches = re.findall(r'`(python[^`]*setup-labels)`', (ROOT / 'INSTALL.md').read_text())
+    assert len(matches) == 1
+    marker = adopter / 'shadow-module-executed'
+    (adopter / 'json.py').write_text(
+        "from pathlib import Path\nPath('shadow-module-executed').touch()\nraise SystemExit(71)\n")
+    args = shlex.split(matches[0])
+    args[0] = sys.executable
+    args = [arg.replace('$EXPORT', str(ROOT)).replace('$PRIVATE_CONFIG', str(tmp_path / 'absent-settings'))
+            for arg in args]
+    # Help reaches imports/entry parsing, but cannot load config, authenticate or write labels.
+    result = subprocess.run([*args, '--help'], cwd=adopter, capture_output=True, text=True,
+                            env={'PATH': os.defpath, 'PYTHONPATH': str(adopter),
+                                 'PYTHONDONTWRITEBYTECODE': '1'})
+    assert not marker.exists()
+    assert result.returncode == 0

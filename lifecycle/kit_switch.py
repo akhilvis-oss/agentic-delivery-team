@@ -15,7 +15,7 @@ def lifecycle_switch(path):
         data = json.loads(Path(path).read_text())
     except FileNotFoundError:
         return "on"
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         raise ValueError(MESSAGE) from None
     if (not isinstance(data, dict) or not isinstance(data.get("features"), dict)
             or type(data["features"].get("lifecycle")) is not bool):

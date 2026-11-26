@@ -161,6 +161,21 @@ def expected_hashes(manifest, hashes):
     return value
 
 
+def current_commit(path):
+    # The production service/launcher write key=value lines. Only current is data
+    # needed by this checker; never validate, evaluate or emit the other values.
+    values = []
+    for line in Path(path).read_text().split('\n'):
+        key, separator, value = line.partition('=')
+        if key.strip() == 'current':
+            if key != 'current' or separator != '=':
+                raise ValueError('Malformed current commit')
+            values.append(value)
+    if len(values) != 1 or not release_files.SHA.fullmatch(values[0]):
+        raise ValueError('Invalid current commit')
+    return values[0]
+
+
 def verify(repo, *, hashes=None, service_install=None, emit=print):
     failed = False
     def result(item, ok, reason):
@@ -204,9 +219,7 @@ def verify(repo, *, hashes=None, service_install=None, emit=print):
             if switch.exists():
                 if switch.is_symlink() or not switch.is_file():
                     raise ValueError('Invalid switch')
-                current = json.loads(switch.read_text())['current']
-                if not isinstance(current, str) or not release_files.SHA.fullmatch(current):
-                    raise ValueError('Invalid switch')
+                current = current_commit(switch)
                 tag = public_json('/commits/' + urllib.parse.quote(asset['tag'], safe=''))['sha']
                 if (not release_files.SHA.fullmatch(tag)
                         or asset['commit'] is not None and asset['commit'] != tag):
