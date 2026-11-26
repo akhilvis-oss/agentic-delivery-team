@@ -393,7 +393,7 @@ def stable_stat(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def snapshot_entry(config, root, name, previous, policy):
+def snapshot_entry(config, root, name, previous, policy, *, git_mode=False):
     path = checked_commit_path(name, root)
     if denied(name, policy):
         raise CommitRefused("denied_path", [name])
@@ -428,11 +428,14 @@ def snapshot_entry(config, root, name, previous, policy):
             for component in name.split("/")[:-1]:
                 descriptors.append(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                            dir_fd=descriptors[-1]))
-            fd = os.open(name.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
+            fd = os.open(name.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=descriptors[-1])
             with os.fdopen(fd, "rb") as handle:
                 before = os.fstat(handle.fileno())
                 if (not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino)
                         != (info.st_dev, info.st_ino)):
+                    raise CommitRefused("concurrent_change", [name])
+                if git_mode and stable_stat(before) != stable_stat(info):
                     raise CommitRefused("concurrent_change", [name])
                 content = handle.read(policy["max_file_bytes"] + 1)
                 if stable_stat(os.fstat(handle.fileno())) != stable_stat(before):
@@ -442,12 +445,48 @@ def snapshot_entry(config, root, name, previous, policy):
         finally:
             for directory in reversed(descriptors):
                 os.close(directory)
-        mode = "100755" if info.st_mode & 0o111 else "100644"
+        mode = "100755" if info.st_mode & (0o100 if git_mode else 0o111) else "100644"
     else:
         raise CommitRefused("special_file_not_supported", [name])
+    if git_mode and stable_stat(path.lstat()) != stable_stat(info):
+        raise CommitRefused("concurrent_change", [name])
     if len(content) > policy["max_file_bytes"]:
         raise CommitRefused("file_size_limit", [name])
     return mode, content
+
+
+def check_evidence_tree(config, starting_head):
+    """Bind actual tracked bytes/types/Git modes to the raw fixed starting tree.
+
+    The working index (including its stat cache and object ids) is not evidence
+    of file identity. Read the committed inventory in one batch and hash each
+    no-follow snapshot locally, without filters or replacement objects.
+    """
+    root = Path(config["worktree"]).resolve()
+    tree = trusted_git(config, "ls-tree", "-r", "-l", "-z", starting_head,
+                       extra_env={"GIT_NO_REPLACE_OBJECTS": "1"})
+    for row in tree.split(b"\0"):
+        if not row:
+            continue
+        meta, raw_name = row.split(b"\t", 1)
+        mode, kind, oid, size = meta.decode("ascii").split()
+        name = os.fsdecode(raw_name)
+        if kind != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise Blocked("Evidence round requires supported tracked file types")
+        # This is an identity check of already committed files, not a commit
+        # candidate: use the committed size as the read bound, without applying
+        # candidate deny patterns or configured commit-size limits.
+        actual_mode, content = snapshot_entry(
+            config, root, name, (mode, oid),
+            {"deny_patterns": [], "max_file_bytes": int(size)}, git_mode=True)
+        if actual_mode != mode or content is None:
+            raise Blocked("Evidence round tracked file type or mode differs from starting HEAD")
+        header = b"blob " + str(len(content)).encode("ascii") + b"\0"
+        algorithm = "sha1" if len(oid) == 40 else "sha256"
+        digest = hashlib.new(algorithm, header)
+        digest.update(content)
+        if digest.hexdigest() != oid:
+            raise Blocked("Evidence round tracked bytes differ from starting HEAD")
 
 
 @contextlib.contextmanager
@@ -1893,6 +1932,7 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         if any(row and not row.startswith("H ") for row in
                                git(config, "ls-files", "-v", "-z").split("\0")):
                             raise Blocked("Evidence round requires tracked files without index trust flags")
+                        check_evidence_tree(config, before_head)
                         job["head_commit"] = before_head
                         job.setdefault("evidence_rounds", []).append(attempt)
                         save_job(config, path, job)
