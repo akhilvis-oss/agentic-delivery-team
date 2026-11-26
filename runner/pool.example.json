@@ -111,6 +111,17 @@
       "-m",
       "pytest",
       "-q"
+    ],
+    [
+      "<ABSOLUTE_PYTHON_EXECUTABLE>",
+      "-m",
+      "ruff",
+      "check",
+      "."
+    ],
+    [
+      "<ABSOLUTE_PYTHON_EXECUTABLE>",
+      "scripts/check_private_content.py"
     ]
   ],
   "stories": [

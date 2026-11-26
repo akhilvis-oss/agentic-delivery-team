@@ -65,6 +65,7 @@ class IntegrityError(Blocked):
 # Only these runner-authored pairs may leave private state. Never publish an
 # exception message, configured argv, or the worker's free-form explanation.
 BLOCK_REASONS = {
+    "runner_evidence_missing": ("runner_evidence_missing", "The last correction round changed no files and the review still needs changes, usually because it asked for evidence the runner's own checks don't produce. Owner: read the findings; if they name a check, add it to the runner's required check commands, then re-approve to continue from the saved work."),
     "owner_withdrew": ("owner_withdrew", "The owner withdrew this story."),
     "agent_sign_in_failed": ("agent_sign_in_failed", "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve."),
     "agent_usage_limit": ("agent_usage_limit", "The agent reached its usage limit. Owner: re-approve once the limit resets."),
@@ -925,6 +926,9 @@ LIFECYCLE_NOTES = {
         "or build check fails because of your own changes, keep correcting within this run, "
         "up to {worker_check_attempts} total check attempts (including the first attempt). "
         "Report ready_for_review only once the required checks pass. "
+        "If a correction needs no file change, for example a request for evidence "
+        "the runner's checks produce, return `ready_for_review` without changes. "
+        "The runner re-runs its checks and asks for a fresh review. "
         "If a check cannot run because of the environment, a dependency or a missing tool, "
         "stop immediately. If the attempts run out, stop. In either case report blocked "
         "with the check name in private results. Failures unrelated to your changes also stop. "
@@ -1870,6 +1874,11 @@ def run_once(config, state=None, client=None, *, task_id=None):
                             job["status"] = escalation_status
                             break
                         job.update(disagreement=disagreement, disagreement_exchanges=1)
+                    elif (lifecycle_cfg and (attempt > 1 or assignment.get("continuation"))
+                          and not dirty_paths(config)):
+                        job["head_commit"] = before_head
+                        job.setdefault("evidence_rounds", []).append(attempt)
+                        save_job(config, path, job)
                     else:
                         runner_commit(config, path, job, before_head)
                 if assignment.get("continuation"):
@@ -1937,6 +1946,10 @@ def run_once(config, state=None, client=None, *, task_id=None):
                         job["review"]["status"] = verdict
                     if job.get("disagreement") and verdict == "needs_changes":
                         job["status"] = escalation_status if job["disagreement"]["kind"] == "technical" and not assignment["lifecycle"]["primary"] else "needs_owner"
+                        break
+                    if (verdict == "needs_changes" and attempt == max_attempts
+                            and attempt in job.get("evidence_rounds", [])):
+                        job.update(status="needs_owner", blocked_reason=block_reason("runner_evidence_missing"))
                         break
                     if verdict == "needs_changes" and assignment["lifecycle"]["primary"]:
                         job["status"] = "needs_owner"
