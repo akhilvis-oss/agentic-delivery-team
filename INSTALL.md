@@ -89,7 +89,7 @@ code from the adopter checkout to install or check the kit.
    feature dependencies. Populate public repository/actor names only in public policy;
    do not put App IDs, key references, paths or credentials there.
 5. When product files are enabled, populate `AGENTS.md`'s build/test commands and product
-   documents with the owner's decisions. Remove `<UPPER_CASE>` placeholders from active
+   documents with the owner's decisions. Remove shipped `<…>` template tokens from active
    Markdown/templates; leave off-feature templates untouched. Gate
    rules are adopter-owned: configure their repository, target branches, path rules,
    domain labels and gate inventory for this project, without weakening gate safety.
@@ -143,7 +143,7 @@ the checker reads its committed `refs/remotes/origin/HEAD`, never the feature wo
 
 ```sh
 git -C "$CHECKOUT" fetch origin
-python -I "$EXPORT/scripts/verify_install.py" --repo "$CHECKOUT" --hashes "$EXPORT/release-hashes.json"
+python3 -I -B "$EXPORT/scripts/verify_install.py" --repo "$CHECKOUT" --hashes "$EXPORT/release-hashes.json"
 ```
 
 When a private service is installed, the owner may add `--service-install` with its
@@ -152,3 +152,13 @@ reads only the switch's `current` field and file bytes; it does not read private
 Stop on any FAIL. Without `--hashes`, it computes expected hashes from its own export.
 Finally have the owner approve one small story, follow it through independent review
 and the normal merge policy, and check its public result. Do not approve as the owner.
+
+To check before merging, add `--ref install-agentic-kit` (or the local upgrade
+branch name). It checks committed local changes, including unpushed commits;
+uncommitted changes are ignored; the default is `origin/HEAD`. A moving branch fails.
+
+The gate workflow is the committed `.github/task-lifecycle.json`
+`trusted_gate_workflow` path, or `.github/workflows/review-gate.yml` when unset.
+A missing configured workflow fails without fallback. The summary is `N passed, M failed`. Placeholder failures name the item and line,
+never values. Fill that destination's shipped template tokens, template repository
+URL and unchanged historical sample domain rule; unrelated notation is allowed.

@@ -13,6 +13,8 @@ import tempfile
 import urllib.parse
 import urllib.request
 
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 # -I excludes caller paths; add only this trusted export, never the adopter.
 sys.path.insert(0, str(ROOT))
@@ -22,8 +24,18 @@ _spec.loader.exec_module(release_files)
 
 REPOSITORY = 'akhilvis-oss/agentic-delivery-team'
 FEATURES = release_files.FEATURES
-PLACEHOLDER = re.compile(r'<[A-Z][^>\r\n]*>')
+PLACEHOLDER = re.compile(r'<[^<>\r\n]+>')
 HEX256 = re.compile(r'[0-9a-f]{64}')
+# Complete historical v0.6.0 sample, independent of later template migrations.
+SAMPLE_DOMAIN_RULE = {
+    'tier': 'domain-critical',
+    'reason': "Logic whose correctness users rely on (replace with your project's core calculations)",
+    'patterns': ['src/pricing/*', 'tests/test_pricing*'],
+}
+
+
+class Fault(ValueError):
+    """Fixed diagnostics only; never include untrusted exception text."""
 
 
 class Parser(argparse.ArgumentParser):
@@ -84,18 +96,30 @@ def default_commit(repo):
     return sha
 
 
-def committed_file(repo, commit, name):
+def local_commit(repo, branch):
+    ref = 'refs/heads/' + branch
+    git(repo, 'check-ref-format', ref)
+    sha = git(repo, 'show-ref', '--verify', '--hash', ref).decode().strip()
+    if (not release_files.SHA.fullmatch(sha)
+            or git(repo, 'cat-file', '-t', sha).strip() != b'commit'):
+        raise ValueError('Invalid local branch')
+    return sha
+
+
+def committed_file(repo, commit, name, *, metadata_only=False):
     release_files.relative(name)
     row = git(repo, 'ls-tree', '-z', commit, '--', name).split(b'\0')
+    if row == [b'']:
+        raise Fault('committed file missing')
     if len(row) != 2 or not row[0].startswith(b'100644 blob ') and not row[0].startswith(b'100755 blob '):
-        raise ValueError('Missing or nonregular committed file')
+        raise Fault('committed file not a regular file')
     oid = row[0].split(b' ', 2)[2].split(b'\t', 1)[0].decode()
     if not release_files.SHA.fullmatch(oid):
         raise ValueError('Invalid committed file')
     size = int(git(repo, 'cat-file', '-s', oid))
     if size > 16 * 1024 * 1024:
-        raise ValueError('Oversized committed file')
-    return git(repo, 'cat-file', 'blob', oid)
+        raise Fault('committed file too large')
+    return b'' if metadata_only else git(repo, 'cat-file', 'blob', oid)
 
 
 def file_bytes(root, name):
@@ -123,12 +147,60 @@ def kit(data):
     return value
 
 
-def validate_adopter(name, data):
+def json_line(text, keys):
+    """Locate the effective JSON value, including last-wins duplicate fields."""
+    decoder = json.JSONDecoder()
+    pos = 0
+    for key in keys:
+        pos += re.search(r'\S', text[pos:]).start()
+        opening, pos, index, selected = text[pos], pos + 1, 0, None
+        while True:
+            pos += re.search(r'\S', text[pos:]).start()
+            if opening == '{':
+                field, pos = decoder.raw_decode(text, pos)
+                pos = text.index(':', pos) + 1
+                pos += re.search(r'\S', text[pos:]).start()
+            else:
+                field = index
+            if field == key:
+                selected = pos
+            _, pos = decoder.raw_decode(text, pos)
+            pos += re.search(r'\S', text[pos:]).start()
+            if text[pos] != ',':
+                break
+            pos += 1
+            index += 1
+        pos = selected
+    return text.count('\n', 0, pos) + 1
+
+
+def validate_adopter(name, data, template=b'', *, repo=None):
+    text = data.decode()
+    tokens = set(PLACEHOLDER.findall(template.decode()))
+    for number, line in enumerate(text.splitlines(), 1):
+        if any(token in line for token in tokens):
+            raise Fault(f'placeholder still unfilled; line {number}')
+    if name == '.github/review-gate.json':
+        value = json.loads(data)
+        rules = value.get('tiers', {}).get('rules', [])
+        keys = None
+        if value.get('repo_url') == json.loads(template).get('repo_url'):
+            keys = ['repo_url']
+        elif SAMPLE_DOMAIN_RULE in rules:
+            keys = ['tiers', 'rules', rules.index(SAMPLE_DOMAIN_RULE)]
+        if keys is not None:
+            raise Fault(f'placeholder still unfilled; line {json_line(text, keys)}')
     if name == '.github/agentic-kit.json':
         kit(data)
     elif name in {'.github/review-gate.json', '.github/task-lifecycle.json'}:
         # Validators read data from a disposable file, never import adopter code.
-        with tempfile.TemporaryDirectory() as folder:
+        # Never trust TMPDIR to be outside the export or adopter checkout.
+        roots = [ROOT.resolve(), Path(repo).resolve()] if repo is not None else [ROOT.resolve()]
+        candidates = [tempfile.tempdir, *(os.environ.get(k) for k in ('TMPDIR', 'TEMP', 'TMP')),
+                      '/tmp', '/var/tmp']
+        scratch = next(Path(p) for p in candidates if p and Path(p).is_dir() and all(
+            not Path(p).resolve().is_relative_to(root) for root in roots))
+        with tempfile.TemporaryDirectory(dir=scratch) as folder:
             path = Path(folder) / 'settings.json'
             path.write_bytes(data)
             if name.endswith('review-gate.json'):
@@ -140,24 +212,31 @@ def validate_adopter(name, data):
                 from lifecycle import core
                 core.load_config(path, local=False)
     elif name.endswith(('.md', '.yml', '.yaml')):
-        if PLACEHOLDER.search(data.decode()):
-            raise ValueError('Unfilled placeholder')
+        pass
     else:
         raise ValueError('Unsupported adopter check')
 
 
 def expected_hashes(manifest, hashes):
     version = kit(file_bytes(ROOT, 'templates/agentic-kit.example.json'))['version']
-    sources = {item['source'] for item in manifest['entries']}
-    computed = {s: hashlib.sha256(file_bytes(ROOT, s)).hexdigest() for s in sources}
+    def computed():
+        return {e['source']: hashlib.sha256(file_bytes(ROOT, e['source'])).hexdigest()
+                for e in manifest['entries']}
     if hashes is None:
-        return {'schema': 1, 'tag': version, 'commit': None, 'files': computed}
+        return {'schema': 1, 'tag': version, 'commit': None, 'files': computed()}
     value = json.loads(Path(hashes).read_text())
     if (not isinstance(value, dict) or set(value) != {'schema', 'tag', 'commit', 'files'}
-            or type(value['schema']) is not int or value['schema'] != 1 or value['tag'] != version
+            or type(value['schema']) is not int or value['schema'] != 1
+            or not isinstance(value['tag'], str) or not release_files.TAG.fullmatch(value['tag'])
             or not isinstance(value['commit'], str) or not release_files.SHA.fullmatch(value['commit'])
-            or not isinstance(value['files'], dict) or value['files'] != computed
-            or any(not HEX256.fullmatch(v) for v in value['files'].values())):
+            or not isinstance(value['files'], dict)
+            or any(not isinstance(v, str) or not HEX256.fullmatch(v) for v in value['files'].values())):
+        raise ValueError('Invalid release hashes')
+    for name in value['files']:
+        release_files.relative(name)
+    if value['tag'] != version:
+        raise Fault('hash file for another tag')
+    if value['files'] != computed():
         raise ValueError('Invalid release hashes')
     return value
 
@@ -177,40 +256,90 @@ def current_commit(path):
     return values[0]
 
 
-def verify(repo, *, hashes=None, service_install=None, emit=print):
-    failed = False
+def verify(repo, *, hashes=None, service_install=None, ref=None, emit=print):
+    passed = failed = 0
     def result(item, ok, reason):
-        nonlocal failed
-        failed |= not ok
+        nonlocal passed, failed
+        passed += bool(ok)
+        failed += not ok
         emit(item + (' PASS ' if ok else ' FAIL ') + reason)
+    def finish():
+        emit(f'{passed} passed, {failed} failed')
+        return int(bool(failed))
+    def stop(item, reason):
+        result(item, False, reason)
+        return finish()
+    if not Path(repo).exists():
+        return stop('install', 'repository path not found')
+    try:
+        git(repo, 'rev-parse', '--git-dir')
+    except Exception:
+        return stop('install', 'not a git repository')
     try:
         manifest = release_files.load_manifest(ROOT)
         asset = expected_hashes(manifest, hashes)
-        commit = default_commit(repo)
-        record = kit(committed_file(repo, commit, '.github/agentic-kit.json'))
+    except Fault as exc:
+        return stop('install', str(exc))
     except Exception:
-        result('install', False, 'release or committed default branch unavailable')
-        return 1
-    result('.github/agentic-kit.json', record['version'] == asset['tag'], 'release version')
+        return stop('install', 'manifest or hash file unreadable or malformed')
+    resolve = (lambda: local_commit(repo, ref)) if ref is not None else lambda: default_commit(repo)
+    try:
+        commit = resolve()
+    except Exception:
+        return stop('install', '--ref not found' if ref is not None else
+                    'no origin/HEAD (run git remote set-head origin --auto)')
+    kit_name = '.github/agentic-kit.json'
+    try:
+        raw = committed_file(repo, commit, kit_name)
+    except Fault as exc:
+        return stop(kit_name, 'kit file missing' if str(exc) == 'committed file missing' else str(exc))
+    except Exception:
+        return stop(kit_name, 'committed file missing')
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict) and not release_files.TAG.fullmatch(str(value.get('version', ''))):
+            return stop(kit_name, 'kit version not of the form vX.Y.Z')
+        record = kit(raw)
+    except Exception:
+        return stop(kit_name, 'public policy invalid')
+    result(kit_name, record['version'] == asset['tag'], 'release version')
     for entry in manifest['entries']:
-        if entry['kind'] not in {'framework', 'adopter'}:
+        if entry['kind'] not in {'framework', 'adopter'} or entry['destination'] == kit_name:
             continue
-        name = entry['destination']
+        name = item = entry['destination']
+        active = entry['kind'] == 'framework' or record['features'][entry['feature']]
+        workflow = entry['source'] == 'templates/review-gate.yml'
+        if workflow:
+            item = 'gate-workflow'
+            if active:
+                try:
+                    policy = json.loads(committed_file(repo, commit, '.github/task-lifecycle.json'))
+                except Exception:
+                    policy = {}  # Disabled policy contents need not be populated.
+                name = policy.get('trusted_gate_workflow', '.github/workflows/review-gate.yml') if isinstance(policy, dict) else name
+        reason = 'release bytes' if entry['kind'] == 'framework' else 'adopter validation'
         try:
-            data = committed_file(repo, commit, name)
+            data = committed_file(repo, commit, name, metadata_only=workflow)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, Fault) else 'committed file missing'
+            if workflow and reason == 'committed file missing':
+                reason = 'gate workflow not found; set `trusted_gate_workflow`'
+            result(item, False, reason)
+            continue
+        try:
             if entry['kind'] == 'framework':
                 ok = hashlib.sha256(data).hexdigest() == asset['files'][entry['source']]
             else:
-                if name == '.github/agentic-kit.json' or record['features'][entry['feature']]:
-                    validate_adopter(name, data)
+                if active and not workflow:
+                    validate_adopter(name, data, file_bytes(ROOT, entry['source']), repo=repo)
+                elif not active:
+                    reason = 'present; feature off, validation skipped'
                 ok = True
+        except Fault as exc:
+            ok, reason = False, str(exc)
         except Exception:
-            ok = False
-        reason = ('release bytes' if entry['kind'] == 'framework' else
-                  'present; feature off, validation skipped'
-                  if name != '.github/agentic-kit.json' and not record['features'][entry['feature']]
-                  else 'adopter validation')
-        result(name, ok, reason)
+            ok, reason = False, 'public policy invalid'
+        result(item, ok, reason)
     if service_install is not None:
         try:
             folder = Path(service_install)
@@ -245,23 +374,24 @@ def verify(repo, *, hashes=None, service_install=None, emit=print):
         except Exception:
             result('service', False, 'release installation unavailable or not current')
     try:
-        unchanged = default_commit(repo) == commit
+        unchanged = resolve() == commit
     except Exception:
         unchanged = False
-    result('default-branch', unchanged, 'committed snapshot unchanged')
-    return int(failed)
+    result('default-branch' if ref is None else 'ref', unchanged, 'committed snapshot unchanged')
+    return finish()
 
 
 def main(argv=None):
     parser = Parser(description=__doc__)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--hashes')
+    parser.add_argument('--ref')
     parser.add_argument('--service-install')
     args = parser.parse_args(argv)
     try:
-        return verify(Path(args.repo), hashes=args.hashes, service_install=args.service_install)
+        return verify(Path(args.repo), hashes=args.hashes, service_install=args.service_install, ref=args.ref)
     except Exception:
-        print('install FAIL verification unavailable')
+        print('install FAIL verification unavailable\n0 passed, 1 failed')
         return 1
 
 

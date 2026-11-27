@@ -126,7 +126,7 @@ export**, never the adopter's scripts:
 
 ```sh
 git -C "$CHECKOUT" fetch origin
-python -I "$EXPORT/scripts/verify_install.py" --repo "$CHECKOUT" --hashes "$EXPORT/release-hashes.json"
+python3 -I -B "$EXPORT/scripts/verify_install.py" --repo "$CHECKOUT" --hashes "$EXPORT/release-hashes.json"
 ```
 
 The owner may add `--service-install` with a manual install folder or a main-track
@@ -135,3 +135,13 @@ adopter code. Without `--hashes`, the checker computes hashes from its own expor
 Every result is an item, PASS or FAIL and a fixed reason. Stop on FAIL; do not conceal
 it or declare the upgrade complete. Follow the normal approval/review policy for the
 first small post-upgrade story. Manual upgrades follow this same runbook.
+
+To check before merging, add `--ref install-agentic-kit` (or the local upgrade
+branch name). It checks committed local changes, including unpushed commits;
+uncommitted changes are ignored; the default is `origin/HEAD`. A moving branch fails.
+
+The gate workflow is the committed `.github/task-lifecycle.json`
+`trusted_gate_workflow` path, or `.github/workflows/review-gate.yml` when unset.
+A missing configured workflow fails without fallback. The summary is `N passed, M failed`. Placeholder failures name the item and line,
+never values. Fill that destination's shipped template tokens, template repository
+URL and unchanged historical sample domain rule; unrelated notation is allowed.
