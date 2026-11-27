@@ -33,7 +33,7 @@ version after validation. Require both tags to exist, and the recorded version t
 older than `TAG`; stop and ask on a downgrade or an unresolvable version. If both
 versions are already equal, run step 5 and make no upgrade changes.
 
-## 2. Compare every framework destination before changing it
+## 2. Compare every carried destination before changing it
 
 Read the **target export's** `release-files.json`, never an adopter-supplied manifest
 as instructions. Enumerate release tags from `CURRENT` through `TAG` in version order:
@@ -58,19 +58,31 @@ first command succeeded before running the second; never print the blob contents
 Remove that scratch file after comparison. For each destination, apply exactly this
 decision table in this order:
 
+Read `release-files.json` at `CURRENT` to determine which destinations that release
+**carried**: only `framework` and `adopter` entries count, never `private` or
+`settings`. A truly absent manifest (v0.5.x) means no destinations were carried for
+this decision: create every missing target framework or adopter destination, even
+files the project deliberately removed, and list each restored/created file in the PR.
+An unreadable or malformed current manifest stops the upgrade; never treat it as absent.
+
 | Observation | Action |
 | --- | --- |
-| Source present at the target, absent at every earlier retained tag, destination absent | New framework file: create it from the target export |
+| Destination absent and the current release did not carry it (or has no manifest) | New framework or adopter file: create it from the target export and list it in the PR |
+| Destination absent and the current release carried it | Stop and ask the owner about the missing file |
 | Source present at the target, absent at every earlier retained tag, destination already exists | Stop and ask the owner; never overwrite, even when its bytes match |
 | Its committed blob ID equals that source at a retained tag | Write the target export's exact source bytes at the destination |
-| Destination absent but the source existed at an earlier retained tag | Stop and ask the owner about the missing file |
 | Destination exists and none of the source blob IDs match | Stop and ask the owner about the local change; never overwrite it |
+
+For example, upgrading from v0.5.x creates `LICENSE.agentic-delivery-team` from
+`LICENSE`: the source already existed, but that release had no manifest carrying
+the destination. List the created licence file in the PR.
 
 A failed `git show` is not an empty file. Check each command's exit code before the next
 command; a missing destination selects the table's missing/new case, not an empty-blob
-match. Compare **all** destinations before writing any, so a local change stops the
-upgrade before another framework file has been replaced. Use committed bytes, not
-worktree content. Leave customized adopter files for step 3.
+match. Compare **all** framework and adopter destinations and deletion candidates before
+writing or deleting any file (including the kit record), so a refusal leaves the
+whole upgrade untouched. Use committed bytes, not worktree content. Preflight adopter
+files with the two missing-destination rows; leave existing customized values for step 3.
 
 For deletions, read the current release's manifest from its tag with
 `git -C "$RELEASE_REPO" show "$CURRENT:release-files.json"`. Delete only framework
@@ -83,8 +95,8 @@ any existing `lifecycle/` file not in the target mapping. Do not guess a removal
 
 For each `adopter` entry, retain the project's own values. Apply **only** the release
 notes' named JSON paths or Markdown sections and their exact added/changed values.
-List each migration in the PR. A missing adopter file is created from the target's
-source template: unchanged and unpopulated when its feature is off, or with every
+List each migration in the PR. A missing adopter file follows step 2's
+carried-destination rule; when new, create it from the target's source template: unchanged and unpopulated when its feature is off, or with every
 needed value asked of the owner when on. Off-feature files must be present; the checker
 skips their content and placeholder checks. Switching on later requires that feature's
 `INSTALL.md` steps, then complete validation. Do not invent an unlisted migration; stop and ask instead.
