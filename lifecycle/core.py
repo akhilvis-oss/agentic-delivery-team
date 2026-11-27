@@ -339,12 +339,16 @@ def is_report(cfg, issue):
     )
 
 
-def state(issue):
+def status_labels(issue):
     names = [x["name"] if isinstance(x, dict) else x for x in issue.get("labels", [])]
-    statuses = [x[7:] for x in names if x.startswith("status:")]
-    if len(statuses) != 1 or statuses[0] not in STATUS_NAMES:
+    return sorted(x for x in names if x.startswith("status:"))
+
+
+def state(issue):
+    statuses = status_labels(issue)
+    if len(statuses) != 1 or statuses[0][7:] not in STATUS_NAMES:
         raise StatusLabelError("Issue needs exactly one known status label")
-    return STATUS_NAMES[statuses[0]]
+    return STATUS_NAMES[statuses[0][7:]]
 
 
 def has_role(cfg, identity, role):
@@ -546,8 +550,12 @@ def _record(
     return record
 
 
+STORY_APPROVAL_STOPS = ("story_author_untrusted", "story_hidden_content")
+
 # Fixed reason codes; agent prose is sanitized separately before publication.
 STOP_REASONS = {
+    "story_author_untrusted": "Only stories written by the owner or the product agent can be approved. Owner: copy what you want into a new story and approve that.",
+    "story_hidden_content": "The story contains hidden text. Owner: remove it and approve again.",
     "runner_evidence_missing": "The last correction round changed no files and the review still needs changes, usually because it asked for evidence the runner's own checks don't produce. Owner: read the findings; if they name a check, add it to the runner's required check commands, then re-approve to continue from the saved work.",
     "agent_sign_in_failed": "The agent couldn't sign in. Owner: ask the operator to restore the agent's sign-in, then re-approve.",
     "agent_usage_limit": "The agent reached its usage limit. Owner: re-approve once the limit resets.",
@@ -596,6 +604,8 @@ STOP_REASONS = {
 # Explicit classification: adding a reason requires choosing its kind here.
 # Keep reason texts and persisted records independent of this presentation table.
 STOP_KINDS = {
+    "story_author_untrusted": "Needs your decision",
+    "story_hidden_content": "Needs a fix",
     "runner_evidence_missing": "Needs a fix",
     "agent_sign_in_failed": "Waiting on the system",
     "agent_usage_limit": "Waiting on the system",
@@ -1271,13 +1281,18 @@ class GitHub:
         )
 
 
-def set_status(client, number, target):
+def set_status(client, number, target, *, rejected_approval=False):
     """Add the target, then remove only other statuses in this issue snapshot."""
     issue = client.issue(number)
     labels = [item["name"] if isinstance(item, dict) else item for item in issue["labels"]]
+    if rejected_approval and (issue["state"] != "open"
+                              or status_labels(issue) not in ([], ["status:draft"])):
+        return None
     desired = "status:" + target
     if desired not in labels:
-        client.request("POST", f"/issues/{number}/labels", {"labels": [desired]})
+        added = client.request("POST", f"/issues/{number}/labels", {"labels": [desired]})
+        if rejected_approval:
+            return added, "status:draft" in labels
     for label in labels:
         if label.startswith("status:") and label != desired:
             remove_status(client, number, label[len("status:"):])
@@ -1495,6 +1510,14 @@ def flush(cfg, client):
                         entry.update(status="superseded", error="owner_withdrew")
                         save(path, entry)
                         continue
+                    story_stop = (record["job"] == "approval-rejected"
+                                  and record["reason"] in STORY_APPROVAL_STOPS)
+                    if story_stop and (remote_issue["state"] != "open"
+                                       or status_labels(remote_issue) != ["status:needs-owner"]):
+                        # A rejection notice can only confirm an applied stop.
+                        entry.update(status="superseded", error="rejected_approval_state_changed")
+                        save(path, entry)
+                        continue
                     current = state(remote_issue)
                     # A PR-open event may arrive after the runner handed the
                     # story to the owner. Guard transport too, so queued intents
@@ -1507,6 +1530,12 @@ def flush(cfg, client):
                     canonical, latest = canonical_state(
                         cfg, client.events(record["issue"])
                     )
+                    if (story_stop and latest is not None and int(latest["id"]) > record["event"]
+                            and (canonical != "needs-owner"
+                                 or latest.get("actor", {}).get("login") != cfg["actors"]["workflow"])):
+                        entry.update(status="superseded", error="rejected_approval_state_changed")
+                        save(path, entry)
+                        continue
                     newer_approval = (
                         current == canonical == "approved"
                         and latest is not None
@@ -1925,6 +1954,30 @@ def canonical_state(cfg, events):
     return current, latest
 
 
+_STORY_HIDDEN = re.compile(
+    r"(?P<comment><!--)"
+    r"|(?P<reference>^[ \t]*(?:>[ \t]*|(?:[-+*]|[0-9]+[.)])[ \t]+)*"
+    r"\[(?:\\.|[^\[\]\\])+\]:)"
+    "|(?P<character>[\u202a-\u202e\u2066-\u2069\U000e0000-\U000e007f]"
+    "|[\u00ad\u061c\u200b-\u200f\u2060-\u2064\ufeff"
+    "\ufe00-\ufe0f\U000e0100-\U000e01ef]{2})"
+)
+
+
+def story_hidden_content(body):
+    """Describe the first literal hidden construct or character and its line."""
+    for number, line in enumerate(body.splitlines(), 1):
+        if match := _STORY_HIDDEN.search(line):
+            if match.lastgroup == "character":
+                construct = f"U+{ord(match[0][0]):04X}"
+            elif match.lastgroup == "comment":
+                construct = "HTML comment"
+            else:
+                construct = "link reference definition"
+            return f"{construct} on line {number}"
+    return None
+
+
 def attest_approval(cfg, client, event):
     if (
         event.get("action") != "labeled"
@@ -1982,11 +2035,7 @@ def _attest_approval(cfg, client, event):
             )})
         raise Unavailable("Approval snapshot is stale or ambiguous; current approval preserved")
 
-    def statuses(snapshot):
-        names = [x["name"] if isinstance(x, dict) else x for x in snapshot["labels"]]
-        return sorted(x for x in names if x.startswith("status:"))
-
-    def reject_labels(message="Approval needs valid status labels and an owner label event"):
+    def reject_labels(message="Approval needs valid status labels and an owner label event", reason=None):
         # Preserve a proven current event, never a historical approval cycle.
         # Without history, even an identical story and timestamp cannot prove
         # this is a replay: a new approval may share both in the same second.
@@ -2018,6 +2067,8 @@ def _attest_approval(cfg, client, event):
             removal_error = exc
         rejected = int(latest["id"]) if latest is not None else 0
         marker = f"<!-- agentic-approval-rejected:{rejected}:" + key(issue) + " -->"
+        if reason:
+            marker += f"\n<!-- agentic-story-rejected:{rejected}:{reason} -->"
         try:
             comments = client.comments(issue["number"])
         except Unavailable:
@@ -2028,19 +2079,20 @@ def _attest_approval(cfg, client, event):
                    "Owner: remove that label yourself before retrying. ")
         if not any(marker in c.get("body", "") and c.get("user", {}).get("login")
                    == cfg["actors"]["workflow"] for c in comments):
+            explanation = message + " " + removal if reason else (
+                "Approval could not be attested: the owner event, status labels or "
+                "approved story snapshot were unavailable or ambiguous. " + removal
+                + "Only the configured owner can approve. "
+                "To retry, resolve conflicting status labels; status:draft may stay. "
+                "Then, as the owner, remove status:approved if present and add it again. "
+                "The guard replaces draft. The transition must still be allowed "
+                "from the last permitted status in the issue history."
+            )
             try:
                 client.request(
                     "POST",
                     f"/issues/{issue['number']}/comments",
-                    {"body": (
-                        "Approval could not be attested: the owner event, status labels or "
-                        "approved story snapshot were unavailable or ambiguous. " + removal
-                        + "Only the configured owner can approve. "
-                        "To retry, resolve conflicting status labels; status:draft may stay. "
-                        "Then, as the owner, remove status:approved if present and add it again. "
-                        "The guard replaces draft. The transition must still be allowed "
-                        "from the last permitted status in the issue history.\n" + marker
-                    )},
+                    {"body": explanation.rstrip() + "\n" + marker},
                 )
             except Unavailable:
                 if removal_error is not None:
@@ -2048,6 +2100,9 @@ def _attest_approval(cfg, client, event):
                 raise
         if removal_error is not None:
             raise removal_error
+        if reason:
+            # A workflow token's label removal does not start another guard run.
+            guard_issue(cfg, client, issue["number"], rejected_approval=rejected)
         raise Unavailable(message)
 
     owner = event.get("sender", {}).get("login") == cfg["actors"]["owner"]
@@ -2056,7 +2111,7 @@ def _attest_approval(cfg, client, event):
         events = client.events(issue["number"])
         canonical, latest = canonical_state(cfg, events)
         live = client.issue(issue["number"])
-        snapshots = [statuses(issue), statuses(live)]
+        snapshots = [status_labels(issue), status_labels(live)]
     except Unavailable:
         reject_labels("Approval evidence unavailable; re-approve")
     timestamp_matches = [e for e in events
@@ -2105,7 +2160,13 @@ def _attest_approval(cfg, client, event):
     ]
     if len(candidates) != 1 or latest != candidates[0] or canonical != "approved":
         reject_labels("Approval event snapshot is unavailable or ambiguous; re-approve")
-    scope = hashlib.sha256((issue.get("body") or "").encode()).hexdigest()
+    if (issue.get("user") or {}).get("login") not in {cfg["actors"]["owner"], cfg["actors"]["product"]}:
+        reject_labels(STOP_REASONS["story_author_untrusted"], "story_author_untrusted")
+    body = issue.get("body") or ""
+    hidden = story_hidden_content(body)
+    if hidden:
+        reject_labels(hidden + ". " + STOP_REASONS["story_hidden_content"], "story_hidden_content")
+    scope = hashlib.sha256(body.encode()).hexdigest()
     try:
         comments = client.comments(issue["number"])
     except Unavailable:
@@ -2135,7 +2196,7 @@ def _attest_approval(cfg, client, event):
                 remove_status(client, issue["number"], "draft")
             except Unavailable:
                 reject_labels("Approval label cleanup failed; re-approve")
-        if statuses(client.issue(issue["number"])) != ["status:approved"]:
+        if status_labels(client.issue(issue["number"])) != ["status:approved"]:
             reject_labels()
     record = public_record(
         cfg,
@@ -2244,9 +2305,36 @@ def restoration_noticed(cfg, comments, number, event, target):
     return False
 
 
-def guard_issue(cfg, client, number):
+def label_rejected_story(cfg, client, number, rejected):
+    """Publish a stop only after the rejected approval label has gone."""
+    # Additive POST and a targeted draft cleanup cannot delete a new approval.
+    applied = set_status(client, number, "needs-owner", rejected_approval=True)
+    if applied is None:
+        return False
+    labels, had_draft = applied
+    observed = status_labels({"labels": labels})
+    if had_draft and observed == ["status:draft", "status:needs-owner"]:
+        labels = remove_status(client, number, "draft")
+        observed = status_labels({"labels": labels})
+    if observed == ["status:needs-owner"]:
+        return True
+    if "status:needs-owner" in observed:
+        stop_event = max((e for e in client.events(number)
+                          if e.get("label", {}).get("name") == "status:needs-owner"),
+                         key=lambda e: int(e["id"]), default=None)
+        if (stop_event and int(stop_event["id"]) > rejected and stop_event["event"] == "labeled"
+                and stop_event.get("actor", {}).get("login") == cfg["actors"]["workflow"]):
+            remove_status(client, number, "needs-owner")
+    return False
+
+
+def guard_issue(cfg, client, number, *, rejected_approval=None):
     events = client.events(number)
     canonical, event = canonical_state(cfg, events)
+    if rejected_approval is not None and (
+        canonical != "approved" or event is None or int(event["id"]) != rejected_approval
+    ):
+        return False
     issue = client.issue(number)
     if is_report(cfg, issue):
         return False
@@ -2271,13 +2359,25 @@ def guard_issue(cfg, client, number):
             for c in comments):
         if not permitted(cfg, canonical, "needs-owner", cfg["actors"]["workflow"]):
             return False
-        client.set_state(number, "needs-owner")
+        reason = next((code for c in comments for code in STORY_APPROVAL_STOPS
+                       if c.get("user", {}).get("login") == cfg["actors"]["workflow"]
+                       and f"<!-- agentic-story-rejected:{event['id']}:{code} -->" in c.get("body", "")),
+                      "approval_not_attested")
+        if reason in STORY_APPROVAL_STOPS:
+            if not label_rejected_story(cfg, client, number, int(event["id"])):
+                return False
+        elif rejected_approval is not None:
+            return False
+        else:
+            client.set_state(number, "needs-owner")
         record = public_record(cfg, number, "approval-rejected", 0, "needs-owner",
-                               event=int(event["id"]), reason="approval_not_attested")
+                               event=int(event["id"]), reason=reason)
         record.update({"from": canonical, "actor": cfg["actors"]["workflow"]})
         queue(cfg, record, role="workflow")
         flush(cfg, client)
         return True
+    if rejected_approval is not None:
+        return False
     # Reconcile labels from current history, but only the authenticated owner
     # approval webhook can bind the approved body. A live body can have changed
     # within the event's timestamp second; never manufacture a snapshot here.
@@ -2647,12 +2747,14 @@ def followups(cfg, job, client):
             )
             if record["status"] == "posted":
                 continue
-            marker = "<!-- agentic-followup-v1:" + identity + " -->"
+            marker = "Follow-up: " + identity
+            legacy_marker = "<!-- agentic-followup-v1:" + identity + " -->"
             matches = [
                 i
                 for i in client.pages("/issues?state=all")
-                if i.get("user", {}).get("login") == cfg["actors"]["product"]
-                and marker in (i.get("body") or "")
+                if (i.get("user") or {}).get("login") == cfg["actors"]["product"]
+                and (legacy_marker in (i.get("body") or "")
+                     or marker in (i.get("body") or "").splitlines())
             ]
             if matches:
                 record.update(status="posted", issue=matches[0]["number"])

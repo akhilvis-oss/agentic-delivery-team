@@ -74,7 +74,7 @@ def test_minor_followups_show_each_own_sanitized_finding_before_marker(tmp_path)
     job['review_history'] = [dict(round=1, head='a' * 40, result={'findings': items})]
     core.followups(cfg, job, hub.client('product'))
     for index, issue in enumerate([hub.issues[2], hub.issues[3]]):
-        prose, _ = issue['body'].split('<!-- agentic-followup-v1:')
+        prose, _ = issue['body'].split('Follow-up: ')
         finding = items[index]
         assert 'P2 — ' + core.public_quote(cfg, finding['criterion'], 100) in prose
         assert core.public_quote(cfg, finding['detail'], 600) in prose

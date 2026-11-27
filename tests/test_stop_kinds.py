@@ -14,6 +14,7 @@ from test_runner_integration import advance, delivery, integration, runner, setu
 
 # Independent specification: explicit fixed codes and all generated check cases.
 DECISION = {
+    "story_author_untrusted",
     "owner_question", "question_withheld", "scope_change", "acceptance_criteria_change",
     "story_approval", "clarification_unverified", "product_request_unclassified",
     "repository_evidence", "approved_scope_changed", "pr_closed_unmerged",
@@ -22,6 +23,7 @@ DECISION = {
 }
 MERGE = {"owner_merge_required"}
 FIX = {
+    "story_hidden_content",
     "runner_evidence_missing",
     "checks_worktree_changed",
     "commit_refused", "delivery_disabled", "delivery_configuration_invalid",
@@ -50,8 +52,8 @@ def test_every_stop_has_exactly_one_specified_kind():
     assert set(EXPECTED) == set(core.STOP_REASONS)
     assert core.STOP_KINDS == EXPECTED
     assert Counter(core.STOP_KINDS.values()) == {
-        "Needs your decision": 16, "Needs your merge": 1,
-        "Waiting on the system": 7, "Needs a fix": 85,
+        "Needs your decision": 17, "Needs your merge": 1,
+        "Waiting on the system": 7, "Needs a fix": 86,
     }
 
 

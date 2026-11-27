@@ -80,6 +80,8 @@ See the [roadmap](ROADMAP.md): next are runner-coordinated parallel lanes and fa
 
 ## Contributing and security
 
+Approving a story authorizes agent instructions and test execution. Read the [security model](docs/security-model.md) before approving stories.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md); report vulnerabilities privately, not in public issues. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 This repository uses its own gate on its own pull requests: [`.github/review-gate.json`](.github/review-gate.json) is both its config and a worked example. Local checks:

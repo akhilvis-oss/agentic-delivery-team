@@ -535,7 +535,7 @@ def run(cfg, candidate, *, clock=time.monotonic, sleep=time.sleep, completed=Non
                 raise failure from None
             policy = runner = None
             number = child = None
-            marker = "<!-- agentic-smoke-run:" + uuid.uuid4().hex + " -->"
+            marker = "Smoke run: " + uuid.uuid4().hex
             creation_attempted = False
             step = "admission"
             try:
