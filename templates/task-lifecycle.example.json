@@ -431,7 +431,7 @@
   "runner_config": "<ABSOLUTE_PRIVATE_RUNNER_CONFIG>",
   "primary_runner_config": "<ABSOLUTE_PRIVATE_PRIMARY_RUNNER_CONFIG>",
   "product_token_env": "PRODUCT_GITHUB_TOKEN",
-  "trusted_gate_workflow": ".github/workflows/pr-review-gate.yml",
+  "trusted_gate_workflow": ".github/workflows/review-gate.yml",
   "public_assumption_codes": [],
   "identity_roles": {
     "<OWNER_LOGIN>": [

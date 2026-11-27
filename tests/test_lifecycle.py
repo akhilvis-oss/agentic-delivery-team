@@ -1247,12 +1247,12 @@ def test_partial_or_name_colliding_gate_is_not_pass(tmp_path):
     original = client.request
 
     def request(method, path, data=None):
-        if path == "/actions/workflows/pr-review-gate.yml":
-            return {"id": 7, "path": ".github/workflows/pr-review-gate.yml"}
+        if path == "/actions/workflows/review-gate.yml":
+            return {"id": 7, "path": ".github/workflows/review-gate.yml"}
         if path == "/actions/runs/90":
             return dict(
                 workflow_id=7,
-                path=".github/workflows/pr-review-gate.yml",
+                path=".github/workflows/review-gate.yml",
                 event="pull_request",
                 head_sha=pr["head"]["sha"],
                 pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
@@ -1288,7 +1288,7 @@ def gate_evidence(tmp_path):
     )
     run = dict(
         workflow_id=7,
-        path=".github/workflows/pr-review-gate.yml",
+        path=".github/workflows/review-gate.yml",
         event="pull_request_target",
         head_sha=pr["head"]["sha"],
         pull_requests=[{"number": 7, "head": {"sha": pr["head"]["sha"]}}],
@@ -1300,7 +1300,7 @@ def gate_evidence(tmp_path):
         if "/check-runs" in path:
             assert path == f"/commits/{pr['head']['sha']}/check-runs?filter=all&per_page=100&page=1"
             return {"total_count": len(checks), "check_runs": checks}
-        if path == "/actions/workflows/pr-review-gate.yml":
+        if path == "/actions/workflows/review-gate.yml":
             return {"id": 7, "path": run["path"]}
         if path.startswith("/actions/runs/"):
             return runs[path.rsplit("/", 1)[-1]]
@@ -2301,3 +2301,23 @@ def test_delayed_guard_cannot_attest_same_second_body_edit(tmp_path, draft_selec
     assert proof["event"] == latest["id"]
     assert proof["scope_sha256"] == hashlib.sha256(approval["issue"]["body"].encode()).hexdigest()
     assert proof["scope_sha256"] != hashlib.sha256(client.issue(1)["body"].encode()).hexdigest()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_trusted_gate_default_or_explicit_legacy_workflow(gate_evidence, legacy):
+    cfg, client, pr, _, run, _, _ = gate_evidence
+    assert cfg.pop("trusted_gate_workflow") == ".github/workflows/review-gate.yml"
+    if legacy:
+        cfg["trusted_gate_workflow"] = run["path"] = ".github/workflows/pr-review-gate.yml"
+        existing_request = client.request
+
+        def request(method, path, data=None):
+            # This project serves only its explicitly configured workflow.
+            if path.startswith("/actions/workflows/"):
+                assert path == "/actions/workflows/pr-review-gate.yml"
+                return {"id": 7, "path": run["path"]}
+            return existing_request(method, path, data)
+
+        client.request = request
+    run["pull_requests"][0]["base"] = {"sha": pr["base"]["sha"]}
+    assert core.trusted_gate(cfg, client, pr, strict_snapshot=True) == "pass"

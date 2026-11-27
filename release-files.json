@@ -226,7 +226,7 @@
     },
     {
       "source": "starter-kit/docs/troubleshooting.md",
-      "destination": "docs/troubleshooting.md",
+      "destination": "docs/agentic-delivery-troubleshooting.md",
       "kind": "framework"
     },
     {
@@ -238,7 +238,7 @@
       "source": "starter-kit/AGENTS.md",
       "destination": "AGENTS.md",
       "kind": "adopter",
-      "feature": "product_files"
+      "feature": "review_gate"
     },
     {
       "source": "starter-kit/docs/product/vision.md",

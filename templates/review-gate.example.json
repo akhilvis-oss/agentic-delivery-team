@@ -46,14 +46,6 @@
         ]
       },
       {
-        "tier": "domain-critical",
-        "reason": "Logic whose correctness users rely on (replace with your project's core calculations)",
-        "patterns": [
-          "src/pricing/*",
-          "tests/test_pricing*"
-        ]
-      },
-      {
         "tier": "light",
         "reason": "Documentation and tests not covering domain or control code",
         "patterns": [

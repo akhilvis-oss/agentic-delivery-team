@@ -312,10 +312,10 @@ class Client:
                 "app": {"slug": "github-actions"},
                 "details_url": "https://github.com/example/kit/actions/runs/7/job/8"}]
             return {"total_count": len(checks), "check_runs": checks}
-        if path == "/actions/workflows/pr-review-gate.yml":
-            return {"id": 7, "path": ".github/workflows/pr-review-gate.yml"}
+        if path == "/actions/workflows/review-gate.yml":
+            return {"id": 7, "path": ".github/workflows/review-gate.yml"}
         if path == "/actions/runs/7":
-            return {"workflow_id": 7, "path": ".github/workflows/pr-review-gate.yml",
+            return {"workflow_id": 7, "path": ".github/workflows/review-gate.yml",
                     "event": "pull_request_target", "head_sha": self.job["head_commit"],
                     "pull_requests": [deepcopy(self.pr)]}
         if "/check-runs?" in path:

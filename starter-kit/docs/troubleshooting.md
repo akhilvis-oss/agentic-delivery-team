@@ -136,7 +136,7 @@ that the latest saved work is used.
 
 With an open PR, re-approval or restart stops with `pr_open_reapproval` (Needs your
 decision). Close the PR and re-approve to rebuild, or merge it and add
-`status:merged` to finish (#184). The old delivery loop ends permanently without
+`status:merged` to finish. The old delivery loop ends permanently without
 another notice; the PR and auto-merge setting stay as they are. A merge may first
 produce a public "blocked → merged was rejected" comment and one failing lifecycle
 check; adding `status:merged` finishes the story. Auto-merge may still merge it
@@ -207,15 +207,15 @@ repeat, investigate privately using the reported class and function; do not past
 private responses or logs into an issue.
 
 Run `serve` under the supplied `lifecycle-serve.plist.example` launchd template
-with `KeepAlive`, as described in the [lifecycle guide](../../docs/v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
+with `KeepAlive`, as described in the [lifecycle guide](https://github.com/akhilvis-oss/agentic-delivery-team/blob/v0.6.0/docs/v04-lifecycle-digest.md#optional-owner-run-macos-login-setup).
 It restarts the process after unexpected errors. The kit does not install it.
 A framework service can instead opt into the upgrade launcher and
 `lifecycle-serve-upgrade.plist.example`; release-tag upgrades are not yet supported.
 An adopting project can use that launcher with paired `framework_repository` and
 `framework_runner` settings to follow public framework `main`, while its owner
 maintains copied workflows, guard, gate and rules by hand (see
-[Upgrading](../../docs/quickstart.md#upgrading)). A refused commit stays refused until the operator investigates and
-runs `python -m lifecycle.service --config <private-config> upgrade-clear <40-hex-commit>`.
+[Upgrading](https://github.com/akhilvis-oss/agentic-delivery-team/blob/v0.6.0/docs/quickstart.md#upgrading)). A refused commit stays refused until the operator investigates and
+runs `python3 -m lifecycle.service --config <private-config> upgrade-clear <40-hex-commit>`.
 Clearing takes the poll lock and refuses while it is held; retry later. If a clear
 races launcher startup it may be lost, so run it again. Upgrade and rollback
 notices persist in the status comment. Under `serve`, an unconfirmed pending

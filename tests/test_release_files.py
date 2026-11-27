@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -478,3 +480,222 @@ def test_upgrade_requires_committed_default_and_clean_worktree(upgrade_trial, pr
     with pytest.raises((ValueError, subprocess.CalledProcessError)):
         _scripted_upgrade(upgrade_trial)
     assert _trial_snapshot(project) == before
+
+
+# Test-only reference for the first-install runbook. The kit ships no installer.
+def _install_contract():
+    text = (ROOT / 'INSTALL.md').read_text()
+    prose = ' '.join(text.replace('`', '').split())
+    for phrase in (
+            'Review gate only, about 30 minutes, macOS, Linux or WSL2',
+            'Full lifecycle and runner (macOS)',
+            'POSIX shell', 'native Windows', 'python3 3.11 or later',
+            'GitHub CLI', 'gh auth status', 'Actions minutes', 'agent usage',
+            'GitHub Free', 'gate runs but cannot block merges',
+            'git -C "$CHECKOUT" remote set-head origin --auto',
+            '<!-- added by agentic-delivery-team vX.Y.Z -->',
+            "AGENTS.md and .github/pull_request_template.md.** Keep the project's file. "
+            'Append each missing kit section (a ## heading and its content) beneath one',
+            'If the project already has that heading, keep that section unchanged and list it in the PR.',
+            "Stop and ask the owner if the project's rules conflict with the kit's owner authority or merge rules",
+            'agents may merge', 'push to the default branch',
+            "docs/product/*.** Keep the project's file byte for byte and list it in the PR.",
+            'For every other existing adopter file, including a JSON config or workflow, stop and ask the owner. '
+            'Do not merge into it or overwrite it.',
+            'Existing GitHub rulesets stay with the owner.',
+            'For an existing framework file, stop and ask the owner.',
+            'A repeat install leaves existing files unchanged.',
+            'Refuse symlinks, absolute paths and parent traversal',
+            'preflight before writing any file',
+            'docs/agentic-delivery-troubleshooting.md',
+            "remove the kit's explanatory HTML comments",
+    ):
+        assert phrase in (text if phrase.startswith('<!--') else prose), phrase
+    assert not re.search(r'`python(?:[ \t]|`)|(?m:^[ \t]*python(?:[ \t]|$))', text)
+
+
+def _install_path(root, name):
+    components = release_files.relative(name).split('/')
+    path = root
+    for component in components:
+        path /= component
+        if path.is_symlink():
+            raise ValueError('refuse symlink')
+    return path
+
+
+def _merge_install_sections(current, template, tag):
+    existing = current.decode()
+    if re.search(r'agents may merge|(?<!never )push to the default branch', existing, re.I):
+        raise ValueError('contradictory owner or merge rule')
+    sections = re.split(r'(?m)^## ', template)[1:]
+    headings = set(re.findall(r'(?m)^## (.+)$', existing))
+    matched, added = [], []
+    for section in sections:
+        title, _, _ = section.partition('\n')
+        (matched if title in headings else added).append(section)
+    if added:
+        marker = f'<!-- added by agentic-delivery-team {tag} -->'
+        addition = '\n\n' + marker + '\n\n' + '\n'.join('## ' + section for section in added)
+        current += addition.encode()
+    return current, [section.splitlines()[0] for section in matched]
+
+
+def _reference_first_install(release, project, manifest):
+    _install_contract()
+    record = json.loads((release / 'templates/agentic-kit.example.json').read_bytes())
+    tag = record['version']
+    writes, retained = {}, {}
+    for entry in manifest['entries']:
+        kind, name = entry['kind'], entry['destination']
+        if kind not in {'framework', 'adopter'}:
+            continue
+        source = _install_path(release, entry['source'])
+        dest = _install_path(project, name)
+        data = source.read_bytes()
+        if name == 'AGENTS.md':
+            data = re.sub(rb'<[^<>\r\n]+>', b'example', data)
+        elif name == '.github/pull_request_template.md':
+            data = re.sub(rb'<!--.*?-->\n?', b'', data, flags=re.S)
+        if dest.exists():
+            if kind == 'adopter' and name in {'AGENTS.md', '.github/pull_request_template.md'}:
+                data, matched = _merge_install_sections(dest.read_bytes(), data.decode(), tag)
+                retained[name] = matched
+            elif kind == 'adopter' and name.startswith('docs/product/'):
+                retained[name] = []
+                continue
+            else:
+                raise ValueError('existing framework or other adopter file')
+        if name == '.github/review-gate.json':
+            policy = json.loads(data)
+            policy.update(repo_url='https://github.com/example/project', allowed_bases=['main'])
+            data = json.dumps(policy).encode()
+        writes[name] = data
+    for name, data in writes.items():
+        _trial_write(project, name, data)
+    return retained
+
+
+@pytest.mark.parametrize('name', ['AGENTS.md', '.github/pull_request_template.md'])
+def test_existing_install_documents_keep_only_overlapping_owner_sections(tmp_path, name):
+    project = tmp_path / 'repo'
+    manifest = release_files.load_manifest(ROOT)
+    entry = next(e for e in manifest['entries'] if e['destination'] == name)
+    template = (ROOT / entry['source']).read_text()
+    headings = re.findall(r'(?m)^## (.+)$', template)
+    retained = 'How work is done' if name == 'AGENTS.md' else headings[0]
+    existing = f'# Owner title\n\n## {retained}\n\nOwner text and <BUILD_COMMAND>.\n'.encode()
+    _trial_write(project, name, existing)
+    _trial_write(project, 'docs/product/vision.md', b'Owner vision')
+    kept = _reference_first_install(ROOT, project, manifest)
+
+    assert kept == {name: [retained], 'docs/product/vision.md': []}
+    assert (project / 'docs/product/vision.md').read_bytes() == b'Owner vision'
+    installed = (project / name).read_bytes()
+    assert installed.startswith(existing)
+    if name == 'AGENTS.md':
+        assert b'\n## Working agreement\n' in installed
+    tag = json.loads((ROOT / 'templates/agentic-kit.example.json').read_bytes())['version']
+    assert installed.count(f'<!-- added by agentic-delivery-team {tag} -->'.encode()) == 1
+    assert re.findall(rb'(?m)^## (.+)$', installed) == [
+        s.encode() for s in [retained, *(h for h in headings if h != retained)]]
+    snapshot = _trial_snapshot(project)
+    with pytest.raises(ValueError, match='existing framework'):
+        _reference_first_install(ROOT, project, manifest)
+    assert _trial_snapshot(project) == snapshot
+
+
+@pytest.mark.parametrize('kind,text,reason', [
+    ('AGENTS.md', b'Agents may merge whenever they are ready.', 'contradictory owner or merge rule'),
+    ('.github/pull_request_template.md', b'Agents push to the default branch.', 'contradictory owner or merge rule'),
+    ('.github/task-lifecycle.json', b'{}', 'existing framework or other adopter file'),
+    ('.github/workflows/review-gate.yml', b'name: Owner review', 'existing framework or other adopter file'),
+    ('LICENSE.agentic-delivery-team', b'Local document', 'existing framework or other adopter file'),
+])
+def test_install_stops_on_conflict_without_writing(tmp_path, kind, text, reason):
+    _trial_write(tmp_path, kind, text)
+    before = _trial_snapshot(tmp_path)
+    with pytest.raises(ValueError, match=reason):
+        _reference_first_install(ROOT, tmp_path, release_files.load_manifest(ROOT))
+    assert _trial_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize('problem', ['source-link', 'adopter-link', 'parent-link', 'traversal'])
+def test_first_install_rejects_unsafe_paths(tmp_path, problem):
+    release, project = tmp_path / 'release', tmp_path / 'project'
+    project.mkdir()
+    name = 'templates/agentic-kit.example.json'
+    _trial_write(release, name, (ROOT / name).read_bytes())
+    source = release / 'example.md'
+    source.write_text('sample text')
+    manifest = {'entries': [{'source': 'example.md', 'destination': 'docs/example.md', 'kind': 'framework'}]}
+    other = tmp_path / 'other'
+    other.mkdir()
+    (other / 'example.md').write_text('keep this file')
+    if problem == 'source-link':
+        source.unlink()
+        source.symlink_to(other / 'example.md')
+    elif problem == 'adopter-link':
+        (project / 'docs').mkdir()
+        (project / 'docs/example.md').symlink_to(other / 'example.md')
+    elif problem == 'parent-link':
+        (project / 'docs').symlink_to(other)
+    else:
+        manifest['entries'][0]['destination'] = '../other/example.md'
+    with pytest.raises(ValueError, match='refuse symlink|Invalid release manifest'):
+        _reference_first_install(release, project, manifest)
+    assert (other / 'example.md').read_text() == 'keep this file'
+
+
+def _local_install_git(repo, *args):
+    return subprocess.run(
+        ['git', '-c', f'core.hooksPath={os.devnull}', '-C', str(repo), *args],
+        env={'PATH': os.defpath, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+             'GIT_ALLOW_PROTOCOL': 'file', 'GIT_TERMINAL_PROMPT': '0'},
+        check=True, capture_output=True, text=True,
+    ).stdout.rstrip()
+
+
+def test_gate_only_first_install_recovers_default_and_checks_agents(tmp_path):
+    project, origin, seed = (tmp_path / name for name in ('project', 'origin.git', 'seed'))
+    for repo in (project, origin, seed):
+        repo.mkdir()
+    _local_install_git(origin, 'init', '--bare', '-b', 'main')
+    _trial_git(seed, 'init', '-b', 'main')
+    _trial_commit(seed)
+    _local_install_git(seed, 'push', str(origin), 'main')
+    _local_install_git(project, 'init', '-b', 'main')
+    _local_install_git(project, 'remote', 'add', 'origin', str(origin))
+    _local_install_git(project, 'fetch', 'origin')
+    # Newer Git may set this on fetch. Recreate the missing-ref case either way.
+    if _local_install_git(project, 'for-each-ref', 'refs/remotes/origin/HEAD'):
+        _local_install_git(project, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+    args = ('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD')
+    with pytest.raises(subprocess.CalledProcessError):
+        _local_install_git(project, *args)
+    _install_contract()
+    _local_install_git(project, 'remote', 'set-head', 'origin', '--auto')
+    default_ref = _local_install_git(project, *args)
+    assert default_ref == 'refs/remotes/origin/main'
+    _local_install_git(project, 'switch', '--no-track', '-c', 'install-agentic-kit', default_ref)
+    manifest = release_files.load_manifest(ROOT)
+    assert _reference_first_install(ROOT, project, manifest) == {}
+    record = json.loads((project / '.github/agentic-kit.json').read_bytes())
+    assert record['features'] == {feature: feature == 'review_gate' for feature in release_files.FEATURES}
+    checker = [sys.executable, '-I', '-B', str(ROOT / 'scripts/verify_install.py'),
+               '--repo', str(project), '--ref', 'install-agentic-kit']
+    # Verification is against the committed install branch, while origin stays unchanged.
+    _local_install_git(project, 'add', '.')
+    _local_install_git(project, '-c', 'user.name=Example Builder', '-c', 'user.email=builder@example.invalid',
+                       'commit', '-m', 'first install')
+    committed = subprocess.run(checker, capture_output=True, text=True)
+    assert committed.returncode == 0, committed.stdout
+    count = 1 + sum(e['kind'] in {'framework', 'adopter'} for e in manifest['entries'])
+    assert committed.stdout.splitlines()[-1] == f'{count} passed, 0 failed'
+    _trial_write(project, 'AGENTS.md', (ROOT / 'starter-kit/AGENTS.md').read_bytes())
+    _local_install_git(project, '-c', 'user.name=Example Builder', '-c', 'user.email=builder@example.invalid',
+                       'commit', '-am', 'unfinished agreement')
+    failure = subprocess.run(checker, capture_output=True, text=True)
+    assert failure.returncode == 1
+    assert any(line.startswith('AGENTS.md FAIL ') for line in failure.stdout.splitlines())
+    assert failure.stdout.splitlines()[-1] == f'{count - 1} passed, 1 failed'

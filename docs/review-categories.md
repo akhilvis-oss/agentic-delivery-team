@@ -65,6 +65,17 @@ See [`templates/review-gate.example.json`](../templates/review-gate.example.json
 | `gate_paths` | Object with nonempty `code`, `config`, `workflows`, `tests` lists of installed file paths. Every listed file must classify as control-critical. Defaults match this kit; adopters should explicitly configure their own inventory. |
 | `tiers` | `order` (fixed), `default`, and `rules`: a list of `{tier, reason, patterns}` |
 
+An adopter can add a domain rule for its own core calculations. For a project
+with pricing logic, a rule in `tiers.rules` could look like this.
+
+```json
+{
+  "tier": "domain-critical",
+  "reason": "Pricing calculations customers rely on",
+  "patterns": ["src/pricing/*", "tests/test_pricing*"]
+}
+```
+
 ## Upgrading from v0.1
 
 Replace the gate and workflow together through a reviewed installation on the default branch; remove the old PR-triggered review job so the trusted `review-gate` name is unambiguous. Update `gate_paths` for your actual installed files and ensure all remain control-critical. Target branches need the base gate and config; there is no PR-code fallback. Reasons and patterns are now mandatory, N/A needs a reason, duplicate domain labels fail, and result words must match exactly. The shipped example includes the new inventory. No runtime dependencies or new secrets are needed.

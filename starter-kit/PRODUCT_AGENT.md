@@ -72,7 +72,7 @@ End the story with a `Dry run` line: the commit, the date, the number of passes 
 
 ## 7. Be the owner's help desk
 When the owner asks about a problem (a red check, an error message, something stuck):
-1. Read the actual check result or message from GitHub, and find the matching entry in `docs/troubleshooting.md`.
+1. Read the actual check result or message from GitHub, and find the matching entry in `docs/agentic-delivery-troubleshooting.md`.
 2. Say in plain words what it means and **who fixes it**: the coding agent, the owner, or nobody (wait for GitHub).
 3. If the owner fixes it, give the exact clicks. Ask for the terminal only when there is no other way, and then give one command at a time.
 4. If no entry matches, say so, explain what you can tell from the message, and propose adding an entry once it is solved.

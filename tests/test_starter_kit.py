@@ -67,7 +67,7 @@ def test_roadmap_template_defines_sections_milestone_and_regression_set():
 
 def test_help_desk_rule_and_troubleshooting_playbook():
     rules = (KIT / "PRODUCT_AGENT.md").read_text()
-    assert "Be the owner's help desk" in rules and "docs/troubleshooting.md" in rules
+    assert "Be the owner's help desk" in rules and "docs/agentic-delivery-troubleshooting.md" in rules
     playbook = (KIT / "docs/troubleshooting.md").read_text()
     for marker in ("**Agent", "**Owner", "**Wait"):
         assert marker in playbook
@@ -81,7 +81,7 @@ def test_branch_ruleset_template_requires_gate_and_blocks_bypass():
     rules = {r["type"]: r.get("parameters", {}) for r in ruleset["rules"]}
     assert {"deletion", "non_fast_forward", "pull_request", "required_status_checks"} <= set(rules)
     checks = {c["context"] for c in rules["required_status_checks"]["required_status_checks"]}
-    assert {"checks", "review-gate"} <= checks
+    assert checks == {"review-gate"}
     assert rules["required_status_checks"]["strict_required_status_checks_policy"] is True
 
 
@@ -273,3 +273,94 @@ def test_product_agent_guide_explains_issue_label_approval():
     guide = (ROOT / "docs" / "product-agent-claude-code.md").read_text()
     assert "`gh issue edit` also asks for approval, including when it changes labels." in guide
     assert "Approve each story yourself on GitHub." in guide
+
+
+def test_install_starts_with_gate_only_defaults_and_conditional_agent_rules():
+    import json
+
+    manifest = json.loads((ROOT / 'release-files.json').read_text())
+    kit = json.loads((ROOT / 'templates/agentic-kit.example.json').read_text())
+    installed = {e['destination']: e for e in manifest['entries'] if e['kind'] in {'framework', 'adopter'}}
+    assert kit['features'] == dict.fromkeys(manifest['features'], False) | {'review_gate': True}
+    assert installed['AGENTS.md']['feature'] == 'review_gate'
+    assert installed['docs/dry-run.md']['kind'] == 'framework'
+    assert installed['docs/agentic-delivery-troubleshooting.md']['kind'] == 'framework'
+    assert len(installed) == 29
+
+    text = (KIT / 'AGENTS.md').read_text()
+    agreement = text.split('## Working agreement\n', 1)[1].split('\n## ', 1)[0]
+    source = text.split('## Source of truth\n', 1)[1].split('\n## ', 1)[0]
+    condition = 'If `features.product_files` is `true` in `.github/agentic-kit.json`'
+    assert '**owner** decides scope, accepts outcomes and authorises merges' in agreement
+    assert condition + ', read `docs/product/vision.md`' in agreement
+    assert condition + ', use the product docs' in source
+
+
+def test_shipped_gate_uses_no_sample_domain_rule():
+    config = ROOT / 'templates/review-gate.example.json'
+    text = config.read_text()
+    assert 'src/pricing' not in text and 'tests/test_pricing' not in text
+    doc = (ROOT / 'docs/review-categories.md').read_text()
+    assert 'src/pricing/*' in doc and 'tests/test_pricing*' in doc
+
+
+def test_copied_layout_markdown_links_resolve_to_carried_files_or_release():
+    import json
+    from urllib.parse import urlsplit
+
+    manifest = json.loads((ROOT / 'release-files.json').read_text())
+    kit = json.loads((ROOT / 'templates/agentic-kit.example.json').read_text())
+    carried = {Path(e['destination']): ROOT / e['source']
+               for e in manifest['entries'] if e['kind'] in {'framework', 'adopter'}}
+    for dest, source in carried.items():
+        if dest.suffix != '.md':
+            continue
+        for target in re.findall(r'\]\(([^)#\s]+)(?:#[^)]*)?\)', source.read_text()):
+            url = urlsplit(target)
+            if url.scheme:
+                continue
+            assert (ROOT / dest.parent / target).resolve().relative_to(ROOT) in carried, (dest, target)
+
+    playbook = carried[Path('docs/agentic-delivery-troubleshooting.md')].read_text()
+    release_url = f"https://github.com/akhilvis-oss/agentic-delivery-team/blob/{kit['version']}/docs/"
+    assert release_url + 'v04-lifecycle-digest.md#optional-owner-run-macos-login-setup' in playbook
+    assert release_url + 'quickstart.md#upgrading' in playbook
+
+
+_INSTALL_HISTORY = re.compile(
+    r'(?<![\w/#])(?:#[0-9]+|levels|main-track|v04|Primary configs|bootstrap repository PR)(?![\w/])',
+    re.IGNORECASE,
+)
+
+
+def _unexplained_install_terms(markdown):
+    text = re.sub(r'(?ms)^\s*(?:```|~~~)[^\n]*\n.*?^\s*(?:```|~~~)[ \t]*$', '', markdown)
+    text = re.sub(r'`+[^\n]*?`+', '', text)
+    text = re.sub(r'(\]\()([^\n)]*)(\))', r'\1\3', text)
+    text = re.sub(r'https?://[^\s<>]+|(?:[\w.-]+/)+[\w.#-]+', '', text)
+    text = text.replace('**', '')
+    defined = {term.group().casefold() for term in _INSTALL_HISTORY.finditer(text)
+               if re.match(r'\s+(?:means?|refers? to)\s', text[term.end():], re.I)}
+    return {m.group() for m in _INSTALL_HISTORY.finditer(text) if m.group().casefold() not in defined}
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('Use main-track and see #123 for details.', {'main-track', '#123'}),
+    ('Primary configs have levels. Open the bootstrap repository PR.', {
+        'Primary configs', 'levels', 'bootstrap repository PR'}),
+    ('main-track means the service follows the framework branch. Use main-track.', set()),
+    ('`main-track` [guide](https://example.invalid/docs/v04.md#123) docs/v04.md', set()),
+    ('```sh\npython3 -m main-track #123\n```', set()),
+])
+def test_install_history_scan_fixture(text, expected):
+    assert _unexplained_install_terms(text) == expected
+
+
+def test_install_and_carried_docs_use_plain_words():
+    import json
+
+    manifest = json.loads((ROOT / 'release-files.json').read_text())
+    paths = {'INSTALL.md'} | {e['source'] for e in manifest['entries']
+                              if e['kind'] in {'framework', 'adopter'} and e['destination'].endswith('.md')}
+    for path in sorted(paths):
+        assert not _unexplained_install_terms((ROOT / path).read_text()), path

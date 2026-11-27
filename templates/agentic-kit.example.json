@@ -3,7 +3,7 @@
   "version": "v0.6.0",
   "features": {
     "review_gate": true,
-    "product_files": true,
+    "product_files": false,
     "runner": false,
     "pool": false,
     "lifecycle": false,
