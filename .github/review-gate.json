@@ -25,7 +25,7 @@
     "rules": [
       {
         "tier": "control-critical",
-        "reason": "The gate, its rules, CI, templates adopters copy, licence and agent rules",
+        "reason": "The gate, its rules, CI, templates adopters copy, licence, agent rules, runner and digest code",
         "patterns": [
           ".github/*",
           "gate/*",
@@ -43,6 +43,8 @@
           "*credential*",
           "tests/test_trusted_gate.py",
           "lifecycle/*",
+          "runner/*",
+          "digest/*",
           "tests/test_lifecycle*",
           "INSTALL.md",
           "UPGRADE.md",

@@ -29,6 +29,7 @@
         "reason": "External effects, credentials, dependencies, agent rules and the review gate itself",
         "patterns": [
           ".github/*",
+          "lifecycle/*",
           "scripts/review_gate.py",
           "tests/test_review_gate.py",
           "tests/conftest.py",

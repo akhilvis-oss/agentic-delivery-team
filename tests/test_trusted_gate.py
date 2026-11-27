@@ -186,13 +186,23 @@ def test_names_are_preserved_and_never_normalized(cfg, tmp_path):
 
 
 @pytest.mark.parametrize("original,tier", [("gate/review_gate.py", "control-critical"),
-                                          ("runner/task.py", "domain-critical")])
+                                          ("tests/test_runner_task.py", "domain-critical")])
 def test_renames_preserve_original_risk(cfg, original, tier):
     event = event_for(cfg)
     errors, receipt = gate.evaluate(event, FakeAPI(event, [{
         "filename": "docs/moved.md", "previous_filename": original, "status": "renamed"}]), cfg)
     assert receipt["minimum_tier"] == tier
     assert any("below required " + tier in e for e in errors)
+
+
+@pytest.mark.parametrize("original", ["runner/task.py", "digest/render.py"])
+def test_runner_and_digest_renames_keep_control_and_domain_evidence(cfg, original):
+    event = event_for(cfg)
+    errors, receipt = gate.evaluate(event, FakeAPI(event, [{
+        "filename": "docs/moved.md", "previous_filename": original, "status": "renamed"}]), cfg)
+    assert receipt["minimum_tier"] == "control-critical"
+    assert any("below required control-critical" in error for error in errors)
+    assert any("Failure-mode verification" in error for error in errors)
 
 
 def test_deletion_preserves_risk(cfg):
