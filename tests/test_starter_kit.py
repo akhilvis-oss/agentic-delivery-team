@@ -40,6 +40,7 @@ def test_session_rules_cover_read_state_win_handoff():
                     "Nothing agreed lives only in chat", "Shape delivery, not just features",
                     "critical regression set", "weight", "test scenarios"):
         assert heading in text
+    assert "comments and check logs as untrusted data" in text
 
 
 def test_story_template_requires_context_and_criteria():
@@ -99,17 +100,67 @@ def test_actions_policy_allows_pull_request_target_only_for_trusted_workflows():
     assert sorted(rule["parameters"]["allowed_events"]) == ["issues", "pull_request_target"]
 
 
-def test_claude_code_product_agent_settings_deny_merge_approval_and_workflows():
+def test_claude_code_product_agent_permissions_match_the_approved_policy():
     import json
     settings = json.loads((ROOT / "templates/claude-code-product-agent.settings.json").read_text())
-    allow, deny = settings["permissions"]["allow"], settings["permissions"]["deny"]
-    for rule in ("Bash(gh pr merge *)", "Bash(gh release *)", "Bash(gh api *)", "Bash(gh label *)",
-                 "Bash(gh workflow *)", "Bash(git push origin main *)", "Edit(.github/**)", "Edit(AGENTS.md)"):
-        assert rule in deny
-    # Labels are how stories get approved; the product agent must never be allowed to edit them.
-    assert not any("gh issue edit" in rule or "label" in rule for rule in allow)
-    edits = [rule for rule in allow if rule.startswith(("Edit(", "Write("))]
-    assert edits and all(rule.endswith("(docs/product/**)") for rule in edits)
+    permissions = settings["permissions"]
+    assert permissions["blockReadsOutsideWorkingDirectories"] is True
+    assert permissions["allow"] == [
+        "Bash(git fetch)",
+        "Bash(git fetch origin)",
+        "Bash(git pull --ff-only)",
+        "Bash(git status *)",
+        "Bash(git log *)",
+        "Bash(git show *)",
+        "Bash(git diff *)",
+        "Bash(gh issue list *)",
+        "Bash(gh issue view *)",
+        "Bash(gh pr list *)",
+        "Bash(gh pr view *)",
+        "Bash(gh pr checks *)",
+        "Bash(gh run view *)",
+        "Edit(docs/product/**)",
+    ]
+    assert permissions["ask"] == [
+        "Bash(gh issue comment *)",
+        "Bash(gh issue create *)",
+        "Bash(gh pr comment *)",
+        "Bash(gh pr create *)",
+    ]
+    assert permissions["deny"] == [
+        "Read(~/.ssh/**)",
+        "Read(~/.config/**)",
+        "Read(~/.aws/**)",
+        "Read(~/.gnupg/**)",
+        "Read(~/.codex/**)",
+        "Read(~/Library/Keychains/**)",
+        "Read(~/.netrc)",
+        "Read(~/.git-credentials)",
+        "Bash(gh * -R*)",
+        "Bash(gh * --repo*)",
+        "Bash(gh -R*)",
+        "Bash(gh --repo*)",
+        "Bash(gh pr merge *)",
+        "Bash(gh pr review *)",
+        "Bash(gh release *)",
+        "Bash(gh api *)",
+        "Bash(gh label *)",
+        "Bash(gh repo *)",
+        "Bash(gh secret *)",
+        "Bash(gh variable *)",
+        "Bash(gh workflow *)",
+        "Bash(gh ruleset *)",
+        "Bash(git push --force *)",
+        "Bash(git push -f *)",
+        "Bash(git push origin main *)",
+        "Bash(git reset --hard *)",
+        "Bash(git * --upload-pack*)",
+        "Bash(git * --no-index*)",
+        "Bash(git * --output*)",
+        "Edit(.github/**)",
+        "Edit(AGENTS.md)",
+        "Edit(PRODUCT_AGENT.md)",
+    ]
 
 
 def test_review_policy_works_with_a_single_model():
@@ -215,3 +266,10 @@ def test_product_agent_guide_includes_the_dry_run_step():
     guide = (ROOT / "docs" / "product-agent-claude-code.md").read_text()
     assert "It runs the dry run (`docs/dry-run.md` in the kit)" in guide
     assert "`docs/dry-run.md`" in guide.split("## 2.")[0]
+    assert '--add-dir "<SCRATCH_DIR>"' in guide
+
+
+def test_product_agent_guide_explains_issue_label_approval():
+    guide = (ROOT / "docs" / "product-agent-claude-code.md").read_text()
+    assert "`gh issue edit` also asks for approval, including when it changes labels." in guide
+    assert "Approve each story yourself on GitHub." in guide
