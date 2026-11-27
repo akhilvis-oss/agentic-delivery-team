@@ -560,7 +560,7 @@ STOP_REASONS = {
     "delivery_configuration_invalid": "Delivery settings are incomplete. Nothing was dispatched. Ask the operator to configure complete delivery settings or explicitly turn delivery off, then re-approve.",
     "continuation_commit_unrecorded": "The latest saved work could not be verified on this issue. Owner: ask the operator to reconcile it, or add Restart: fresh under Owner decisions and re-approve.",
     "continuation_conflict": "Saved work conflicts with the target branch. Owner: arrange conflict resolution before re-approving, or add Restart: fresh under Owner decisions and re-approve.",
-    "continuation_limit": "This story has reached its two-continuation limit. Owner: restart fresh (add Restart: fresh under Owner decisions and re-approve), or split the story.",
+    "continuation_limit": "This story has reached its two-continuation limit without new information. Owner: add the missing information under Owner decisions and re-approve, restart fresh (add Restart: fresh under Owner decisions and re-approve), or split the story.",
     "owner_withdrew": "The owner withdrew this story. Owner: re-approve to start it again.",
     "pr_open_reapproval": "This story has an open PR. Owner: close the PR and re-approve to rebuild, or merge it and add `status:merged` to finish (#184).",
     "continuation_not_applied": "The continued commit is missing from the built head. Owner: reconcile the history before re-approving.",
