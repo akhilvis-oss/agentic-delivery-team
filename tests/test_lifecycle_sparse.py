@@ -130,4 +130,4 @@ def test_upgrade_inventory_exists_and_matches_guard_checkout():
     manifest = json.loads((ROOT / "templates/agentic-kit.example.json").read_text())
     example = (ROOT / "docs/versions-and-features.md").read_text().split("```json\n")[1].split("```")[0]
     assert json.loads(example) == manifest
-    assert manifest["version"] == "v0.5.6"
+    assert manifest["version"] == "v0.6.0"

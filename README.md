@@ -71,9 +71,12 @@ Read these before relying on the kit:
 
 ## What's next
 
-[v0.5.5](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.5) made every stop explain itself on the issue, saves stopped work so a story can continue from it, records owner merges and cleans up after them, and keeps the service running through GitHub errors. Earlier, [v0.5.3](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.3) added opt-in delivery from approval through PR integration, with control-critical merges reserved for the owner. Adopt [v0.5.7](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.7): it fixes delivery for light and standard stories (they failed at the merge decision since v0.5.5), and includes v0.5.6's fix for the hosted lifecycle guard.
+Adopt [v0.6.0](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.6.0). It bundles everything since v0.5.7:
+- **The safety net and the consolidated lifecycle:** one way to continue, four kinds of stop, a queue, a readiness pass, owner withdrawal and finishing.
+- **The review tier** chosen from your gate's rules.
+- **Install and upgrade** by your own coding agent, from `INSTALL.md` and `UPGRADE.md`, with a read-only checker.
 
-See the [roadmap](ROADMAP.md): next are a safety net (recorded GitHub responses and a live smoke test on candidate code, see the [design note](docs/design/safety-net.md)), then a consolidated lifecycle with fewer paths, a story queue and a readiness pass after approval.
+See the [roadmap](ROADMAP.md): next are runner-coordinated parallel lanes and faster checks.
 
 ## Contributing and security
 
