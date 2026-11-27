@@ -485,15 +485,28 @@ skipped; an integrity failure in the newest saved job stops with
 `continuation_commit_unrecorded`, never silently starts fresh. Saved work includes
 runner-saved stops, reviewed heads and heads awaiting automatic Primary review.
 There are at most two counted continuations per story, each with one correction
-round. Automatic Primary continuation uses the same path with no correction
-round and does not count against that limit. Delivery settings always come from
-the main runner template.
+round. A non-primary continuation counts only when the approved story text is
+unchanged from the immediately previous claim and the saved stop's kind is not
+"Waiting on the system". Older claims missing task text or a recorded stop reason
+count conservatively. A text change resets the count to zero, and that
+continuation does not count. Comparison ignores line endings, a Continue from
+block, an empty Saved work answer, `Restart: fresh` under Owner decisions and
+outer whitespace; internal whitespace and all other edits are new information.
+Every previous claim supplies comparison text, including Primary, readiness and
+pre-dispatch stops. An edit reverted before re-approval still counts.
+
+Repeated re-approvals after "Waiting on the system" stops are accepted: each
+follows automatic system retries and an owner action. An uncounted continuation
+is accepted even at two counted continuations; its runner number stays at most 2.
+Automatic Primary continuation uses the same path with no correction round and
+does not count against that limit. Readiness stops do not count either. Delivery
+settings always come from the main runner template; per-run limits are unchanged.
 
 To start over, add exactly `Restart: fresh` on its own line under `## Owner decisions`
 or `### Owner decisions`, then re-approve. It takes effect only when absent from
 the last dispatched approval's text and resets the count. Remove the line before
 a later re-approval; editing a story during a run stops it. Claims stopped before
-dispatch do not become the comparison text.
+dispatch do not become the comparison text for detecting a new restart directive.
 
 If the reviewed saved head is current against the fetched target and the approved
 scope is unchanged, the service only delivers it. Legacy continuation blocks,

@@ -133,6 +133,33 @@ def restart_fresh(body):
     return section is not None and "Restart: fresh" in section.splitlines()
 
 
+def continuation_scope(text):
+    text = re.sub(r"(?m)^### Continue from\nCommit: [0-9a-f]{40}$", "",
+                  text.replace("\r\n", "\n"))
+    # The story form replaces its optional empty answer when the owner
+    # pastes the block; that wrapper is continuation metadata too.
+    # Only a directive within Owner decisions is continuation metadata.
+    owner = None
+    seen_owner = False
+    kept = []
+    for line in text.splitlines(keepends=True):
+        heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t]*\n?$", line)
+        if heading:
+            level = len(heading[1])
+            if owner is not None and level <= owner:
+                owner = None
+            if not seen_owner and level in {2, 3} and heading[2].lower() == "owner decisions":
+                owner = level
+                seen_owner = True
+        elif re.fullmatch(r"---[ \t]*\n?", line):
+            owner = None
+        if owner is None or line.rstrip("\n") != "Restart: fresh":
+            kept.append(line)
+    text = "".join(kept)
+    return re.sub(r"(?m)^### Saved work \(optional\)\n\n*(?:_No response_(?:\n|$))?\n*",
+                  "", text).strip()
+
+
 def continuation(cfg, client, claim, claims_dir, *, prepare=False):
     """One continuation path; prepare only after the target has been fetched."""
     if prepare:
@@ -217,15 +244,27 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
     if not valid:
         claim["continuation_error"] = "continuation_commit_unrecorded"
         return
-    count = sum(1 for c in previous if c.get("continued_from")
-                and not c.get("primary") and c["event"] >= boundary
-                and not c.get("readiness_stopped")
-                and not any(j["id"] == c["job"] and j.get("readiness_stopped") for j in local))
-    if not claim["primary"] and count >= 2:
-        claim["continuation_error"] = "continuation_limit"
-        return
     reason = next((r["reason"] for r in reversed(history) if matches(r) and r["reason"]),
                   "delivery_disabled")
+    count, previous_task = 0, None
+    for c in sorted((c for c in previous if c["event"] >= boundary),
+                    key=lambda c: c["event"]) + [claim]:
+        task = continuation_scope(c["task"]) if "task" in c else None
+        changed = task is not None and previous_task is not None and task != previous_task
+        previous_task = task  # Every claim is comparison evidence, even before dispatch.
+        if changed:
+            count = 0
+        counts = (not changed and not c.get("primary") and not c.get("readiness_stopped")
+                  and not any(j["id"] == c["job"] and j.get("readiness_stopped") for j in local)
+                  and (task is None or core.STOP_KINDS.get(
+                      reason if c is claim else c.get("previous_stop_reason")) != "Waiting on the system"))
+        if c is claim:
+            break
+        if c.get("continued_from") and counts:
+            count += 1
+    if counts and count >= 2:
+        claim["continuation_error"] = "continuation_limit"
+        return
     claim.update(start_commit=head, continued_from=head, continuation_source=source["id"],
                  previous_stop_reason=reason)
     if claim["primary"]:
@@ -233,7 +272,7 @@ def continuation(cfg, client, claim, claims_dir, *, prepare=False):
                      source_job=source["id"],
                      source_event=source["assignment"]["lifecycle"]["event"])
     else:
-        claim["continuation_number"] = count + 1
+        claim["continuation_number"] = min(count + 1, 2)
 
 
 def withdraw_claim(cfg, client, path, claim, issue):
@@ -476,32 +515,7 @@ def delivery_candidate(cfg, claim, source_id, history):
     if source.get("integration", {}).get("stage", "new") != "new":
         return None, "publication_already_started"
     # Only continuation metadata may change when reusing the old review.
-    def scope(text):
-        text = re.sub(r"(?m)^### Continue from\nCommit: [0-9a-f]{40}$", "",
-                      text.replace("\r\n", "\n"))
-        # The story form replaces its optional empty answer when the owner
-        # pastes the block; that wrapper is continuation metadata too.
-        # Only a directive within Owner decisions is continuation metadata.
-        owner = None
-        seen_owner = False
-        kept = []
-        for line in text.splitlines(keepends=True):
-            heading = re.match(r"^(#{1,6})[ \t]+(.*?)[ \t]*\n?$", line)
-            if heading:
-                level = len(heading[1])
-                if owner is not None and level <= owner:
-                    owner = None
-                if not seen_owner and level in {2, 3} and heading[2].lower() == "owner decisions":
-                    owner = level
-                    seen_owner = True
-            elif re.fullmatch(r"---[ \t]*\n?", line):
-                owner = None
-            if owner is None or line.rstrip("\n") != "Restart: fresh":
-                kept.append(line)
-        text = "".join(kept)
-        return re.sub(r"(?m)^### Saved work \(optional\)\n\n*(?:_No response_(?:\n|$))?\n*",
-                      "", text).strip()
-    if scope(source["assignment"]["task_text"]) != scope(claim["task"]):
+    if continuation_scope(source["assignment"]["task_text"]) != continuation_scope(claim["task"]):
         return None, "approved_scope_changed"
     try:
         runner.integration_api().reviewed(runner, source_config, source)

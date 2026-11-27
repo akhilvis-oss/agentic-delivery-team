@@ -70,7 +70,7 @@ Each code belongs to exactly one kind.
 | Needs your decision | `dependency_closed_unmerged` | A dependency closed without merging, or its reference is invalid. Reconcile the named dependency or repair the Dependencies line, then re-approve. |
 | Needs your decision | `pr_closed_unmerged` | The PR closed without merging. Decide whether to reopen it or end the story. |
 | Needs your decision | `owner_requested_stop` | A permitted actor stopped the task. Record any decision under **Owner decisions**, resolve the stop and re-approve. |
-| Needs your decision | `continuation_limit` | The story reached its two-continuation limit. Restart fresh or split the story, then re-approve. |
+| Needs your decision | `continuation_limit` | The story reached its two-continuation limit without new information. Add the missing information under Owner decisions and re-approve, restart fresh (add `Restart: fresh` under Owner decisions and re-approve), or split the story. |
 | Needs your decision | `pr_open_reapproval` | Close the open PR and re-approve to rebuild, or merge it and add `status:merged` to finish. |
 | Needs your merge | `owner_merge_required` | Review is complete and policy reserves the merge for you. Inspect the linked PR's evidence and merge when satisfied. |
 | Waiting on the system | `agent_sign_in_failed` | The agent could not sign in. The service retries automatically while attempts remain; ask the operator to restore sign-in, then re-approve after the final stop. |
@@ -103,15 +103,28 @@ skipped; an integrity failure in the newest saved job stops with
 `continuation_commit_unrecorded`, never silently starts fresh. Saved work includes
 runner-saved stops, reviewed heads and heads awaiting automatic Primary review.
 There are at most two counted continuations per story, each with one correction
-round. Automatic Primary continuation uses the same path with no correction
-round and does not count against that limit. Delivery settings always come from
-the main runner template.
+round. A non-primary continuation counts only when the approved story text is
+unchanged from the immediately previous claim and the saved stop's kind is not
+"Waiting on the system". Older claims missing task text or a recorded stop reason
+count conservatively. A text change resets the count to zero, and that
+continuation does not count. Comparison ignores line endings, a Continue from
+block, an empty Saved work answer, `Restart: fresh` under Owner decisions and
+outer whitespace; internal whitespace and all other edits are new information.
+Every previous claim supplies comparison text, including Primary, readiness and
+pre-dispatch stops. An edit reverted before re-approval still counts.
+
+Repeated re-approvals after "Waiting on the system" stops are accepted: each
+follows automatic system retries and an owner action. An uncounted continuation
+is accepted even at two counted continuations; its runner number stays at most 2.
+Automatic Primary continuation uses the same path with no correction round and
+does not count against that limit. Readiness stops do not count either. Delivery
+settings always come from the main runner template; per-run limits are unchanged.
 
 To start over, add exactly `Restart: fresh` on its own line under `## Owner decisions`
 or `### Owner decisions`, then re-approve. It takes effect only when absent from
 the last dispatched approval's text and resets the count. Remove the line before
 a later re-approval; editing a story during a run stops it. Claims stopped before
-dispatch do not become the comparison text.
+dispatch do not become the comparison text for detecting a new restart directive.
 
 If the reviewed saved head is current against the fetched target and the approved
 scope is unchanged, the service only delivers it. Legacy continuation blocks,
