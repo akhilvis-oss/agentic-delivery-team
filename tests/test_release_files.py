@@ -92,7 +92,7 @@ def test_install_runbooks_avoid_owner_paste_instructions():
         assert not re.search(r'(?i)(paste|copy).{0,50}(commit|sha)', text)
         assert 'never instructions' in text
         assert 'Keychain' in text
-        assert 'python -I' in text
+        assert 'python3 -I -B' in text
 
 
 # This is a scripted decision model of the runbook, not a shipped upgrade executor.
@@ -321,13 +321,18 @@ def test_upgrade_scripted_v057_creates_license_and_restores_deliberate_deletion(
     record = json.loads((project / '.github/agentic-kit.json').read_bytes())
     assert record['version'] == target
     assert record['features'] == dict.fromkeys(release_files.FEATURES, False)
+    # Fill only the recreated agent rules, as the upgrading agent would.
+    agents = project / 'AGENTS.md'
+    agents.write_text(re.sub(r'<[^<>\r\n]+>', 'example', agents.read_text()))
     _trial_commit(project)
     # Poison only the worktree: the unmodified checker must use committed default data.
     (project / 'LICENSE.agentic-delivery-team').write_bytes(b'uncommitted distractor')
     lines = []
     assert checker.verify(project, emit=lines.append) == 0
-    assert len(lines) == 2 + sum(e['kind'] in {'framework', 'adopter'} for e in manifest['entries'])
-    assert all(' PASS ' in line for line in lines)
+    count = 1 + sum(e['kind'] in {'framework', 'adopter'} for e in manifest['entries'])
+    assert len(lines) == count + 1 and lines[-1] == f'{count} passed, 0 failed'
+    assert all(' PASS ' in line for line in lines[:-1])
+    assert len({line.split(' PASS ')[0] for line in lines[:-1]}) == count
 
 
 @pytest.mark.parametrize('kind,name', [
