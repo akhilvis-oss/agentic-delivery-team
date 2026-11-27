@@ -152,3 +152,25 @@ reads only the switch's `current` field and file bytes; it does not read private
 Stop on any FAIL. Without `--hashes`, it computes expected hashes from its own export.
 Finally have the owner approve one small story, follow it through independent review
 and the normal merge policy, and check its public result. Do not approve as the owner.
+
+### Existing trusted gate workflow destinations
+
+The checker defaults to `.github/workflows/review-gate.yml`. If an existing adopter
+uses another trusted filename, explicitly add `--gate-workflow` with its committed
+repository-relative path to the checker command. This maps only that one manifest
+adopter destination; it does not change the manifest or any installed files.
+The alternate must be a single `.yml` or `.yaml` filename directly under
+`.github/workflows/`, explicitly listed in the committed gate config's
+`gate_paths.workflows`, and classified control-critical by that validated config.
+Its committed bytes must equal this release's `templates/review-gate.yml` hash.
+Missing, symlinked, unsafe, uninventoried or modified workflows fail closed, even
+when the review-gate feature is off. There is no automatic filename discovery.
+Custom workflow contents require separate compatibility work; this option does
+not waive checks of their controls. Existing commands without this option retain
+their default behavior. Pass the option again during post-merge verification.
+
+Markdown placeholder validation recognizes backticked dotted identifier notation
+such as `<country>.<ISIN>.<exchange>` as literal documentation. Only lowercase
+angle-bracket fields surrounding the exact `<ISIN>` token qualify. Bare `<ISIN>`,
+uppercase installation fields, and other placeholders (including those elsewhere
+in the same document) still fail. This exception does not apply to workflow files.

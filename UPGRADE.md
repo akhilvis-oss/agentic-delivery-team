@@ -123,3 +123,12 @@ adopter code. Without `--hashes`, the checker computes hashes from its own expor
 Every result is an item, PASS or FAIL and a fixed reason. Stop on FAIL; do not conceal
 it or declare the upgrade complete. Follow the normal approval/review policy for the
 first small post-upgrade story. Manual upgrades follow this same runbook.
+
+For an existing trusted gate filename, use the explicit `--gate-workflow` checker
+option documented in `INSTALL.md` under “Existing trusted gate workflow
+destinations”. Retain that destination during the adopter-file presence check;
+validate the mapping with the same committed config, control-critical inventory
+and exact release-template bytes before treating it as the manifest destination.
+Do not rename or duplicate a trusted workflow merely to match the default name.
+This option is available only in releases containing this compatibility change;
+an untagged checker is not evidence for an older published release.

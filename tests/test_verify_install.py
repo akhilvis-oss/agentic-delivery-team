@@ -320,3 +320,112 @@ def test_local_git_replacements_cannot_hide_changed_default_branch_bytes(adopter
     assert code == 1
     assert name + ' FAIL release bytes' in output
     assert checker.committed_file(adopter, bad_commit, name) == bad_bytes
+
+
+ALTERNATE_GATE = '.github/workflows/trusted-gate.yml'
+
+
+def move_gate(adopter):
+    (adopter / checker.GATE_WORKFLOW).rename(adopter / ALTERNATE_GATE)
+    path = adopter / '.github/review-gate.json'
+    value = json.loads(path.read_text())
+    value['gate_paths']['workflows'] = [ALTERNATE_GATE]
+    path.write_text(json.dumps(value))
+    commit(adopter)
+
+
+def test_explicit_gate_mapping_requires_trusted_committed_workflow(adopter):
+    move_gate(adopter)
+    assert verify(adopter)[0] == 1  # No silent discovery/fallback.
+    assert verify(adopter, gate_workflow=ALTERNATE_GATE)[0] == 0
+    (adopter / ALTERNATE_GATE).write_text('uncommitted change')
+    assert verify(adopter, gate_workflow=ALTERNATE_GATE)[0] == 0
+    commit(adopter)
+    assert verify(adopter, gate_workflow=ALTERNATE_GATE)[0] == 1
+
+
+@pytest.mark.parametrize('name', [
+    '../gate.yml', '/tmp/gate.yml', '.github/workflows/../gate.yml',
+    '.github/workflows/nested/gate.yml', '.github/workflows/gate.yml\n',
+    '.github/workflows\\gate.yml', 'scripts/gate.yml',
+    '.github/workflows/*.yml', '.github/workflows/gate.txt', '',
+])
+def test_gate_mapping_rejects_unsafe_or_nonworkflow_paths(adopter, name):
+    assert verify(adopter, gate_workflow=name)[0] == 1
+
+
+@pytest.mark.parametrize('kind', ['missing', 'symlink', 'uninventoried', 'default-inventory', 'lower-tier'])
+def test_gate_mapping_fails_closed_on_missing_untrusted_or_unprotected_file(adopter, kind):
+    move_gate(adopter)
+    path = adopter / ALTERNATE_GATE
+    config = adopter / '.github/review-gate.json'
+    value = json.loads(config.read_text())
+    if kind == 'missing':
+        path.unlink()
+    elif kind == 'symlink':
+        path.unlink()
+        path.symlink_to('other.yml')
+    elif kind == 'uninventoried':
+        value['gate_paths']['workflows'] = ['.github/workflows/other.yml']
+    elif kind == 'default-inventory':
+        del value['gate_paths']
+    else:
+        value['tiers']['rules'] = [
+            {'tier': 'standard', 'reason': 'example rule', 'patterns': ['*']}]
+    config.write_text(json.dumps(value))
+    commit(adopter)
+    assert verify(adopter, gate_workflow=ALTERNATE_GATE)[0] == 1
+
+
+@pytest.mark.parametrize('text', [
+    'Identifier: `<country>.<ISIN>.<exchange>`.',
+    'Identifier: `<market>.<ISIN>.<listing_venue>`.',
+])
+def test_literal_isin_identifier_notation_is_not_an_install_placeholder(adopter, text):
+    (adopter / 'docs/product/decision-log.md').write_text(text)
+    commit(adopter)
+    assert verify(adopter)[0] == 0
+
+
+@pytest.mark.parametrize('text', [
+    '<PROJECT_NAME>', '`<PROJECT_NAME>`', '<ABSOLUTE_PYTHON_EXECUTABLE>',
+    '`<country>.<ISIN>.<exchange>` and <PROJECT_NAME>',
+    '`<COUNTRY>.<ISIN>.<exchange>`', '<country>.<ISIN>.<exchange>',
+    '`<country>.<ISIN>.<EXCHANGE>`', '`<country>.<ISIN>.<exchange> <PROJECT_NAME>`',
+    '`<ISIN>`',
+])
+def test_real_or_ambiguous_placeholders_still_fail(adopter, text):
+    (adopter / 'docs/product/decision-log.md').write_text(text)
+    commit(adopter)
+    assert verify(adopter)[0] == 1
+
+
+def test_isin_notation_exception_does_not_apply_to_workflows(adopter):
+    (adopter / checker.GATE_WORKFLOW).write_text('name: `<country>.<ISIN>.<exchange>`')
+    commit(adopter)
+    assert verify(adopter)[0] == 1
+
+
+def test_explicit_mapping_remains_strict_when_gate_feature_is_off(adopter):
+    move_gate(adopter)
+    path = adopter / '.github/agentic-kit.json'
+    value = json.loads(path.read_text())
+    value['features']['review_gate'] = False
+    path.write_text(json.dumps(value))
+    (adopter / ALTERNATE_GATE).write_text('changed workflow')
+    commit(adopter)
+    assert verify(adopter, gate_workflow=ALTERNATE_GATE)[0] == 1
+
+
+def test_gate_mapping_cli_and_sanitized_failure(adopter):
+    import sys
+    move_gate(adopter)
+    args = [sys.executable, '-I', str(ROOT / 'scripts/verify_install.py'),
+            '--repo', str(adopter), '--gate-workflow', ALTERNATE_GATE]
+    result = subprocess.run(args, capture_output=True, text=True)
+    assert result.returncode == 0 and ' FAIL ' not in result.stdout
+    args[-1] = '.github/workflows/CANARY-PRIVATE-PATH.yml'
+    result = subprocess.run(args, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert 'CANARY-PRIVATE-PATH' not in result.stdout + result.stderr
+    assert str(adopter) not in result.stdout + result.stderr

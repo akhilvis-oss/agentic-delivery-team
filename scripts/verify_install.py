@@ -24,6 +24,9 @@ REPOSITORY = 'akhilvis-oss/agentic-delivery-team'
 FEATURES = release_files.FEATURES
 PLACEHOLDER = re.compile(r'<[A-Z][^>\r\n]*>')
 HEX256 = re.compile(r'[0-9a-f]{64}')
+# A literal identifier grammar, not a general exemption for uppercase code spans.
+ISIN_NOTATION = re.compile(r'(?<!`)`(?:<[a-z][a-z_]*>\.)+<ISIN>(?:\.<[a-z][a-z_]*>)+`(?!`)')
+GATE_WORKFLOW = '.github/workflows/review-gate.yml'
 
 
 class Parser(argparse.ArgumentParser):
@@ -135,15 +138,32 @@ def validate_adopter(name, data):
                 spec = importlib.util.spec_from_file_location('trusted_release_gate', ROOT / 'gate/review_gate.py')
                 gate = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(gate)
-                gate.load_config(path)
+                return gate.load_config(path)
             else:
                 from lifecycle import core
                 core.load_config(path, local=False)
     elif name.endswith(('.md', '.yml', '.yaml')):
-        if PLACEHOLDER.search(data.decode()):
+        if PLACEHOLDER.search(ISIN_NOTATION.sub('', data.decode()) if name.endswith('.md') else data.decode()):
             raise ValueError('Unfilled placeholder')
     else:
         raise ValueError('Unsupported adopter check')
+
+
+def mapped_gate_workflow(repo, commit, name, asset):
+    """An explicit alternate destination must preserve the trusted gate exactly."""
+    release_files.relative(name)
+    if not re.fullmatch(r'\.github/workflows/[A-Za-z0-9_-]+\.ya?ml', name):
+        raise ValueError('Invalid gate workflow mapping')
+    config = validate_adopter('.github/review-gate.json',
+                              committed_file(repo, commit, '.github/review-gate.json'))
+    # Require an explicit inventory, not the validator's default inventory.
+    raw = json.loads(committed_file(repo, commit, '.github/review-gate.json'))
+    if 'gate_paths' not in raw or name not in config['gate_paths']['workflows']:
+        raise ValueError('Gate workflow not inventoried')
+    data = committed_file(repo, commit, name)
+    if hashlib.sha256(data).hexdigest() != asset['files']['templates/review-gate.yml']:
+        raise ValueError('Gate workflow differs from trusted template')
+    return data
 
 
 def expected_hashes(manifest, hashes):
@@ -177,7 +197,7 @@ def current_commit(path):
     return values[0]
 
 
-def verify(repo, *, hashes=None, service_install=None, emit=print):
+def verify(repo, *, hashes=None, service_install=None, gate_workflow=None, emit=print):
     failed = False
     def result(item, ok, reason):
         nonlocal failed
@@ -197,7 +217,10 @@ def verify(repo, *, hashes=None, service_install=None, emit=print):
             continue
         name = entry['destination']
         try:
-            data = committed_file(repo, commit, name)
+            if gate_workflow is not None and name == GATE_WORKFLOW:
+                data = mapped_gate_workflow(repo, commit, gate_workflow, asset)
+            else:
+                data = committed_file(repo, commit, name)
             if entry['kind'] == 'framework':
                 ok = hashlib.sha256(data).hexdigest() == asset['files'][entry['source']]
             else:
@@ -257,9 +280,11 @@ def main(argv=None):
     parser.add_argument('--repo', required=True)
     parser.add_argument('--hashes')
     parser.add_argument('--service-install')
+    parser.add_argument('--gate-workflow', help='Explicit trusted gate workflow destination')
     args = parser.parse_args(argv)
     try:
-        return verify(Path(args.repo), hashes=args.hashes, service_install=args.service_install)
+        return verify(Path(args.repo), hashes=args.hashes, service_install=args.service_install,
+                      gate_workflow=args.gate_workflow)
     except Exception:
         print('install FAIL verification unavailable')
         return 1
