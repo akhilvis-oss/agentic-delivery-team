@@ -261,9 +261,20 @@ def criteria(text):
     return block, ids
 
 
+def without_closing_keywords(text):
+    return re.sub(
+        r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?::\s*|\s+)"
+        r"(?=(?:#[1-9]\d*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9]\d*|"
+        r"https?://github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*))",
+        "[keyword removed] ", text, flags=re.I)
+
+
 def body_for(runner, config, job, cfg, opts, receipt_url, *, invalid_story_tier=False):
     original, ids = criteria(job["assignment"]["task_text"])
     decisions = story_section(job["assignment"]["task_text"], "Owner decisions")
+    original = without_closing_keywords(original)
+    if decisions:
+        decisions = without_closing_keywords(decisions)
     quoted_decisions = ("\n".join("> " + line for line in decisions.splitlines())
                         if decisions and decisions != "_No response_"
                         else "None in the approved story.")
@@ -439,21 +450,25 @@ def merge_evidence(core, cfg, client, pr, opts, job):
     comments = client.comments(pr["number"])
     if any(r.get("state") in {"CHANGES_REQUESTED", "PENDING"} for r in reviews):
         return "merge_conditions_missing"
-    if any(re.match(r"(?:Checker|Second review): (?:CHANGES REQUIRED|BLOCKED)", c.get("body", ""))
+    trusted = {cfg["actors"].get(role) for role in ("owner", "runner", "product")} - {None}
+    second = opts.get("second_reviewer")
+    if second:
+        trusted.add(second["actor"])
+    if any((c.get("user") or {}).get("login") in trusted
+           and re.match(r"(?:Checker|Second review): (?:CHANGES REQUIRED|BLOCKED)", c.get("body") or "")
            for c in [*comments, *reviews]):
         return "merge_conditions_missing"
     if not any(r.get("state") in {"COMMENTED", "APPROVED"}
                and r.get("commit_id") == job["reviewed_head"]
-               and r.get("user", {}).get("login") == cfg["actors"]["runner"]
-               and r.get("body", "").startswith("Checker: PASS\n")
+               and (r.get("user") or {}).get("login") == cfg["actors"]["runner"]
+               and (r.get("body") or "").startswith("Checker: PASS\n")
                and ("Reviewer session: " + job["review_session"]) in r["body"] for r in reviews):
         return "merge_conditions_missing"
-    second = opts.get("second_reviewer")
     if opts["declared_tier"] == "domain-critical" and second:
-        if not any(r.get("user", {}).get("login") == second["actor"]
+        if not any((r.get("user") or {}).get("login") == second["actor"]
                    and r.get("state") in {"COMMENTED", "APPROVED"}
                    and r.get("commit_id") == job["reviewed_head"]
-                   and r.get("body", "").startswith("Second review: PASS\n")
+                   and (r.get("body") or "").startswith("Second review: PASS\n")
                    and ("Provider: " + second["provider"]) in r["body"] for r in reviews):
             return "pending"
     if pr.get("draft") or pr.get("mergeable") is not True or pr.get("mergeable_state") not in {"clean", "unstable"}:

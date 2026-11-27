@@ -15,6 +15,9 @@ Reports that matter most here:
 Only the latest release receives fixes while the project is at version 0.
 
 ## Using the kit safely
+
+Read the [security model](docs/security-model.md) before approving stories.
+
 - Run agents and the task runner under a dedicated operating-system user with access only to the project.
 - Give every automated identity the least GitHub permission it needs, and never use the owner's token for automation.
 - Keep credentials out of repositories; the kit's private-content check helps for public repositories but is not a secret scanner.

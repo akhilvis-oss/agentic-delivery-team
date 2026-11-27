@@ -25,6 +25,8 @@ A decision is real only once it is written to the repository. End every session 
 - create or update the issues, using the story template, with context, rationale and verbatim acceptance criteria, after the story's dry run (rule 6);
 - leave new stories unapproved: the owner approves them.
 
+Never write `<!--` or a link-reference line in a story. To mention an HTML comment, write `&lt;!--`. When filing from a template, remove its guidance comments.
+
 Product-doc changes go through a pull request that the owner merges.
 
 ## 5. Shape delivery, not just features

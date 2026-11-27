@@ -579,7 +579,7 @@ def test_second_provider_required_only_when_configured(delivery):
 
 def test_contradictory_review_prevents_merge(delivery):
     _, _, job, client = delivery
-    client.comment_rows.append({"body": "Checker: BLOCKED\nNeeds a decision."})
+    client.comment_rows.append({"user": {"login": "runner-bot"}, "body": "Checker: BLOCKED\nNeeds a decision."})
     advance(delivery)
     assert job["status"] == "needs_owner"
     assert not any(w[0] == "AUTO" for w in client.writes)
@@ -595,6 +595,7 @@ def test_negative_verdict_in_either_channel_blocks_both_merge_paths(
     _, _, job, client = delivery
     client.auto = auto
     row = {"body": f"{reviewer}: {verdict}\nNeeds a decision.",
+           "user": {"login": "runner-bot"},
            "state": "COMMENTED", "commit_id": job["reviewed_head"]}
     (client.reviews if source == "review" else client.comment_rows).append(row)
     advance(delivery)
@@ -644,7 +645,7 @@ def test_direct_merge_rechecks_review_validity_after_clean_status_rejection(deli
     _, _, job, client = delivery
     def reject_auto_merge(pr):
         if change == "negative_verdict":
-            client.reviews.append({"state": "COMMENTED", "body": "Checker: BLOCKED"})
+            client.reviews.append({"user": {"login": "runner-bot"}, "state": "COMMENTED", "body": "Checker: BLOCKED"})
         elif change == "dismissed_pass":
             client.reviews[0]["state"] = "DISMISSED"
         else:
@@ -747,11 +748,11 @@ def test_changed_evidence_cancels_auto_merge(delivery, change):
     elif change == "checks":
         client.check_state = "failure"
     elif change == "review_body":
-        client.reviews.append({"state": "COMMENTED", "body": "Checker: BLOCKED"})
+        client.reviews.append({"user": {"login": "runner-bot"}, "state": "COMMENTED", "body": "Checker: BLOCKED"})
     elif change == "dismissed":
         client.reviews[0]["state"] = "DISMISSED"
     else:
-        client.comment_rows.append({"body": "Checker: CHANGES REQUIRED"})
+        client.comment_rows.append({"user": {"login": "runner-bot"}, "body": "Checker: CHANGES REQUIRED"})
     advance(delivery)
     assert any(w[0] == "DISABLE" for w in client.writes)
     assert job["status"] in {"needs_owner", "blocked"}
