@@ -11,7 +11,7 @@ itself start or stop a local component. See the [roadmap](../ROADMAP.md#later).
 ```json
 {
   "kit": "agentic-delivery-team",
-  "version": "v0.5.6",
+  "version": "v0.6.0",
   "features": {
     "review_gate": true,
     "product_files": true,
@@ -23,7 +23,7 @@ itself start or stop a local component. See the [roadmap](../ROADMAP.md#later).
 }
 ```
 
-"Where is this project?" then has a one-line answer, for example: *v0.5.6, everything on except the lifecycle and stand-up.*
+"Where is this project?" then has a one-line answer, for example: *v0.6.0, everything on except the lifecycle and stand-up.*
 
 ## Features
 

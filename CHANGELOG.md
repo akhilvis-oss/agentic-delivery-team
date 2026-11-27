@@ -2,6 +2,49 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## v0.6.0 (2026-11-27): Approve and walk away, installed by your own agent
+- **Install and upgrade by your own coding agent:**
+  - `INSTALL.md` and `UPGRADE.md` at each release tag;
+  - `release-files.json`, listing every carried file;
+  - a read-only checker, `scripts/verify_install.py`;
+  - a release hashes asset.
+
+  A switched-off lifecycle feature sleeps, and a missing kit file keeps the guard on (#246).
+- **The review tier comes from the gate's rules.** The runner chooses each PR's tier from the target's `.github/review-gate.json` and runs the gate's own check before pushing.
+  - **New "Needs a fix" stops:** `pr_evidence_incomplete` and `requirement_ids_unsupported`.
+  - **The example rules** default `requirement_ids` to `null` (#245).
+- **Approve and walk away:**
+  - one finished-story admission check (#177);
+  - a priority and dependency queue (#205);
+  - one continuation path, with no pasted commit IDs (#203);
+  - owner withdrawal with `status:draft` (#212);
+  - owner finish with `status:merged` (#184);
+  - same-job retries after sign-in and usage-limit failures (#211);
+  - an opt-in readiness check (#187);
+  - a no-change correction round goes back to review (#252);
+  - the continuation limit counts only re-approvals without new information (#257).
+- **Stops:** every stop has one notice, prefixed with its kind (#182, #202). Prerequisite stops name their fixed cause, and agent CLIs should be installed pinned (#253).
+- **The service:**
+  - per-story error isolation, and reused App tokens (#204);
+  - idle polls within a request budget (#176);
+  - records validated from trusted data (#175);
+  - one status-label writer (#221);
+  - status-name aliases and a rules version check (#222);
+  - following framework `main` after a passing smoke test, with a deadline for confirming a pending upgrade (#152, #169, #171);
+  - a bounded retry when macOS refuses to signal an exited process group (#197);
+  - the watchdog waits once after a wake (#251).
+- **Smoke test and CI:**
+  - smoke approval and guard-wait fixes (#160, #162, #170, #228), and Claude Code in smoke configuration (#172);
+  - macOS CI checks (#173), with a 30-minute limit (#242);
+  - tests run in parallel (#244);
+  - CI ignores PR description edits (#217).
+- **Process:**
+  - the product agent dry-runs every story (#164);
+  - Impact budgets in stories, dry runs and PRs (#237);
+  - quoted Owner decisions (#178);
+  - closed PR gates recorded as not checked (#179).
+- **Breaking, for adopters:** `.github/task-lifecycle.json` gains owner `draft` and `merged` transitions and `system_retry_minutes`. Apply them with `UPGRADE.md`, as listed in the release notes.
+
 ## v0.5.7 (2026-11-17): Delivery fix and the smoke test harness
 - **Fixed:** delivery asked GitHub for the repository's settings with a trailing slash, which GitHub rejects. Every light or standard story that reached the merge decision failed there, since v0.5.5 (#153).
 - **Fixed:** the replay test helper now serves a recording only for the exact request it was captured with, so a request built wrongly fails its test (#153).

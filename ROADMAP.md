@@ -22,13 +22,23 @@ Where the kit is heading. Plans change with feedback; each item links to its iss
 
 [v0.5.7](https://github.com/akhilvis-oss/agentic-delivery-team/releases/tag/v0.5.7) (patch): fixes delivery for light and standard stories, and adds the optional live smoke test and its watcher. Adopt v0.5.7 if you use delivery.
 
-## Next: a safety net, then a consolidated lifecycle
-A review on 14 November traced the failures since v0.5.3 to a few design causes. The next steps build on the current code and cut its paths down:
-- **Safety net** ([design note](docs/design/safety-net.md)): recorded GitHub responses as test fixtures, and a live smoke test that runs one tiny story with the real agent on candidate code before it is used.
-- **Consolidated lifecycle:** one way to continue a stopped story, four kinds of stop, a queue with dependencies, a readiness pass after approval, and guards so finished stories never reopen and one story's error can't stop another.
-- **Delivery policy:** tier chosen from the gate's rules or the story ([#115](https://github.com/akhilvis-oss/agentic-delivery-team/issues/115)), per-criterion review evidence, protected tests ([#80](https://github.com/akhilvis-oss/agentic-delivery-team/issues/80)), failed checks back to the builder ([#59](https://github.com/akhilvis-oss/agentic-delivery-team/issues/59)), and a verified direct merge where auto-merge isn't available.
-- Later in this track: parallel stories ([#76](https://github.com/akhilvis-oss/agentic-delivery-team/issues/76)) and readable stand-ups ([#68](https://github.com/akhilvis-oss/agentic-delivery-team/issues/68)).
+## v0.6.0: Approve and walk away, installed by your own agent (released)
+v0.6.0 bundles the safety net and the consolidated lifecycle:
+- **Safety net:** recorded GitHub responses as test fixtures, and a live smoke test.
+- **The consolidated lifecycle:**
+  - one way to continue a stopped story, and four kinds of stop with one notice each;
+  - a queue with dependencies, and a readiness pass;
+  - guards so finished stories never reopen and one story's error can't stop another;
+  - owner withdrawal, and finishing a story with `status:merged`.
+- **The review tier** is chosen from the gate's rules ([#245](https://github.com/akhilvis-oss/agentic-delivery-team/issues/245)).
+- **Install and upgrade** by your own coding agent, from `INSTALL.md` and `UPGRADE.md` with a read-only checker ([#246](https://github.com/akhilvis-oss/agentic-delivery-team/issues/246)).
 
+See the [changelog](CHANGELOG.md).
+
+## Next: parallel lanes and speed
+- **Runner-coordinated parallel lanes** ([#56](https://github.com/akhilvis-oss/agentic-delivery-team/issues/56)): two members build at once. The runner starts and resumes agents, relays questions, assigns slots, and merges one PR at a time while main's CI is green.
+- **Speed:** fewer git processes per runner check, and a shared test repository.
+- **Later:** per-criterion review evidence, protected tests ([#80](https://github.com/akhilvis-oss/agentic-delivery-team/issues/80)), failed checks back to the builder ([#59](https://github.com/akhilvis-oss/agentic-delivery-team/issues/59)), and display-only status groups ([#180](https://github.com/akhilvis-oss/agentic-delivery-team/issues/180)).
 ## v0.6: Set up and run without touching config
 For owners who only talk to their product agent.
 - **Owner-tunable settings** ([#81](https://github.com/akhilvis-oss/agentic-delivery-team/issues/81)): inactivity-based time limits instead of a fixed timeout; behaviour settings in an owner-merged repository file the product agent can propose changes to; a story size field.
