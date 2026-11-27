@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -470,6 +471,26 @@ def test_uncertain_issue_create_is_discovered_and_closed(tmp_path, monkeypatch):
     assert not stopped
     assert ("PATCH", "/issues/1", {"state": "closed"}) in client.calls
     assert not any(path.endswith("/labels") for _, path, _ in client.calls)
+
+
+def test_smoke_visible_marker_story_remains_one_click_approvable(tmp_path, monkeypatch):
+    import copy
+    from test_lifecycle import Hub, policy
+
+    cfg, client, _, _ = run_setup(tmp_path, monkeypatch, (6, True, "owner_merge_required"))
+    assert smoke.run(cfg, "main") == 0
+    created, = [data for method, path, data in client.calls if method == "POST" and path == "/issues"]
+    assert re.search(r"(?m)^Smoke run: [a-f0-9]{32}$", created["body"])
+    assert core.story_hidden_content(created["body"]) is None
+    lifecycle_cfg = policy(tmp_path)
+    hub = Hub(lifecycle_cfg)
+    issue = hub.issue(state="draft", body=created["body"])
+    hub.event(1, "approved", "owner")
+    issue["labels"].append({"name": "status:draft"})
+    core.attest_approval(lifecycle_cfg, hub.client("workflow"), dict(
+        action="labeled", label={"name": "status:approved"},
+        sender={"login": lifecycle_cfg["actors"]["owner"]}, issue=copy.deepcopy(issue)))
+    assert core.records(lifecycle_cfg, hub.client().comments(1), 1)[0]["kind"] == "approval"
 
 
 def test_child_group_is_killed_after_grace_period(monkeypatch):
