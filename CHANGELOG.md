@@ -2,6 +2,10 @@
 
 All notable changes, newest first. Versions follow semantic versioning; while the major version is 0, any release may change behaviour. See each [release](https://github.com/akhilvis-oss/agentic-delivery-team/releases) for details.
 
+## Unreleased
+- **Owner review for runner and digest code:** this repository now classifies `runner/*` and `digest/*` as control-critical while retaining their domain-critical patterns and failure-mode evidence (#269).
+- **Adopter migration:** add `lifecycle/*` to the control-critical patterns in your own `.github/review-gate.json`. The lifecycle guard runs this code with issue-write access; the adopter template now includes this pattern (#269).
+
 ## v0.6.0 (2026-11-27): Approve and walk away, installed by your own agent
 - **Install and upgrade by your own coding agent:**
   - `INSTALL.md` and `UPGRADE.md` at each release tag;

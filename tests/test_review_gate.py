@@ -342,7 +342,41 @@ def test_repository_config_is_valid_and_protects_the_gate():
                  "starter-kit/PRODUCT_AGENT.md", "starter-kit/docs/product/vision.md"):
         assert gate.file_tier(path, repo_cfg) == "control-critical", path
     assert gate.file_tier("docs/guide.md", repo_cfg) == "light"
-    assert gate.file_tier("runner/agent_task_runner.py", repo_cfg) == "domain-critical"
+    assert gate.file_tier("runner/agent_task_runner.py", repo_cfg) == "control-critical"
+
+
+@pytest.mark.parametrize("path", [
+    "runner/task_runner.py", "runner/nested/task.py",
+    "digest/render.py", "digest/nested/render.py",
+])
+def test_repository_runner_and_digest_require_control_and_domain_evidence(path):
+    repo_cfg = gate.load_config(ROOT / ".github/review-gate.json")
+    minimum, present, forcing = gate.required_tiers([path], repo_cfg)
+    assert minimum == "control-critical"
+    assert present == {"control-critical", "domain-critical"}
+    assert forcing == [path]
+
+    text = complete(body("control-critical", control(False))).replace(REPO, repo_cfg["repo_url"])
+    evidence = ("## Failure-mode verification\n"
+                "Failure cases: synthetic gate regression.\n"
+                "Recovery: revert the config change.\n"
+                "Concurrency: independent changed-file classification.\n")
+    errors = gate.validate(pr(text), [path], repo_cfg)
+    assert any("Failure-mode verification" in error for error in errors)
+    assert gate.validate(pr(text + evidence), [path], repo_cfg) == []
+    for line in evidence.splitlines()[1:]:
+        missing = (text + evidence).replace(line + "\n", "")
+        assert any(line.split(":", 1)[0] in error
+                   for error in gate.validate(pr(missing), [path], repo_cfg))
+
+
+@pytest.mark.parametrize("path", ["lifecycle/core.py", "lifecycle/nested/guard.py"])
+def test_template_lifecycle_requires_control_critical(path):
+    template_cfg = gate.load_config(ROOT / "templates/review-gate.example.json")
+    minimum, present, forcing = gate.required_tiers([path], template_cfg)
+    assert minimum == "control-critical"
+    assert present == {"control-critical"}
+    assert forcing == [path]
 
 
 @pytest.mark.parametrize("template, config_path, extra", [
