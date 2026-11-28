@@ -23,6 +23,8 @@ Terminal or Keychain tool; do not capture that prompt or its output.
 
 Ask the owner for the target release tag, the target repository checkout and feature
 choices. Start with the gate-only defaults unless the owner chooses more.
+App authentication supports macOS Keychain and protected Linux key files, including WSL2.
+The launchd service templates require macOS; Linux service management is separate.
 
 The agent assigns `TAG`, `RELEASE_REPO`, `EXPORT`, `RELEASE_JSON` and `CHECKOUT` to
 owner-approved values. The three release paths are new scratch locations outside the
@@ -160,8 +162,25 @@ MIT notice with the copied code and never overwrite the project's own licence. `
   requests, Checks and Actions read. Runner needs Issues write, plus Contents write,
   Pull requests write, Checks read and Actions read when integration is enabled.
   Metadata read is implicit. Do not request administration or workflow write. The
-  owner stores each base64 PEM using their interactive Keychain tool, with references
-  only in their private App-auth config. Do not open their private config afterwards.
+  owner stores each base64 PEM using their interactive Keychain tool on macOS.
+  On Linux, the owner installs one unencrypted PEM per App as the lifecycle service
+  OS user, in one 0700 folder outside every repository, with each file owned by that
+  user and mode 0600. The build user is a different OS user; 0600 keeps it out.
+  The owner runs these commands in their own terminal (replace placeholders):
+
+  ```sh
+  install -d -m 700 <key-folder>
+  install -m 600 <downloaded-key> <key-folder>/<app>.pem
+  rm -- <downloaded-key>
+  ```
+
+  Do not make another copy. Set each App's absolute `key_file` in private config,
+  replacing both `keychain_service` and `keychain_account`; never combine sources.
+  All ancestors must be root/service-user owned and not group/other writable, with
+  no symlinks or `.git` entries. `/tmp` and WSL Windows drives are refused. Files
+  must have no POSIX ACL or special mode bits. See the lifecycle docs for OpenSSL
+  requirements and examples. Keep references only in the private App-auth config.
+  Do not open the owner's private config afterwards.
   Using the owner's populated private config, run the fixed command
   `python3 -I "$EXPORT/lifecycle/core.py" --config "$PRIVATE_CONFIG" setup-labels`. Ask the owner to
   install the matching lifecycle and watchdog launchd templates with unique labels,

@@ -26,8 +26,8 @@
     },
     "framework_runner": {
       "app_id": "<FRAMEWORK_RUNNER_APP_ID_INTEGER>",
-      "keychain_service": "<FRAMEWORK_RUNNER_KEYCHAIN_SERVICE>",
-      "keychain_account": "<FRAMEWORK_RUNNER_KEYCHAIN_ACCOUNT>"
+      "key_file": "/<PROTECTED_KEY_FOLDER>/<APP>.pem",
+      "openssl_path": "/usr/bin/openssl"
     }
   },
   "runner": {

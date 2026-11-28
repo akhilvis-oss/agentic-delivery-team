@@ -16,8 +16,8 @@
     },
     "runner": {
       "app_id": "<RUNNER_APP_ID_INTEGER>",
-      "keychain_service": "<RUNNER_KEYCHAIN_SERVICE>",
-      "keychain_account": "<MACOS_ACCOUNT>"
+      "key_file": "/<PROTECTED_KEY_FOLDER>/<APP>.pem",
+      "openssl_path": "/usr/bin/openssl"
     }
   }
 }
