@@ -422,6 +422,28 @@ def test_json_placeholder_line_uses_effective_duplicate_field(adopter, field):
     assert f'.github/review-gate.json FAIL placeholder still unfilled; line {line}' in output
 
 
+def test_unchanged_shipped_pr_template_passes_adopter_validation(adopter):
+    name = '.github/pull_request_template.md'
+    shipped = (ROOT / 'templates/pull_request_template.md').read_bytes()
+    (adopter / name).write_bytes(shipped)
+    commit(adopter)
+    assert command(adopter, 'show', 'HEAD:' + name) == shipped
+    code, output = verify(adopter)
+    assert code == 0, output
+    assert name + ' PASS adopter validation' in output.splitlines()
+
+
+def test_roadmap_comment_does_not_hide_unfilled_date(adopter):
+    name = 'docs/product/roadmap.md'
+    edit_json(adopter, '.github/agentic-kit.json',
+              lambda value: value['features'].update(product_files=True))
+    (adopter / name).write_text('<!-- roadmap note -->\n<date>\n')
+    commit(adopter)
+    code, output = verify(adopter)
+    assert code == 1
+    assert name + ' FAIL placeholder still unfilled; line 2' in output.splitlines()
+
+
 @pytest.mark.parametrize(('name', 'text', 'expected'), [
     ('AGENTS.md', '<country>.<ISIN>.<exchange>', 0),
     ('AGENTS.md', '<date>', 0),  # Token belongs only to the roadmap.
