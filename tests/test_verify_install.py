@@ -430,6 +430,9 @@ def test_json_placeholder_line_uses_effective_duplicate_field(adopter, field):
     ('docs/product/roadmap.md', 'filled\n<#issue>', 1),
 ])
 def test_only_exact_same_template_tokens_fail(adopter, name, text, expected):
+    if name == 'docs/product/roadmap.md':
+        edit_json(adopter, '.github/agentic-kit.json',
+                  lambda value: value['features'].update(product_files=True))
     (adopter / name).write_text(text)
     commit(adopter)
     code, output = verify(adopter)
@@ -437,6 +440,17 @@ def test_only_exact_same_template_tokens_fail(adopter, name, text, expected):
     if expected:
         assert name + ' FAIL placeholder still unfilled; line 2' in output
         assert text not in output
+
+
+@pytest.mark.parametrize('text', ['filled\n<date>', 'filled\n<#issue>'])
+def test_unfilled_roadmap_is_skipped_in_gate_only_install(adopter, text):
+    name = 'docs/product/roadmap.md'
+    (adopter / name).write_text(text)
+    commit(adopter)
+    code, output = verify(adopter)
+    assert code == 0
+    assert name + ' PASS present; feature off, validation skipped' in output
+    assert text not in output
 
 
 @pytest.mark.parametrize('sentinel', ['repo-url', 'sample-rule', 'filled-owner-url'])

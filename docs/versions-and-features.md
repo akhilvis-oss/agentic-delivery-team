@@ -14,7 +14,7 @@ itself start or stop a local component. See the [roadmap](../ROADMAP.md#later).
   "version": "v0.6.0",
   "features": {
     "review_gate": true,
-    "product_files": true,
+    "product_files": false,
     "runner": false,
     "pool": false,
     "lifecycle": false,
@@ -29,12 +29,15 @@ itself start or stop a local component. See the [roadmap](../ROADMAP.md#later).
 
 | Feature | What it is | Needs |
 | --- | --- | --- |
-| `review_gate` | Trusted review gate and its categories | Gate script, config, workflow; Actions policy on public repositories |
-| `product_files` | `PRODUCT_AGENT.md`, `docs/product/`, story template, troubleshooting playbook, dry-run guide (`docs/dry-run.md`) | Copy from the starter kit |
+| `review_gate` | Trusted review gate and its categories | Gate script, config, workflow, `AGENTS.md`, PR template and an Actions policy on public repositories |
+| `product_files` | `PRODUCT_AGENT.md`, `docs/product/`, story template | Copy from the starter kit |
 | `runner` | Task runner: delegated builder, fresh reviewer, runner-made commit, runner-run tests | Private runner install and config on your machine |
 | `pool` | Several agent slots in parallel with cross-review | `runner`, plus a private pool config |
 | `lifecycle` | Status labels, guard workflow, approval by label, automatic dispatch | `runner`, plus the guard workflow, public policy file, labels, bot Apps and the service on your machine |
 | `standup` | Daily stand-up issue | `lifecycle`, plus a stand-up config |
+
+The framework always carries the troubleshooting playbook
+(`docs/agentic-delivery-troubleshooting.md`) and dry-run guide (`docs/dry-run.md`).
 
 ## Upgrading
 Follow `UPGRADE.md` at the verified release tag. Every framework file is updated from

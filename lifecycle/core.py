@@ -2492,7 +2492,7 @@ def trusted_gate(cfg, client, pr, *, strict_snapshot=False):
                 break
         if len(runs) != total:
             return "unavailable"
-        path = cfg.get("trusted_gate_workflow", ".github/workflows/pr-review-gate.yml")
+        path = cfg.get("trusted_gate_workflow", ".github/workflows/review-gate.yml")
         workflow = client.request(
             "GET", "/actions/workflows/" + urllib.parse.quote(Path(path).name)
         )

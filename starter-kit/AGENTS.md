@@ -1,6 +1,8 @@
 # <PROJECT_NAME>: agent working agreement
 
-Every coding agent working in this repository follows this agreement. The **owner** decides scope, accepts outcomes and authorises merges. Read `docs/product/vision.md`, `docs/product/roadmap.md` and `docs/product/decision-log.md` before starting a task.
+## Working agreement
+
+Every coding agent working in this repository follows this agreement. The **owner** decides scope, accepts outcomes and authorises merges. If `features.product_files` is `true` in `.github/agentic-kit.json`, read `docs/product/vision.md`, `docs/product/roadmap.md` and `docs/product/decision-log.md` before starting a task.
 
 ## Repository boundaries
 - This agreement covers **<OWNER>/<REPOSITORY> only**. Do not create, edit, push, merge, or open or close issues or PRs in any other repository.
@@ -8,7 +10,7 @@ Every coding agent working in this repository follows this agreement. The **owne
 - If a task seems to need another repository, stop and ask the owner.
 
 ## Source of truth
-- The product docs and the issue are the truth, not chat memory or earlier conversations. If they disagree with what you remember, follow the repository and say so.
+- The issue is the source of truth. If `features.product_files` is `true` in `.github/agentic-kit.json`, use the product docs with it. Follow the repository when it disagrees with an earlier conversation and say so.
 - Work only on stories the owner has approved.
 - Copy each story's acceptance criteria into the PR **verbatim**, with their `AC-N` IDs.
 
