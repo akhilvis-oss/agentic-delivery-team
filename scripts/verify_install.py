@@ -176,7 +176,7 @@ def json_line(text, keys):
 
 def validate_adopter(name, data, template=b'', *, repo=None):
     text = data.decode()
-    tokens = set(PLACEHOLDER.findall(template.decode()))
+    tokens = {token for token in PLACEHOLDER.findall(template.decode()) if not token.startswith('<!')}
     for number, line in enumerate(text.splitlines(), 1):
         if any(token in line for token in tokens):
             raise Fault(f'placeholder still unfilled; line {number}')
