@@ -579,3 +579,24 @@ def test_upgrade_accepts_existing_smoke_agent_identifier(tmp_path, monkeypatch):
     cfg, _ = configured(tmp_path, monkeypatch)
     cfg['upgrade']['smoke_agent'] = 'a' * 80
     upgrade.validate(cfg['upgrade'])
+
+
+def test_upgrade_role_check_accepts_linux_key_settings(tmp_path, monkeypatch):
+    # Platform and API facts mocked; no actual service or private config is used.
+    from test_lifecycle_app_tokens import configured as app_config
+    cfg = app_config(tmp_path)
+    monkeypatch.setattr(app_tokens.sys, 'platform', 'linux')
+    for role in cfg['app_auth']:
+        cfg['app_auth'][role] = {'app_id': cfg['app_auth'][role]['app_id'],
+                                 'key_file': '/synthetic/key.pem'}
+    monkeypatch.setattr(core, 'load_config', lambda path: cfg)
+    monkeypatch.setattr(service, 'validate_local', lambda config: None)
+    seen = []
+    def mint(config, role, **options):
+        app_tokens.validate(config['app_auth'][role], role)
+        seen.append(role)
+        return 'synthetic', 9999999999
+    monkeypatch.setattr(app_tokens, 'mint', mint)
+    app_tokens.clear_cache()
+    assert upgrade.check('synthetic-config') == 0
+    assert seen == ['product', 'runner']

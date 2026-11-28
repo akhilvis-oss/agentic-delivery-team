@@ -1,4 +1,4 @@
-"""macOS Keychain -> RS256 App JWT -> one-repository installation token.
+"""Keychain or protected Linux key -> RS256 JWT -> repository installation token.
 
 Credentials exist only in process memory/pipes. Never print this module's return
 values, HTTP bodies, subprocess output or exception details.
@@ -6,12 +6,15 @@ values, HTTP bodies, subprocess output or exception details.
 
 import base64
 import datetime as dt
+import errno
 import json
 import os
 import pwd
 import re
 import ssl
+import stat
 import subprocess
+import sys
 import time
 import threading
 import urllib.error
@@ -51,7 +54,8 @@ def validate(settings, role):
     if (
         role not in PERMISSIONS
         or not isinstance(settings, dict)
-        or set(settings) != {"app_id", "keychain_service", "keychain_account"}
+        or set(settings) - {"openssl_path"} not in (
+            {"app_id", "keychain_service", "keychain_account"}, {"app_id", "key_file"})
         or type(settings["app_id"]) is not int
         or settings["app_id"] < 1
         or any(
@@ -59,10 +63,155 @@ def validate(settings, role):
             or not settings[k]
             or len(settings[k]) > 200
             or any(ord(c) < 32 for c in settings[k])
-            for k in ("keychain_service", "keychain_account")
+            for k in ("keychain_service", "keychain_account") if k in settings
         )
+        or any(not isinstance(settings[k], str) or not settings[k].startswith("/")
+               or "\x00" in settings[k] or any(ord(c) < 32 for c in settings[k])
+               for k in ("key_file", "openssl_path") if k in settings)
     ):
         raise AuthenticationError("Invalid private App authentication settings")
+    if "key_file" in settings and sys.platform != "linux":
+        raise AuthenticationError(
+            "key_file is supported on Linux; use the Keychain on macOS")
+
+
+def _key_directory(fd):
+    info = os.fstat(fd)
+    if info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022:
+        raise AuthenticationError("Key file ancestor must have trusted ownership and permissions")
+    try:
+        os.stat(".git", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise AuthenticationError("Key file must be outside git working trees")
+
+
+def _key_metadata(fd):
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise AuthenticationError("Key file must be a regular file")
+    if info.st_size > 16384:
+        raise AuthenticationError("Key file exceeds 16 KiB")
+    if info.st_uid != os.geteuid():
+        raise AuthenticationError("Key file must be owned by the effective user")
+    if info.st_mode & 0o7077:
+        raise AuthenticationError("Key file must have owner-only permissions and no special bits")
+    try:
+        os.getxattr(fd, "system.posix_acl_access")
+    except OSError as error:
+        if error.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise AuthenticationError("Key file ACL could not be checked") from None
+    else:
+        raise AuthenticationError("Key file must not have a POSIX ACL")
+    return info
+
+
+def _key_mount(fd):
+    # Bind the mount check to the opened inode, including bind mounts. WSL's
+    # Windows-backed mounts are refused regardless of their chosen mount point.
+    try:
+        with open(f"/proc/self/fdinfo/{fd}", encoding="ascii") as source:
+            mount_id = next(line.split()[1] for line in source if line.startswith("mnt_id:"))
+        # Mount paths and sources are uninterpreted bytes, not ASCII text.
+        with open("/proc/self/mountinfo", mode="rb") as source:
+            filesystem = next(line.split(b" - ", 1)[1].split()[0]
+                              for line in source if line.split()[0] == mount_id.encode("ascii"))
+    except (OSError, ValueError, IndexError, StopIteration, UnicodeError):
+        raise AuthenticationError("Key file mount could not be checked") from None
+    if filesystem in {b"drvfs", b"9p"}:
+        raise AuthenticationError("Key file must be on a Linux filesystem, not a Windows drive")
+
+
+def file_pem(settings):
+    """Walk from / without symlinks; validate and read the same nonblocking fd."""
+    fd = None
+    try:
+        parts = settings["key_file"].split("/")[1:]
+        if not parts or any(p in {"", ".", ".."} for p in parts):
+            raise AuthenticationError("Invalid private App authentication settings")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        fd = os.open("/", flags | os.O_DIRECTORY)
+        for index, part in enumerate(parts):
+            _key_directory(fd)
+            try:
+                child = os.open(part, flags | (os.O_DIRECTORY if index < len(parts) - 1 else 0),
+                                dir_fd=fd)
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise AuthenticationError("Key file path must not contain symlinks") from None
+                raise
+            os.close(fd)
+            fd = child
+        before = _key_metadata(fd)
+        _key_mount(fd)
+        # Read exactly the observed length, then one bounded EOF probe. Short
+        # reads are retried; growth, shrinkage or metadata changes fail closed.
+        chunks, remaining = [], before.st_size
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                raise AuthenticationError("Key file changed while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise AuthenticationError("Key file changed while reading")
+        after = _key_metadata(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise AuthenticationError("Key file changed while reading")
+        pem = b"".join(chunks)
+        if not 128 <= len(pem) <= 16384 or b"PRIVATE " + b"KEY-----" not in pem:
+            raise AuthenticationError("Key file unavailable or malformed")
+        return pem
+    except (OSError, UnicodeError):
+        raise AuthenticationError("Key file unavailable or unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def signing_executable(settings):
+    """Resolve only through root-controlled components; never search PATH."""
+    path = settings.get("openssl_path", "/usr/bin/openssl")
+    try:
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError()
+        pending, resolved, links = path.split("/")[1:], [], 0
+        root = os.lstat("/")
+        if root.st_uid != 0 or root.st_mode & 0o022:
+            raise ValueError()
+        while pending:
+            part = pending.pop(0)
+            if part in ("", "."):
+                continue
+            if part == "..":
+                resolved = resolved[:-1]
+                continue
+            candidate = "/" + "/".join([*resolved, part])
+            info = os.lstat(candidate)
+            if info.st_uid != 0:
+                raise ValueError()
+            if stat.S_ISLNK(info.st_mode):
+                # Symlink mode bits are not access controls on Linux/macOS.
+                links += 1
+                if links > 40:
+                    raise ValueError()
+                target = os.readlink(candidate)
+                if target.startswith("/"):
+                    resolved = []
+                pending = target.split("/") + pending
+                continue
+            if info.st_mode & 0o022 or (pending and not stat.S_ISDIR(info.st_mode)):
+                raise ValueError()
+            resolved.append(part)
+        result = "/" + "/".join(resolved)
+        info = os.stat(result, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o022 or not os.access(result, os.X_OK)):
+            raise ValueError()
+        return result
+    except (OSError, ValueError):
+        raise AuthenticationError("App JWT signing executable unavailable or unsafe") from None
 
 
 def keychain_pem(settings):
@@ -97,6 +246,7 @@ def b64(value):
 
 
 def jwt(settings, pem, at):
+    executable = signing_executable(settings)
     message = b".".join(
         (
             b64(b'{"alg":"RS256","typ":"JWT"}'),
@@ -119,7 +269,7 @@ def jwt(settings, pem, at):
         write_fd = None
         result = subprocess.run(
             [
-                "/usr/bin/openssl",
+                executable,
                 "dgst",
                 "-sha256",
                 "-sign",
@@ -209,7 +359,8 @@ def mint(cfg, role, *, comments_only=False, integration_enabled=False,
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise AuthenticationError("Invalid target repository")
     opener = opener or urllib.request.build_opener(NoRedirect)
-    credential = jwt(settings, keychain_pem(settings), at)
+    credential = jwt(settings, file_pem(settings) if "key_file" in settings
+                     else keychain_pem(settings), at)
     try:
         app = request(opener, credential, "GET", "/app")
         actor = app["slug"] + "[bot]"

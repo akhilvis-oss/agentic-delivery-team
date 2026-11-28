@@ -460,3 +460,14 @@ def test_cleanup_retains_branch_when_fetch_or_ownership_changes(tmp_path, monkey
         other = tmp_path / "other"
         assert command(other, "branch", "--show-current") == claim["branch"]
         assert command(other, "rev-parse", "HEAD") == head
+
+
+def test_fetch_accepts_linux_key_settings(tmp_path, monkeypatch):
+    # Linux platform is mocked; transport is disposable local git, mint synthetic.
+    monkeypatch.setattr(app_tokens.sys, "platform", "linux")
+    cfg, _, _, remote, minted, _ = transport(tmp_path, monkeypatch)
+    cfg["app_auth"]["runner"] = {"app_id": 1, "key_file": "/synthetic/key.pem"}
+    core.private(cfg["state_dir"])
+    head = service.fetch_target(cfg)
+    assert head == command(remote, "rev-parse", "target")
+    assert minted == [{"fetch_enabled": True, "integration_enabled": False}]
